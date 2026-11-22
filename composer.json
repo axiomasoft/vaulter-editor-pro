@@ -1,0 +1,42 @@
+{
+    "name": "axiomasoft/vaulter-editor-pro-monorepo",
+    "description": "Vaulter Editor Pro — review, comments, compare and DOCX (private monorepo workspace).",
+    "type": "project",
+    "license": "proprietary",
+    "homepage": "https://github.com/axiomasoft/vaulter-editor-pro",
+    "authors": [
+        {
+            "name": "Dmitry Vostrikov",
+            "email": "dv.vostrikov@gmail.com"
+        }
+    ],
+    "support": {
+        "issues": "https://github.com/axiomasoft/vaulter-editor-pro/issues",
+        "source": "https://github.com/axiomasoft/vaulter-editor-pro"
+    },
+    "repositories": [
+        {
+            "type": "path",
+            "url": "packages/*",
+            "options": {
+                "symlink": true,
+                "versions": {
+                    "axiomasoft/vaulter-editor-pro-review": "1.0.x-dev",
+                    "axiomasoft/vaulter-editor-pro-exchange": "1.0.x-dev"
+                }
+            }
+        }
+    ],
+    "require": {
+        "php": ">=8.4 <8.6"
+    },
+    "minimum-stability": "dev",
+    "prefer-stable": true,
+    "config": {
+        "sort-packages": true
+    },
+    "scripts": {
+        "test": "@php vendor/bin/phpunit -c phpunit.xml.dist",
+        "phpstan": "@php vendor/bin/phpstan analyse -c phpstan.neon.dist --no-progress"
+    }
+}

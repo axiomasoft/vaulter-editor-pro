@@ -1,0 +1,64 @@
+{
+    "schema": "vaulter.release/v2",
+    "php": [
+        {
+            "name": "axiomasoft/vaulter-editor-pro-review",
+            "path": "packages/review",
+            "split": "axiomasoft/vaulter-editor-pro-review",
+            "channel": "private",
+            "release_line": "php-editor-pro-review",
+            "tag_prefix": "editor-pro-review-v",
+            "license": "proprietary",
+            "access": "restricted",
+            "tested_ranges": {
+                "axiomasoft/vaulter-core": "^1.0",
+                "axiomasoft/vaulter-drive": "^1.0",
+                "axiomasoft/vaulter-documents": "^1.0",
+                "axiomasoft/vaulter-media": "^1.0"
+            }
+        },
+        {
+            "name": "axiomasoft/vaulter-editor-pro-exchange",
+            "path": "packages/exchange",
+            "split": "axiomasoft/vaulter-editor-pro-exchange",
+            "channel": "private",
+            "release_line": "php-editor-pro-exchange",
+            "tag_prefix": "editor-pro-exchange-v",
+            "license": "proprietary",
+            "access": "restricted",
+            "tested_ranges": {
+                "axiomasoft/vaulter-core": "^1.0",
+                "axiomasoft/vaulter-drive": "^1.0",
+                "axiomasoft/vaulter-documents": "^1.0",
+                "axiomasoft/vaulter-media": "^1.0"
+            }
+        }
+    ],
+    "npm": [
+        {
+            "name": "@vaulter/editor-pro-docx",
+            "path": "packages/docx",
+            "api": "1",
+            "channel": "private",
+            "release_line": "npm-editor-pro-docx",
+            "tag_prefix": "@vaulter/editor-pro-docx@",
+            "registry": "https://registry.npmjs.org",
+            "access": "restricted",
+            "tested_ranges": {}
+        },
+        {
+            "name": "@vaulter/editor-pro-vue",
+            "path": "packages/vue",
+            "api": "1",
+            "channel": "private",
+            "release_line": "npm-editor-pro-vue",
+            "tag_prefix": "@vaulter/editor-pro-vue@",
+            "registry": "https://registry.npmjs.org",
+            "access": "restricted",
+            "tested_ranges": {
+                "@vaulter/vue": "^1.0"
+            }
+        }
+    ],
+    "images": []
+}
