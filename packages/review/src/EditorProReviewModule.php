@@ -19,7 +19,10 @@ use Packman\Plugins\Contracts\Registry\ExtensionPlugin;
 use Packman\Plugins\Data\Plugin\PluginManifest;
 use Packman\Plugins\Laravel\PluginRegistrar;
 use Vaulter\Contracts\Routing\RouteLabelSource;
+use Vaulter\Documents\Contracts\RevisionPruneProtection;
+use Vaulter\Documents\Contracts\SnapshotWriteHook;
 use Vaulter\Drive\Contracts\DriveExtension;
+use Vaulter\EditorPro\Review\Anchors\SnapshotAnchorReconciler;
 use Vaulter\EditorPro\Review\Configuration\ReviewOptions;
 use Vaulter\EditorPro\Review\Errors\ReviewProblemDefinitions;
 use Vaulter\EditorPro\Review\Http\Problems\ReviewProblemCodes;
@@ -28,6 +31,7 @@ use Vaulter\EditorPro\Review\Operations\AnchoredCommentOperations;
 use Vaulter\EditorPro\Review\Operations\ReviewOperationPolicies;
 use Vaulter\EditorPro\Review\Operations\RevisionPinOperations;
 use Vaulter\EditorPro\Review\Providers\ReviewBindings;
+use Vaulter\EditorPro\Review\Repositories\RevisionPinRepository;
 use Vaulter\EditorPro\Review\Schema\ReviewSchema;
 use Vaulter\EditorPro\Review\Schema\ReviewSchemaSets;
 use Vaulter\EditorPro\Review\Sinks\RestoreAnchorTransitionSink;
@@ -130,6 +134,8 @@ final class EditorProReviewModule implements ExtensionPlugin, WithConfiguration,
             ['slot' => DriveExtension::class, 'id' => 'review.pins', 'implementation' => RevisionPinOperations::class, 'key' => RevisionPinOperations::class],
             ['slot' => DriveExtension::class, 'id' => 'review.comments', 'implementation' => AnchoredCommentOperations::class, 'key' => AnchoredCommentOperations::class],
             ['slot' => EventSink::class, 'id' => RestoreAnchorTransitionSink::ID, 'implementation' => RestoreAnchorTransitionSink::class],
+            ['slot' => SnapshotWriteHook::class, 'id' => 'review.snapshot-anchors', 'implementation' => SnapshotAnchorReconciler::class, 'key' => 'review'],
+            ['slot' => RevisionPruneProtection::class, 'id' => 'review.revision-pins', 'implementation' => RevisionPinRepository::class, 'key' => 'review'],
         ];
     }
 

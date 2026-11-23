@@ -54,8 +54,8 @@ describe('OOXML Units, Style Cascade, ID Allocator & Anchor Mapping', () => {
           <w:rPrDefault><w:rPr><w:sz w:val="22"/><w:color w:val="111111"/></w:rPr></w:rPrDefault>
           <w:pPrDefault><w:pPr><w:spacing w:after="120" w:line="240"/></w:pPr></w:pPrDefault>
         </w:docDefaults>
-        <w:style w:type="table" w:styleId="TblGrid"><w:rPr><w:b/></w:rPr></w:style>
-        <w:style w:type="paragraph" w:styleId="BaseP"><w:pPr><w:ind w:left="360"/></w:pPr></w:style>
+        <w:style w:type="table" w:styleId="TblGrid"><w:pPr><w:rPr><w:b/></w:rPr></w:pPr></w:style>
+        <w:style w:type="paragraph" w:styleId="BaseP"><w:pPr><w:ind w:left="360"/><w:rPr><w:strike/></w:rPr></w:pPr></w:style>
         <w:style w:type="paragraph" w:styleId="ChildP"><w:basedOn w:val="BaseP"/><w:pPr><w:jc w:val="center"/></w:pPr></w:style>
         <w:style w:type="character" w:styleId="StrongChar"><w:rPr><w:i/></w:rPr></w:style>
       </w:styles>`,
@@ -66,7 +66,8 @@ describe('OOXML Units, Style Cascade, ID Allocator & Anchor Mapping', () => {
     const resolvedP = registry.resolveParagraph({
       tblStyleId: 'TblGrid',
       pStyleId: 'ChildP',
-      inlinePPr: { indentLeftDxa: null, spacingBeforeDxa: 0 },
+      numPrProps: { indentRightDxa: 180, run: { underline: 'single' } },
+      inlinePPr: { indentLeftDxa: null, spacingBeforeDxa: 0, run: { colorHex: '222222' } },
     })
 
     // null inline indentLeftDxa MUST inherit 360 from BaseP rather than becoming 0; explicit 0 overrides!
@@ -74,7 +75,8 @@ describe('OOXML Units, Style Cascade, ID Allocator & Anchor Mapping', () => {
     expect(resolvedP.spacingBeforeDxa).toBe(0)
     expect(resolvedP.spacingAfterDxa).toBe(120)
     expect(resolvedP.textAlign).toBe('center')
-    expect(resolvedP.run.bold).toBe(true)
+    expect(resolvedP.indentRightDxa).toBe(180)
+    expect(resolvedP.run).toMatchObject({ bold: true, strike: true, underline: 'single', colorHex: '222222' })
 
     const resolvedRun = registry.resolveRun({
       paragraphStyle: resolvedP,

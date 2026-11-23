@@ -1,6 +1,4 @@
 import type {
-  AnchoredCommentLike,
-  DocxDiscussionInput,
   DocxProfileId,
   DocxProjectionMode,
   DocxSectionInput,
@@ -34,7 +32,7 @@ export type DocxExportInput =
   | {
       document: TipTapDoc
       sections?: DocxSectionInput[]
-      discussions?: Array<DocxDiscussionInput | AnchoredCommentLike>
+      discussions?: ToIntermediateOptions['discussions']
       replacementGroups?: ToIntermediateOptions['replacementGroups']
       sourceMarker?: SourceMarker | null
       title?: string | null
@@ -48,7 +46,7 @@ export interface ExportDocxOptions extends ProfileFeatureOptions {
   projection?: DocxProjectionMode
   sourceMarker?: SourceMarker | null
   sections?: DocxSectionInput[]
-  discussions?: Array<DocxDiscussionInput | AnchoredCommentLike>
+  discussions?: ToIntermediateOptions['discussions']
   throwOnBlocked?: boolean
 }
 

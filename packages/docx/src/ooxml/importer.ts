@@ -24,7 +24,7 @@ import { getProfileCapabilities, type ProfileFeatureOptions } from '../model/pro
 import { LossReportBuilder } from '../model/lossReport'
 import { DocxSecurityError, type ZipQuotas, type ZipReader } from '../zip/guard'
 import { isValidOoxmlHexId } from './ids'
-import { extractParagraphProps, extractRunProps, StyleRegistry } from './styles'
+import { extractParagraphProps, extractRunProps, StyleRegistry, type ParagraphStyleProperties } from './styles'
 import { isSafeHyperlinkUrl, normalizeHexColor, parseOoxmlWidth } from './units'
 import {
   decodeUtf8,
@@ -146,9 +146,30 @@ function parseRelationships(
   return map
 }
 
-function parseNumbering(xmlNode: XmlElementNode | null): Map<number, NumberingDefinition> {
-  const abstractDefs = new Map<number, { kind: 'bullet' | 'ordered'; start: number; format: string }>()
-  const numMap = new Map<number, NumberingDefinition>()
+interface NumberingLevel extends Omit<NumberingDefinition, 'numId'> {
+  paragraph: ParagraphStyleProperties
+}
+
+interface ParsedNumbering {
+  definition: NumberingDefinition
+  levels: Map<number, NumberingLevel>
+}
+
+function parseNumberingLevel(level: XmlElementNode): NumberingLevel {
+  const format = getAttr(findChild(level, 'numFmt') ?? level, 'w:val', 'val') ?? 'decimal'
+  const startEl = findChild(level, 'start')
+  const start = Number.parseInt(getAttr(startEl ?? level, 'w:val', 'val') ?? '1', 10)
+  return {
+    kind: format === 'bullet' ? 'bullet' : 'ordered',
+    start: Number.isFinite(start) ? start : 1,
+    format,
+    paragraph: extractParagraphProps(findChild(level, 'pPr')),
+  }
+}
+
+function parseNumbering(xmlNode: XmlElementNode | null): Map<number, ParsedNumbering> {
+  const abstractDefs = new Map<number, Map<number, NumberingLevel>>()
+  const numMap = new Map<number, ParsedNumbering>()
 
   if (!xmlNode) {
     return numMap
@@ -159,16 +180,12 @@ function parseNumbering(xmlNode: XmlElementNode | null): Map<number, NumberingDe
     if (!Number.isFinite(absId)) {
       continue
     }
-    const lvl0 = findChildren(abs, 'lvl').find((l) => getAttr(l, 'w:ilvl', 'ilvl') === '0') ?? findChild(abs, 'lvl')
-    const numFmtEl = lvl0 ? findChild(lvl0, 'numFmt') : undefined
-    const startEl = lvl0 ? findChild(lvl0, 'start') : undefined
-    const format = getAttr(numFmtEl ?? abs, 'w:val', 'val') ?? 'decimal'
-    const startRaw = startEl ? Number.parseInt(getAttr(startEl, 'w:val', 'val') ?? '1', 10) : 1
-    abstractDefs.set(absId, {
-      kind: format === 'bullet' ? 'bullet' : 'ordered',
-      start: Number.isFinite(startRaw) ? startRaw : 1,
-      format,
-    })
+    const levels = new Map<number, NumberingLevel>()
+    for (const lvl of findChildren(abs, 'lvl')) {
+      const index = Number.parseInt(getAttr(lvl, 'w:ilvl', 'ilvl') ?? '0', 10)
+      if (Number.isFinite(index)) levels.set(index, parseNumberingLevel(lvl))
+    }
+    abstractDefs.set(absId, levels)
   }
 
   for (const numEl of findChildren(xmlNode, 'num')) {
@@ -179,20 +196,22 @@ function parseNumbering(xmlNode: XmlElementNode | null): Map<number, NumberingDe
     if (!Number.isFinite(numId) || !base) {
       continue
     }
-    let start = base.start
-    const lvlOverride = findChild(numEl, 'lvlOverride')
-    const startOverride = lvlOverride ? findChild(lvlOverride, 'startOverride') : undefined
-    if (startOverride) {
-      const overrideVal = Number.parseInt(getAttr(startOverride, 'w:val', 'val') ?? '', 10)
-      if (Number.isFinite(overrideVal)) {
-        start = overrideVal
-      }
+    const levels = new Map(base)
+    for (const override of findChildren(numEl, 'lvlOverride')) {
+      const index = Number.parseInt(getAttr(override, 'w:ilvl', 'ilvl') ?? '0', 10)
+      if (!Number.isFinite(index)) continue
+      const lvl = findChild(override, 'lvl')
+      const effective = lvl ? parseNumberingLevel(lvl) : levels.get(index)
+      if (!effective) continue
+      const startOverride = findChild(override, 'startOverride')
+      const start = startOverride ? Number.parseInt(getAttr(startOverride, 'w:val', 'val') ?? '', 10) : NaN
+      levels.set(index, { ...effective, start: Number.isFinite(start) ? start : effective.start })
     }
+    const { kind = 'ordered', start = 1, format = 'decimal' } =
+      levels.get(0) ?? levels.values().next().value ?? {}
     numMap.set(numId, {
-      numId,
-      kind: base.kind,
-      start,
-      format: base.format,
+      definition: { numId, kind, start, format },
+      levels,
     })
   }
 
@@ -511,7 +530,7 @@ function parseCommentsParts(
 
 interface ParseContext {
   styles: StyleRegistry
-  numbering: Map<number, NumberingDefinition>
+  numbering: Map<number, ParsedNumbering>
   rels: ReadonlyMap<string, ParsedRelationship>
   diagnostics: LossReportBuilder
   formattingRevisions: FormattingRevisionRecord[]
@@ -658,27 +677,32 @@ function parseParagraph(
   const pStyleEl = pPr ? findChild(pPr, 'pStyle') : undefined
   const pStyleId = pStyleEl ? getAttr(pStyleEl, 'w:val', 'val') ?? null : null
   const inlinePPr = extractParagraphProps(pPr)
-  const resolvedP = ctx.styles.resolveParagraph({ tblStyleId, pStyleId, inlinePPr })
   const sectionEl = pPr ? findChild(pPr, 'sectPr') ?? null : null
 
   let listBinding: ParagraphAttrs['list'] = null
+  let numPrProps: ParagraphStyleProperties | undefined
   const numPr = pPr ? findChild(pPr, 'numPr') : undefined
   if (numPr) {
     const numIdEl = findChild(numPr, 'numId')
     const ilvlEl = findChild(numPr, 'ilvl')
     const numId = Number.parseInt(getAttr(numIdEl ?? numPr, 'w:val', 'val') ?? '', 10)
-    const level = Number.parseInt(getAttr(ilvlEl ?? numPr, 'w:val', 'val') ?? '0', 10)
-    const def = ctx.numbering.get(numId)
-    if (Number.isFinite(numId) && def) {
+    const rawLevel = Number.parseInt(getAttr(ilvlEl ?? numPr, 'w:val', 'val') ?? '0', 10)
+    const level = Number.isFinite(rawLevel) ? rawLevel : 0
+    const numbering = ctx.numbering.get(numId)
+    if (numbering) {
+      const levelDefinition = numbering.levels.get(level)
+      const def = levelDefinition ?? numbering.definition
+      numPrProps = levelDefinition?.paragraph
       listBinding = {
         kind: def.kind,
-        level: Number.isFinite(level) ? level : 0,
+        level,
         numId,
         start: def.start,
         format: def.format,
       }
     }
   }
+  const resolvedP = ctx.styles.resolveParagraph({ tblStyleId, pStyleId, numPrProps, inlinePPr })
 
   // block_join deletion in <w:pPr><w:rPr><w:del .../></w:rPr></w:pPr>
   let blockJoinDeletion: ParagraphAttrs['blockJoinDeletion'] = null
@@ -1421,7 +1445,7 @@ export async function importOoxmlToIntermediate(
   }
 
   // Check if document has customXml/word/comments and missing numbering definitions used
-  const numberingList = [...numbering.values()]
+  const numberingList = Array.from(numbering.values(), ({ definition }) => definition)
 
   return {
     schema: DOCX_MODEL_SCHEMA,

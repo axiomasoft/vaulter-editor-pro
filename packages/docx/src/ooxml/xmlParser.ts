@@ -17,11 +17,34 @@ const ORDERED_PARSER = new XMLParser({
   ignoreAttributes: false,
   attributeNamePrefix: '@_',
   preserveOrder: true,
+  cdataPropName: '#cdata',
   trimValues: false,
   parseTagValue: false,
   parseAttributeValue: false,
   removeNSPrefix: false,
 })
+
+const XML_ENTITIES: Record<string, string> = {
+  amp: '&',
+  lt: '<',
+  gt: '>',
+  quot: '"',
+  apos: "'",
+}
+
+// Saxes has already validated the references and code points. Decode once so
+// an escaped reference such as &amp;lt; stays literal.
+function decodeXmlReferences(value: string): string {
+  return value.replace(/&(amp|lt|gt|quot|apos|#[0-9]+|#x[0-9a-fA-F]+);/g, (_match, reference: string) => {
+    if (reference.startsWith('#x')) {
+      return String.fromCodePoint(Number.parseInt(reference.slice(2), 16))
+    }
+    if (reference.startsWith('#')) {
+      return String.fromCodePoint(Number.parseInt(reference.slice(1), 10))
+    }
+    return XML_ENTITIES[reference]
+  })
+}
 
 const FORBIDDEN_XML_CONSTRUCT_RE = /<!\s*(?:DOCTYPE|ENTITY|ELEMENT|ATTLIST)\b|<[A-Za-z0-9_-]*:include\b|http:\/\/www\.w3\.org\/2001\/XInclude/i
 
@@ -90,7 +113,7 @@ function convertOrderedEntry(raw: Record<string, unknown>): XmlElementNode | nul
   const attrs: Record<string, string> = {}
   for (const [k, v] of Object.entries(rawAttrs)) {
     const attrName = k.startsWith('@_') ? k.slice(2) : k
-    attrs[attrName] = String(v)
+    attrs[attrName] = decodeXmlReferences(String(v))
   }
 
   const rawChildren = Array.isArray(raw[name]) ? (raw[name] as Array<Record<string, unknown>>) : []
@@ -99,7 +122,12 @@ function convertOrderedEntry(raw: Record<string, unknown>): XmlElementNode | nul
 
   for (const childRaw of rawChildren) {
     if ('#text' in childRaw) {
-      text += String(childRaw['#text'])
+      text += decodeXmlReferences(String(childRaw['#text']))
+      continue
+    }
+    if ('#cdata' in childRaw) {
+      const cdata = childRaw['#cdata'] as Array<{ '#text': string }>
+      text += cdata.map((entry) => entry['#text']).join('')
       continue
     }
     const converted = convertOrderedEntry(childRaw)

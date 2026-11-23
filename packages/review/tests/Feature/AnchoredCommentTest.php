@@ -9,6 +9,7 @@ use Vaulter\Documents\Data\Comments\AddCommentInput;
 use Vaulter\Documents\DocumentsManager;
 use Vaulter\Drive\Access\Roles\RoleRegistry;
 use Vaulter\Drive\Data\ListOptions;
+use Vaulter\Drive\Exceptions\Nodes\NodeNotFoundException;
 use Vaulter\Drive\Testing\Access\AccessTestHelpers;
 use Vaulter\Drive\Vaulter;
 use Vaulter\EditorPro\Review\Anchors\SnapshotAnchorResolver;
@@ -349,6 +350,30 @@ it('rolls back the delegated comment if the generation changes after the prelimi
         ->and($review->list($doc)->items)->toBe([]);
 });
 
+it('refuses to reopen a comment when the node is trashed after the preliminary authorization', function (): void {
+    $owner = AccessTestHelpers::user(1);
+    $storage = AccessTestHelpers::storage();
+    AccessTestHelpers::grant($storage->rootNode, RoleRegistry::OWNER, subjectId: 1);
+    $drive = app(Vaulter::class)->drive($storage)->actingAs($owner);
+    $doc = app(DocumentsManager::class)->in($drive)->create('reopen-after-trash', 'vaulter/rich-text', makeTextBlockDoc('hello'));
+    $review = app(ReviewManager::class)->comments($drive);
+    $comment = $review->add($doc, new AddAnchoredCommentInput('Resolved note'));
+    $resolved = $review->resolve($doc, $comment->comment->id);
+
+    $trashed = false;
+    $table = app(DatabaseOptions::class)->table('node_comments');
+    app(VaulterDatabase::class)->connection()->listen(function (QueryExecuted $query) use ($doc, $drive, $table, &$trashed): void {
+        if (! $trashed && str_starts_with($query->sql, 'select') && str_contains($query->sql, 'from "'.$table.'"')) {
+            $trashed = true;
+            $drive->nodes()->trash($doc);
+        }
+    });
+
+    expect(fn () => $review->reopen($doc, $resolved->comment->id, expectedVersion: $resolved->comment->version))
+        ->toThrow(NodeNotFoundException::class);
+    expect($trashed)->toBeTrue();
+});
+
 it('handles snapshot edit narrowing, full-deletion detach without losing replies, reanchor, and restore-detach', function (): void {
     $owner = AccessTestHelpers::user(1);
     $storage = AccessTestHelpers::storage();
@@ -393,7 +418,7 @@ it('handles snapshot edit narrowing, full-deletion detach without losing replies
     // 1. Delete 'X' right before 'hello' + insert 'Z' immediately after 'hello' ("👋 helloZ world").
     // Start has assoc=0 and end has assoc=-1, so Z does NOT expand range!
     $shiftedDoc = makeTextBlockDoc('👋 helloZ world', 'blk_main');
-    $review->comments($drive)->reconcileSnapshot($doc, $shiftedDoc, $oldDoc);
+    $docs->in($drive)->update($doc, $shiftedDoc);
     $afterShift = $review->comments($drive)->find($doc, $root->comment->id);
     expect($afterShift->anchor->anchorState)->toBe(AnchorState::Attached)
         ->and($afterShift->anchor->selectorPayload['from_utf16'])->toBe(3)
@@ -402,7 +427,7 @@ it('handles snapshot edit narrowing, full-deletion detach without losing replies
 
     // Insert at exact right edge: range still [3, 8] ("hello").
     $appendRightDoc = makeTextBlockDoc('👋 hello! world', 'blk_main');
-    $review->comments($drive)->reconcileSnapshot($doc, $appendRightDoc, $shiftedDoc);
+    $docs->in($drive)->update($doc, $appendRightDoc);
     $afterAppend = $review->comments($drive)->find($doc, $root->comment->id);
     expect($afterAppend->anchor->selectorPayload['from_utf16'])->toBe(3)
         ->and($afterAppend->anchor->selectorPayload['to_utf16'])->toBe(8)
@@ -410,7 +435,7 @@ it('handles snapshot edit narrowing, full-deletion detach without losing replies
 
     // 2. Partial deletion of leading "hel" -> range narrows to [3, 5] ("lo").
     $partialDelDoc = makeTextBlockDoc('👋 lo! world', 'blk_main');
-    $review->comments($drive)->reconcileSnapshot($doc, $partialDelDoc, $appendRightDoc);
+    $docs->in($drive)->update($doc, $partialDelDoc);
     $afterPartial = $review->comments($drive)->find($doc, $root->comment->id);
     expect($afterPartial->anchor->anchorState)->toBe(AnchorState::Attached)
         ->and($afterPartial->anchor->selectorPayload['from_utf16'])->toBe(3)
@@ -419,7 +444,8 @@ it('handles snapshot edit narrowing, full-deletion detach without losing replies
 
     // 3. Complete deletion of target -> transitions to Detached, keeps quoteText ("lo") & sourcePosition & replies!
     $fullDelDoc = makeTextBlockDoc('👋 ! world', 'blk_main');
-    $review->comments($drive)->reconcileSnapshot($doc, $fullDelDoc, $partialDelDoc);
+    $saved = $docs->in($drive)->update($doc, $fullDelDoc);
+    expect($saved->epoch)->toBe(0);
     $afterFull = $review->comments($drive)->find($doc, $root->comment->id);
     expect($afterFull->anchor->anchorState)->toBe(AnchorState::Detached)
         ->and($afterFull->anchor->quoteText)->toBe('lo')

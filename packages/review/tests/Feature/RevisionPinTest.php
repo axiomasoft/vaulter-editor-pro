@@ -56,6 +56,7 @@ it('pins a revision so pruning keeps it, serves preview/compare across compactio
     $pin = $review->pins($ownerDrive)->pin($docNode, $revH, new PinRevisionInput(PinReason::ReviewBase));
     expect($pin->revisionId)->toBe($revH->id)
         ->and($pin->pinReason)->toBe(PinReason::ReviewBase);
+    expect($docs->in($ownerDrive)->setRetention($docNode, $revH, keepForever: false)->keepForever)->toBeFalse();
 
     // Push past revisions.limit = 2 with unpinned checkpoints so compaction/pruning deletes intermediate rows.
     for ($i = 1; $i <= 4; $i++) {
@@ -110,6 +111,34 @@ it('pins a revision so pruning keeps it, serves preview/compare across compactio
         ->assertJsonPath('code', 'node_not_found');
 });
 
+it('protects a temporary pin until expiry without setting Documents retention', function (): void {
+    config()->set('vaulter-documents.revisions.limit', 1);
+
+    $owner = AccessTestHelpers::user(1);
+    $storage = AccessTestHelpers::storage();
+    AccessTestHelpers::grant($storage->rootNode, RoleRegistry::OWNER, subjectId: 1);
+    $drive = app(Vaulter::class)->drive($storage)->actingAs($owner);
+    $documents = app(DocumentsManager::class)->in($drive);
+    $pins = app(ReviewManager::class)->pins($drive);
+    $node = $documents->create('temporary-pin', 'vaulter/rich-text', richDocContent('Retained until expiry'));
+    $revision = $documents->snapshot($node, 'pinned');
+    $expires = new DateTimeImmutable('+10 minutes');
+    $pins->pin($node, $revision, new PinRevisionInput(PinReason::ManualVersion, $expires));
+
+    $documents->snapshot($node, 'newer');
+    $documents->snapshot($node, 'newest');
+    expect($pins->preview($node, $revision)->revision->keepForever)->toBeFalse();
+
+    Carbon::setTestNow(Carbon::instance($expires)->addMinute());
+    try {
+        $documents->snapshot($node, 'after expiry');
+        expect(array_map(static fn (DocumentRevisionSnapshot $item): string => $item->id, $documents->revisions($node)->items))
+            ->not->toContain($revision->id);
+    } finally {
+        Carbon::setTestNow();
+    }
+});
+
 it('rejects past expiry, supports expired pin cleanup, and scrubs unsafe link URLs on preview', function (): void {
     $owner = AccessTestHelpers::user(1);
     $storage = AccessTestHelpers::storage();
@@ -147,13 +176,17 @@ it('rejects past expiry, supports expired pin cleanup, and scrubs unsafe link UR
     ))->toThrow(InvalidAnchorSelectorException::class);
 
     $future = new DateTimeImmutable('+10 minutes');
+    $preRetained = $docs->in($drive)->snapshot($docNode, 'pre-retained', keepForever: true);
     $review->pins($drive)->pin($docNode, $rev, new PinRevisionInput(PinReason::ManualVersion, $future));
-    expect($review->pins($drive)->list($docNode))->toHaveCount(1);
+    $review->pins($drive)->pin($docNode, $preRetained, new PinRevisionInput(PinReason::ManualVersion, $future));
+    expect($review->pins($drive)->list($docNode))->toHaveCount(2);
 
     Carbon::setTestNow(Carbon::instance($future)->addMinute());
     try {
         expect($review->pins($drive)->list($docNode))->toHaveCount(0);
-        expect($review->pins($drive)->releaseExpired($docNode, releaseRetention: true))->toBe(1);
+        expect($review->pins($drive)->releaseExpired($docNode, releaseRetention: true))->toBe(2)
+            ->and($docs->in($drive)->content($docNode, $preRetained)->revision?->keepForever)->toBeTrue()
+            ->and($docs->in($drive)->content($docNode, $rev)->revision?->keepForever)->toBeFalse();
     } finally {
         Carbon::setTestNow();
     }

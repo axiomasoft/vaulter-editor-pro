@@ -7,6 +7,8 @@ namespace Vaulter\EditorPro\Review\Repositories;
 use DateTimeImmutable;
 use Illuminate\Support\Carbon;
 use Packman\Attributes\Internal;
+use Vaulter\Documents\Contracts\RevisionPruneProtection;
+use Vaulter\EditorPro\Review\Configuration\ReviewOptions;
 use Vaulter\EditorPro\Review\Data\RevisionPinData;
 use Vaulter\EditorPro\Review\Enums\PinReason;
 use Vaulter\EditorPro\Review\Models\DocumentRevisionPin;
@@ -14,9 +16,24 @@ use Vaulter\Support\Identity;
 
 /** Persistence repository for `v_document_revision_pins`. */
 #[Internal]
-final readonly class RevisionPinRepository
+final readonly class RevisionPinRepository implements RevisionPruneProtection
 {
-    public function __construct(private ReviewLookup $lookup) {}
+    public function __construct(private ReviewLookup $lookup, private ReviewOptions $options) {}
+
+    public function protectedRevisionIds(string $documentId): array
+    {
+        if (! $this->options->enforceRetention) {
+            return [];
+        }
+
+        return array_map(
+            Identity::stringify(...),
+            DocumentRevisionPin::query()->where('document_id', $documentId)
+                ->where(static fn ($query) => $query->whereNull('expires_at')->orWhere('expires_at', '>', Carbon::now()))
+                ->pluck('revision_id')
+                ->all(),
+        );
+    }
 
     public function upsert(
         string|int $revisionId,
@@ -111,33 +128,16 @@ final readonly class RevisionPinRepository
         return (bool) $model->delete();
     }
 
-    /** @return list<string> purged expired revision IDs for a document (or all documents when null) */
-    public function deleteExpired(string|int|null $documentId = null): array
+    public function deleteExpired(string|int $documentId): int
     {
-        $now = Carbon::now();
-        $query = DocumentRevisionPin::query()
-            ->whereNotNull('expires_at')
-            ->where('expires_at', '<=', $now);
-
-        if ($documentId !== null) {
-            if (! $this->lookup->fitsKey($documentId)) {
-                return [];
-            }
-            $query->where('document_id', $documentId);
+        if (! $this->lookup->fitsKey($documentId)) {
+            return 0;
         }
 
-        $rows = $query->get();
-        if ($rows->isEmpty()) {
-            return [];
-        }
-
-        $ids = [];
-        foreach ($rows as $row) {
-            $ids[] = Identity::stringify($row->revision_id);
-            $row->delete();
-        }
-
-        return $ids;
+        return DocumentRevisionPin::query()
+            ->where('document_id', $documentId)
+            ->where('expires_at', '<=', Carbon::now())
+            ->delete();
     }
 
     private function findModel(string|int $revisionId, string|int $documentId): ?DocumentRevisionPin

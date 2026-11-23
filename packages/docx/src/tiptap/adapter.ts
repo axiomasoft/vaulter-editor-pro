@@ -44,12 +44,14 @@ import {
   twipsToPixels,
 } from '../ooxml/units'
 
+export type DiscussionInput = DocxDiscussionInput | IntermediateDiscussion | AnchoredCommentLike
+
 export interface ToIntermediateOptions extends ProfileFeatureOptions {
   profile?: DocxProfileId
   projection?: DocxProjectionMode
   sourceMarker?: SourceMarker | null
   sections?: DocxSectionInput[]
-  discussions?: Array<DocxDiscussionInput | AnchoredCommentLike>
+  discussions?: DiscussionInput[]
   replacementGroups?: ReplacementGroupMetadata[]
   title?: string | null
   creator?: string | null
@@ -76,7 +78,7 @@ export interface FromIntermediateResult {
   model: IntermediateDocument
 }
 
-function isAnchoredCommentLike(value: DocxDiscussionInput | AnchoredCommentLike): value is AnchoredCommentLike {
+function isAnchoredCommentLike(value: DiscussionInput): value is AnchoredCommentLike {
   return 'parent_id' in value && 'body' in value
 }
 
@@ -875,18 +877,18 @@ function attachSnapshotAnchorsToBlocks(
 }
 
 function normalizeDiscussionsInput(
-  rawList: readonly (DocxDiscussionInput | AnchoredCommentLike)[] | undefined,
+  rawList: readonly DiscussionInput[] | undefined,
 ): IntermediateDiscussion[] {
   if (!rawList || rawList.length === 0) {
     return []
   }
-  const hasAnchored = rawList.some((item) => isAnchoredCommentLike(item))
-  const inputs: DocxDiscussionInput[] = hasAnchored
-    ? anchoredCommentsToDocxDiscussions(rawList as AnchoredCommentLike[])
-    : (rawList as DocxDiscussionInput[])
+  const inputs = [
+    ...rawList.filter((item): item is DocxDiscussionInput | IntermediateDiscussion => !isAnchoredCommentLike(item)),
+    ...anchoredCommentsToDocxDiscussions(rawList.filter(isAnchoredCommentLike)),
+  ]
 
   return inputs.map((item) => {
-    const comments: IntermediateComment[] = item.comments.map((c) => ({
+    const comments: IntermediateComment[] = item.comments.map((c) => 'bodyParagraphs' in c ? c : ({
       id: c.id,
       parentId: c.parentId ?? null,
       author: c.author,

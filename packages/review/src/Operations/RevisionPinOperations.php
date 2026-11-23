@@ -30,7 +30,6 @@ use Vaulter\EditorPro\Review\Exceptions\InvalidAnchorSelectorException;
 use Vaulter\EditorPro\Review\Exceptions\RevisionPinNotFoundException;
 use Vaulter\EditorPro\Review\Idempotency\RevisionPinReceiptCodec;
 use Vaulter\EditorPro\Review\Idempotency\RevisionPinReplayAuthorizer;
-use Vaulter\EditorPro\Review\Repositories\CommentAnchorRepository;
 use Vaulter\EditorPro\Review\Repositories\ReviewLookup;
 use Vaulter\EditorPro\Review\Repositories\RevisionPinRepository;
 use Vaulter\EditorPro\Review\Support\ReviewDriveHandle;
@@ -55,7 +54,6 @@ final readonly class RevisionPinOperations implements DriveExtension
         private OperationRunner $runner,
         private ReviewLookup $lookup,
         private RevisionPinRepository $pins,
-        private CommentAnchorRepository $anchors,
         private ReviewOptions $options,
     ) {}
 
@@ -82,8 +80,8 @@ final readonly class RevisionPinOperations implements DriveExtension
     }
 
     /**
-     * Pin an immutable revision in `v_document_revision_pins` and set `keep_forever = true`
-     * on `v_document_revisions` so compaction/pruning cannot purge it.
+     * Pin an immutable revision. An indefinite pin also sets the Documents retention flag
+     * when retention enforcement is enabled.
      */
     public function pin(
         NodeSnapshot|string|int $document,
@@ -123,19 +121,15 @@ final readonly class RevisionPinOperations implements DriveExtension
                     throw PermissionDeniedException::forAbility($ability->value);
                 }
 
-                // Read revision through Documents::content (checks node/revision existence and View ACL).
                 $docOps = $this->documents->forContext($this->context);
-                $revSnapshot = $docOps->content($node->id, $revisionId);
-                $revisionMeta = $revSnapshot->revision;
-                if ($revisionMeta === null) {
-                    throw RevisionPinNotFoundException::forRevision($node->id, $revisionId);
-                }
+                $docOps->lockForRelatedWrite($node->id);
+                $revisionMeta = $docOps->content($node->id, $revisionId)->revision
+                    ?? throw RevisionPinNotFoundException::forRevision($node->id, $revisionId);
 
-                $docRow = $this->lookup->documentForNode($node->id);
                 $pin = $this->pins->upsert(
                     revisionId: $revisionMeta->id,
-                    documentId: $docRow['id'],
-                    tenantId: $docRow['tenant_id'],
+                    documentId: $revisionMeta->documentId,
+                    tenantId: $this->lookup->tenantForDocument($revisionMeta->documentId),
                     reason: $input->reason,
                     sourceGeneration: $revisionMeta->epoch,
                     sourcePosition: $revisionMeta->stateVersion,
@@ -143,9 +137,8 @@ final readonly class RevisionPinOperations implements DriveExtension
                     expiresAt: $input->expiresAt,
                 );
 
-                if ($this->options->enforceRetention && ! $revisionMeta->keepForever) {
-                    // Use system handle on the same drive after explicit actor authorization above so
-                    // commenter-created history pins can also retain revisions.
+                if ($this->options->enforceRetention && $input->expiresAt === null && ! $revisionMeta->keepForever) {
+                    // The Review permission above also allows commenter-created history pins.
                     $systemDrive = $this->vaulter->findDriveById($this->context->operation->scope->id);
                     if ($systemDrive !== null) {
                         $this->documents->in($systemDrive->asSystem('review.pin_retention'))
@@ -196,6 +189,8 @@ final readonly class RevisionPinOperations implements DriveExtension
                     throw PermissionDeniedException::forAbility(Ability::Edit->value);
                 }
 
+                $docOps = $this->documents->forContext($this->context);
+                $docOps->lockForRelatedWrite($node->id);
                 $docRow = $this->lookup->documentForNode($node->id);
                 $deleted = $this->pins->delete($revisionId, $docRow['id']);
                 if (! $deleted) {
@@ -203,9 +198,7 @@ final readonly class RevisionPinOperations implements DriveExtension
                 }
 
                 if ($releaseRetention) {
-                    // Preserve retention if any comment anchor still references the revision's document & source state?
-                    // Note only release when explicitly requested and not otherwise constrained.
-                    $this->documents->forContext($this->context)->setRetention($node->id, $revisionId, keepForever: false);
+                    $docOps->setRetention($node->id, $revisionId, keepForever: false);
                 }
 
                 return true;
@@ -217,15 +210,15 @@ final readonly class RevisionPinOperations implements DriveExtension
     }
 
     /**
-     * Remove expired pins for a document and release retention if `$releaseRetention` is true
-     * and the revision has no remaining non-expired pin.
+     * Remove expired pins for a document. Pin protection ends at expiry.
+     * The legacy releaseRetention argument is accepted for existing callers.
      */
     public function releaseExpired(NodeSnapshot|string|int $document, bool $releaseRetention = true): int
     {
         $released = $this->runner->write(
             new OperationSpec('review.pins.release_expired', new ModuleId('review')),
             $this->context->operation,
-            function () use ($document, $releaseRetention): int {
+            function () use ($document): int {
                 $drive = $this->drive();
                 $this->assertActiveDrive($drive);
 
@@ -236,18 +229,8 @@ final readonly class RevisionPinOperations implements DriveExtension
                 }
 
                 $docRow = $this->lookup->documentForNode($node->id);
-                $expiredIds = $this->pins->deleteExpired($docRow['id']);
 
-                if ($releaseRetention) {
-                    $docOps = $this->documents->forContext($this->context);
-                    foreach ($expiredIds as $expiredRevisionId) {
-                        if ($this->anchors->listAttachedForDocument($docRow['id']) === []) {
-                            $docOps->setRetention($node->id, $expiredRevisionId, keepForever: false);
-                        }
-                    }
-                }
-
-                return count($expiredIds);
+                return $this->pins->deleteExpired($docRow['id']);
             },
         );
 

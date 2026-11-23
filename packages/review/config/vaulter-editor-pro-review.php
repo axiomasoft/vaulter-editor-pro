@@ -4,7 +4,7 @@ declare(strict_types=1);
 
 return [
     'pins' => [
-        // Automatically mark v_document_revisions.keep_forever = true when pinned.
+        // Protect active pins during pruning and mark indefinite pins keep_forever.
         'enforce_retention' => true,
     ],
     'anchors' => [

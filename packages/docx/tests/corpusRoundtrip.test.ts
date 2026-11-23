@@ -26,6 +26,50 @@ import {
 } from '../../../tests/corpus/docx/corpus'
 
 describe('DOCX Corpus D1–D4 Roundtrip & Loss Report (10.1-A)', () => {
+  it('decodes XML character references once and preserves literal CDATA', () => {
+    const root = parseXmlPart(
+      `<root attr="&lt;&gt;&quot;&apos;&amp;&#38;&#x1F44B;">&amp;lt;&#x3C;&#62;<![CDATA[&amp;]]></root>`,
+    )
+    expect(root.attrs.attr).toBe(`<>"'&&👋`)
+    expect(root.text).toBe('&lt;<>&amp;')
+  })
+
+  it('imports the referenced numbering level and applies its paragraph properties before inline overrides', async () => {
+    const ns = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'
+    const blank = await exportDocx({ type: 'doc', content: [{ type: 'paragraph' }] })
+    const entries = unzipSync(blank.binary!)
+    entries['word/numbering.xml'] = encodeUtf8(`
+      <w:numbering xmlns:w="${ns}">
+        <w:abstractNum w:abstractNumId="1">
+          <w:lvl w:ilvl="0"><w:pPr><w:ind w:left="240"/></w:pPr></w:lvl>
+          <w:lvl w:ilvl="1"><w:pPr><w:ind w:left="480"/></w:pPr></w:lvl>
+        </w:abstractNum>
+        <w:num w:numId="7">
+          <w:abstractNumId w:val="1"/>
+          <w:lvlOverride w:ilvl="1">
+            <w:startOverride w:val="4"/>
+            <w:lvl w:ilvl="1"><w:pPr><w:ind w:left="720" w:hanging="180"/><w:rPr><w:i/></w:rPr></w:pPr></w:lvl>
+          </w:lvlOverride>
+        </w:num>
+      </w:numbering>`)
+    entries['word/document.xml'] = encodeUtf8(`
+      <w:document xmlns:w="${ns}"><w:body>
+        <w:p><w:pPr><w:numPr><w:numId w:val="7"/></w:numPr></w:pPr><w:r><w:t>Root</w:t></w:r></w:p>
+        <w:p><w:pPr><w:numPr><w:ilvl w:val="1"/><w:numId w:val="7"/></w:numPr><w:ind w:left="960"/></w:pPr>
+          <w:r><w:t>Child &amp; sibling</w:t></w:r></w:p>
+      </w:body></w:document>`)
+
+    const imported = await importDocx(zipSync(entries), { profile: 'standard' })
+    expect(imported.model.sections[0].blocks).toMatchObject([
+      { type: 'paragraph', attrs: { indentLeftDxa: 240, list: { level: 0, start: 1 } } },
+      {
+        type: 'paragraph',
+        attrs: { indentLeftDxa: 960, indentFirstLineDxa: -180, list: { level: 1, start: 4 } },
+        inlines: [{ text: 'Child & sibling', marks: expect.arrayContaining([{ type: 'italic' }]) }],
+      },
+    ])
+  })
+
   it('D1: roundtrips body/table widths, header row, 2x2 merge, bold, link, lists, and units losslessly', async () => {
     const exported = await exportDocx(
       { document: CORPUS_D1.document, sourceMarker: CORPUS_D1.sourceMarker },
@@ -67,6 +111,7 @@ describe('DOCX Corpus D1–D4 Roundtrip & Loss Report (10.1-A)', () => {
       zipReader: nodeZipReader,
     })
     expect(rt.firstImport).toBeDefined()
+    expect(rt.firstImport!.model.sourceMarker).toEqual(CORPUS_D1.sourceMarker)
     expect(rt.exported.blocked).toBe(false)
     expect(rt.secondImport).not.toBeNull()
 
@@ -211,6 +256,11 @@ describe('DOCX Corpus D1–D4 Roundtrip & Loss Report (10.1-A)', () => {
     const detachedThread = discussions.find((d) => d.id === 'thread-detached')!
     expect(detachedThread.anchorState).toBe('detached')
     expect(detachedThread.comments).toHaveLength(2)
+
+    const tiptap = fromIntermediate(rt.firstImport!.model)
+    const fromTipTap = await exportDocx(tiptap, { profile: 'discussions' })
+    const reimported = await importDocx(fromTipTap.binary!, { profile: 'discussions' })
+    expect(reimported.model.discussions).toEqual(rt.firstImport!.model.discussions)
 
     // LibreOffice fallback: strip commentsExtended.xml & commentsIds.xml and verify import degrades gracefully
     const loEntries = { ...zip }

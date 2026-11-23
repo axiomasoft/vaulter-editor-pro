@@ -1,4 +1,4 @@
-import { computed, ref, shallowRef, toValue, watch, type ComputedRef, type MaybeRefOrGetter, type Ref, type ShallowRef } from 'vue'
+import { computed, ref, shallowRef, toRaw, toValue, watch, type ComputedRef, type MaybeRefOrGetter, type Ref, type ShallowRef } from 'vue'
 import {
   DOCX_PROFILE_IDS,
   exportDocx,
@@ -149,6 +149,19 @@ function assertConfirmedAccessible(source: LocalDocxSource): asserts source is L
   }
 }
 
+function unwrapWorkerPayload(value: unknown): unknown {
+  // The worker payload is JSON-shaped, and toRaw only unwraps the current level.
+  if (Array.isArray(value)) {
+    return toRaw(value).map(unwrapWorkerPayload)
+  }
+  if (value !== null && typeof value === 'object') {
+    return Object.fromEntries(
+      Object.entries(toRaw(value)).map(([key, nested]) => [key, unwrapWorkerPayload(nested)]),
+    )
+  }
+  return value
+}
+
 function runWorkerRequest(
   worker: Worker,
   request: DocxWorkerRequest,
@@ -183,7 +196,12 @@ function runWorkerRequest(
     }
     worker.addEventListener('message', onMessage)
     worker.addEventListener('error', onError)
-    worker.postMessage(request)
+    try {
+      worker.postMessage(unwrapWorkerPayload(request))
+    } catch (error) {
+      cleanup()
+      reject(error)
+    }
   })
 }
 

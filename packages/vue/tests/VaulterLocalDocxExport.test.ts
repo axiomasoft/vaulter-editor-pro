@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount } from '@vue/test-utils'
+import { reactive, shallowReactive } from 'vue'
 import {
   browserZipReader,
   compareSemanticReports,
@@ -48,7 +49,7 @@ function createMockWorkerFactory() {
         listeners.get(type)?.delete(fn)
       },
       postMessage(msg: DocxWorkerRequest) {
-        const evt = new MessageEvent('message', { data: msg })
+        const evt = new MessageEvent('message', { data: structuredClone(msg) })
         for (const fn of workerListeners.get('message') ?? []) {
           fn(evt)
         }
@@ -138,11 +139,13 @@ describe('VaulterLocalDocxExport & Offline Browser Parity (10.1-B)', () => {
       },
     ]
 
+    const sections = [{ ...CORPUS_D2.sections![0], blockCount: CORPUS_D1.document.content!.length }]
     const wrapper = mount(VaulterLocalDocxExport, {
       props: {
-        content: CORPUS_D1.document,
+        content: shallowReactive({ ...CORPUS_D1.document, content: reactive(CORPUS_D1.document.content!) }),
         revision: CONFIRMED_REVISION,
-        discussions: anchoredComments,
+        discussions: reactive(anchoredComments),
+        sections: shallowReactive([{ ...sections[0], headers: reactive(sections[0].headers!) }]),
         title: 'Confirmed Agreement',
         confirmed: true,
         accessible: true,
@@ -186,6 +189,7 @@ describe('VaulterLocalDocxExport & Offline Browser Parity (10.1-B)', () => {
       {
         document: CORPUS_D1.document,
         discussions: anchoredComments,
+        sections,
         title: 'Confirmed Agreement',
         sourceMarker: {
           nodeId: CONFIRMED_REVISION.node_id,

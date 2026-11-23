@@ -33,11 +33,15 @@ export interface ResolvedParagraphStyle {
   run: ResolvedRunStyle
 }
 
+export type ParagraphStyleProperties = Partial<Omit<ResolvedParagraphStyle, 'run'>> & {
+  run?: Partial<ResolvedRunStyle>
+}
+
 interface RawStyleDef {
   id: string
   type: string
   basedOn: string | null
-  pPr: Partial<ResolvedParagraphStyle>
+  pPr: ParagraphStyleProperties
   rPr: Partial<ResolvedRunStyle>
 }
 
@@ -128,11 +132,11 @@ export function extractRunProps(rPr: XmlElementNode | undefined): Partial<Resolv
   return out
 }
 
-export function extractParagraphProps(pPr: XmlElementNode | undefined): Partial<ResolvedParagraphStyle> {
+export function extractParagraphProps(pPr: XmlElementNode | undefined): ParagraphStyleProperties {
   if (!pPr) {
     return {}
   }
-  const out: Partial<ResolvedParagraphStyle> = {}
+  const out: ParagraphStyleProperties = {}
 
   const jc = findChild(pPr, 'jc')
   if (jc) {
@@ -184,7 +188,7 @@ export function extractParagraphProps(pPr: XmlElementNode | undefined): Partial<
 
   const rPr = findChild(pPr, 'rPr')
   if (rPr) {
-    out.run = extractRunProps(rPr) as ResolvedRunStyle
+    out.run = extractRunProps(rPr)
   }
 
   return out
@@ -201,6 +205,11 @@ function mergeDefined<T extends object>(base: T, overlay: Partial<T> | undefined
     }
   }
   return next
+}
+
+function mergeParagraphStyle(base: ResolvedParagraphStyle, overlay: ParagraphStyleProperties = {}): ResolvedParagraphStyle {
+  const { run, ...paragraph } = overlay
+  return { ...mergeDefined(base, paragraph), run: mergeDefined(base.run, run) }
 }
 
 const EMPTY_RUN_STYLE: ResolvedRunStyle = {
@@ -238,7 +247,7 @@ const EMPTY_PARAGRAPH_STYLE: ResolvedParagraphStyle = {
  */
 export class StyleRegistry {
   private readonly stylesById = new Map<string, RawStyleDef>()
-  private readonly defaultPPr: Partial<ResolvedParagraphStyle>
+  private readonly defaultPPr: ParagraphStyleProperties
   private readonly defaultRPr: Partial<ResolvedRunStyle>
 
   constructor(stylesRoot?: XmlElementNode | null) {
@@ -296,38 +305,27 @@ export class StyleRegistry {
   resolveParagraph(options: {
     tblStyleId?: string | null
     pStyleId?: string | null
-    numPrProps?: Partial<ResolvedParagraphStyle>
-    inlinePPr?: Partial<ResolvedParagraphStyle>
+    numPrProps?: ParagraphStyleProperties
+    inlinePPr?: ParagraphStyleProperties
   }): ResolvedParagraphStyle {
     let acc: ResolvedParagraphStyle = {
       ...EMPTY_PARAGRAPH_STYLE,
       run: { ...EMPTY_RUN_STYLE },
     }
-    acc = mergeDefined(acc, this.defaultPPr)
+    acc = mergeParagraphStyle(acc, this.defaultPPr)
     acc.run = mergeDefined(acc.run, this.defaultRPr)
 
     for (const def of this.resolveStyleChain(options.tblStyleId)) {
-      acc = mergeDefined(acc, def.pPr)
+      acc = mergeParagraphStyle(acc, def.pPr)
       acc.run = mergeDefined(acc.run, def.rPr)
     }
 
     for (const def of this.resolveStyleChain(options.pStyleId)) {
-      acc = mergeDefined(acc, def.pPr)
-      acc.run = mergeDefined(acc.run, def.pPr.run)
+      acc = mergeParagraphStyle(acc, def.pPr)
       acc.run = mergeDefined(acc.run, def.rPr)
     }
 
-    if (options.numPrProps) {
-      acc = mergeDefined(acc, options.numPrProps)
-      acc.run = mergeDefined(acc.run, options.numPrProps.run)
-    }
-
-    if (options.inlinePPr) {
-      acc = mergeDefined(acc, options.inlinePPr)
-      acc.run = mergeDefined(acc.run, options.inlinePPr.run)
-    }
-
-    return acc
+    return mergeParagraphStyle(mergeParagraphStyle(acc, options.numPrProps), options.inlinePPr)
   }
 
   resolveRun(options: {

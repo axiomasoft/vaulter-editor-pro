@@ -97,7 +97,7 @@ final readonly class CommentAnchorRepository
     }
 
     /** @return list<CommentAnchorData> */
-    public function listAttachedForDocument(string|int $documentId, ?int $generation = null): array
+    public function lockAttachedSnapshots(string|int $documentId, int $generation): array
     {
         if (! $this->lookup->fitsKey($documentId)) {
             return [];
@@ -105,11 +105,11 @@ final readonly class CommentAnchorRepository
 
         $query = DocumentCommentAnchor::query()
             ->where('document_id', $documentId)
-            ->where('anchor_state', AnchorState::Attached->value);
-
-        if ($generation !== null) {
-            $query->where('generation', $generation);
-        }
+            ->where('anchor_state', AnchorState::Attached->value)
+            ->where('selector_kind', SelectorKind::SnapshotUtf16->value)
+            ->where('generation', $generation)
+            ->orderBy('id')
+            ->lockForUpdate();
 
         return array_values($query->get()
             ->map(fn (DocumentCommentAnchor $row): CommentAnchorData => $this->toData($row))

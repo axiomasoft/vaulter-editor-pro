@@ -4,7 +4,6 @@ declare(strict_types=1);
 
 namespace Vaulter\EditorPro\Review\Operations;
 
-use Illuminate\Support\Carbon;
 use Packman\Attributes\Api;
 use Packman\Attributes\Internal;
 use Vaulter\Data\Page;
@@ -26,7 +25,7 @@ use Vaulter\Drive\Exceptions\Profiles\ProfileRestrictionException;
 use Vaulter\Drive\Operations\DriveContext;
 use Vaulter\Drive\Vaulter;
 use Vaulter\EditorPro\Review\Anchors\SelectorValidator;
-use Vaulter\EditorPro\Review\Anchors\SnapshotAnchorResolver;
+use Vaulter\EditorPro\Review\Anchors\SnapshotAnchorReconciler;
 use Vaulter\EditorPro\Review\Data\AddAnchoredCommentInput;
 use Vaulter\EditorPro\Review\Data\AnchoredCommentData;
 use Vaulter\EditorPro\Review\Data\CommentAnchorData;
@@ -69,7 +68,7 @@ final readonly class AnchoredCommentOperations implements DriveExtension
         private ReviewLookup $lookup,
         private CommentAnchorRepository $anchors,
         private SelectorValidator $selectorValidator,
-        private SnapshotAnchorResolver $snapshotResolver,
+        private SnapshotAnchorReconciler $snapshotReconciler,
     ) {}
 
     /**
@@ -407,58 +406,14 @@ final readonly class AnchoredCommentOperations implements DriveExtension
                 $drive = $this->driveWithoutIdempotency();
                 $this->assertMutableCommentsContext($drive);
 
-                $nodeSnapshot = $drive->nodes()->find($node);
-                $abilities = $drive->nodes()->abilities($nodeSnapshot->id)->flags;
-                if (! ($abilities[Ability::Comment->value] ?? false)) {
-                    throw PermissionDeniedException::forAbility(Ability::Comment->value);
-                }
-
-                $row = $this->lookup->lockCommentRow($nodeSnapshot->id, $commentId);
-                $rowAuthorType = is_string($row->author_type ?? null) ? $row->author_type : '';
-                $rowAuthorId = Identity::stringify($row->author_id ?? null);
-                $isAuthor = $rowAuthorType === $actorRef->type && $rowAuthorId === Identity::stringify($actorRef->id);
-
-                if (! $isAuthor && ! ($abilities[Ability::Edit->value] ?? false)) {
-                    throw PermissionDeniedException::forAbility(Ability::Edit->value);
-                }
-
-                if ($isAuthor) {
-                    $authorizer->provedByAuthorship();
-                }
-
-                $currentVersion = is_numeric($row->version ?? null) ? (int) $row->version : 0;
-                if ($expectedVersion !== null && $currentVersion !== $expectedVersion) {
-                    throw StaleWriteException::of('documents.comment', $commentId);
-                }
-
-                $now = Carbon::now();
-                $nextVersion = $currentVersion + 1;
-                $updatedRows = $this->lookup->connection()
-                    ->table($this->lookup->table('node_comments'))
-                    ->where('id', $commentId)
-                    ->where('node_id', $nodeSnapshot->id)
-                    ->where('version', $currentVersion)
-                    ->update([
-                        'resolved_at' => null,
-                        'resolved_by' => null,
-                        'version' => $nextVersion,
-                        'updated_at' => $now->toDateTimeString(),
-                    ]);
-
-                if ($updatedRows !== 1) {
-                    throw StaleWriteException::of('documents.comment', $commentId);
-                }
-
-                $reopened = $this->documents->comments($drive)->list($nodeSnapshot->id, new ListOptions(perPage: 100));
-                $commentSnapshot = null;
-                foreach ($reopened->items as $candidate) {
-                    if ($candidate->id === $commentId) {
-                        $commentSnapshot = $candidate;
-                        break;
+                try {
+                    $commentSnapshot = $this->documents->comments($drive)->reopen($node, $commentId, $expectedVersion);
+                } catch (StaleWriteException $stale) {
+                    $current = $this->find($node, $commentId)->comment;
+                    if ($current->authorType === $actorRef->type && $current->authorId === Identity::stringify($actorRef->id)) {
+                        $authorizer->provedByAuthorship();
                     }
-                }
-                if ($commentSnapshot === null) {
-                    $commentSnapshot = $this->find($nodeSnapshot->id, $commentId)->comment;
+                    throw $stale;
                 }
 
                 $anchor = $this->anchors->findByComment($commentId);
@@ -530,6 +485,10 @@ final readonly class AnchoredCommentOperations implements DriveExtension
                     throw PermissionDeniedException::forAbility(Ability::Comment->value);
                 }
 
+                if (! $nodeSnapshot->kind->isDocument()) {
+                    throw InvalidCommentStateException::targetIsNotDocument();
+                }
+                $this->documents->in($drive)->lockForRelatedWrite($nodeSnapshot->id);
                 $row = $this->lookup->lockCommentRow($nodeSnapshot->id, $commentId);
                 if ($row->parent_id !== null) {
                     throw InvalidCommentStateException::replyCannotCarryRangeAnchor();
@@ -634,35 +593,13 @@ final readonly class AnchoredCommentOperations implements DriveExtension
                     throw PermissionDeniedException::forAbility(Ability::Edit->value);
                 }
 
-                $doc = $this->lookup->documentForNode($nodeSnapshot->id);
-                $targetGeneration = $generation ?? $doc['collab_epoch'];
-
-                $results = [];
-                foreach ($this->anchors->listAttachedForDocument($doc['id'], $targetGeneration) as $anchor) {
-                    $resolution = $oldDoc !== null
-                        ? $this->snapshotResolver->resolveOnEdit($anchor, $oldDoc, $newDoc)
-                        : $this->snapshotResolver->resolveStateless($anchor, $newDoc);
-
-                    if (! $resolution->changed) {
-                        continue;
-                    }
-
-                    $results[] = $this->anchors->updateWithCas(
-                        commentId: $anchor->commentId,
-                        documentId: $doc['id'],
-                        generation: $anchor->generation,
-                        sourcePosition: $anchor->sourcePosition,
-                        schemaVersion: $anchor->schemaVersion,
-                        blockId: $anchor->blockId,
-                        selectorKind: $anchor->selectorKind,
-                        selectorPayload: $resolution->selectorPayload,
-                        quoteText: $resolution->quoteText,
-                        anchorState: $resolution->state,
-                        expectedVersion: $anchor->version,
-                    );
+                if (! $nodeSnapshot->kind->isDocument()) {
+                    throw InvalidCommentStateException::targetIsNotDocument();
                 }
+                $this->documents->in($drive)->lockForRelatedWrite($nodeSnapshot->id);
+                $doc = $this->lookup->documentForNode($nodeSnapshot->id);
 
-                return $results;
+                return $this->snapshotReconciler->reconcile($doc['id'], $generation ?? $doc['collab_epoch'], $newDoc, $oldDoc);
             },
         );
 
