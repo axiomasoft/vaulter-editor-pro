@@ -76,8 +76,11 @@ export type {
   UseLocalDocxExportReturn,
 } from './composables/useLocalDocxExport'
 export { attachDocxWorkerListener } from './docx/localExportWorker'
+export { useDocxExchange } from './composables/useDocxExchange'
+export type { UseDocxExchangeOptions, UseDocxExchangeReturn } from './composables/useDocxExchange'
 
 // Components
 export { default as VaulterHistoryCompare } from './components/VaulterHistoryCompare.vue'
 export { default as VaulterRangeComments } from './components/VaulterRangeComments.vue'
 export { default as VaulterLocalDocxExport } from './components/VaulterLocalDocxExport.vue'
+export { default as VaulterDocxExchange } from './components/VaulterDocxExchange.vue'

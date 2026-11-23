@@ -48,6 +48,13 @@ function makeMockClient(initial: AnchoredComment[]): ReviewClient {
       preview: vi.fn(),
       compare: vi.fn(),
     },
+    exchange: {
+      register: vi.fn(),
+      status: vi.fn(),
+      fileUrl: vi.fn().mockReturnValue('/api/vaulter/v1/documents/node-1/exchange-jobs/j1/file'),
+      download: vi.fn(),
+      apply: vi.fn(),
+    },
     comments: {
       list: vi.fn().mockImplementation(async () => ({
         data: store,

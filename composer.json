@@ -28,11 +28,20 @@
         },
         {
             "type": "path",
+            "url": "../vaulter-collaboration/packages/collaboration",
+            "options": {
+                "symlink": true,
+                "versions": {
+                    "axiomasoft/vaulter-collaboration": "1.0.x-dev"
+                }
+            }
+        },
+        {
+            "type": "path",
             "url": "../vaulter/packages/*",
             "options": {
                 "symlink": true,
                 "versions": {
-                    "axiomasoft/vaulter-collaboration": "1.0.x-dev",
                     "axiomasoft/vaulter-core": "1.0.x-dev",
                     "axiomasoft/vaulter-documents": "1.0.x-dev",
                     "axiomasoft/vaulter-drive": "1.0.x-dev",
@@ -57,6 +66,7 @@
     ],
     "require": {
         "php": ">=8.4 <8.6",
+        "axiomasoft/vaulter-editor-pro-exchange": "^1.0",
         "axiomasoft/vaulter-editor-pro-review": "^1.0"
     },
     "require-dev": {
@@ -75,6 +85,7 @@
     "autoload-dev": {
         "psr-4": {
             "Vaulter\\EditorPro\\Ci\\": "scripts/ci/",
+            "Vaulter\\EditorPro\\Exchange\\Tests\\": "packages/exchange/tests/",
             "Vaulter\\EditorPro\\Review\\Tests\\": "packages/review/tests/"
         }
     },
@@ -104,7 +115,10 @@
     "scripts": {
         "lint": "@php vendor/bin/pint",
         "lint:check": "@php vendor/bin/pint --test",
-        "test": "@php vendor/bin/pest -c phpunit.xml.dist --test-directory=packages/review/tests",
+        "test": [
+            "@php vendor/bin/pest -c phpunit.xml.dist --testsuite=review --test-directory=packages/review/tests",
+            "@php vendor/bin/pest -c phpunit.xml.dist --testsuite=exchange --test-directory=packages/exchange/tests"
+        ],
         "phpstan": "@php vendor/bin/phpstan analyse -c phpstan.neon.dist --memory-limit=1G --no-progress"
     }
 }

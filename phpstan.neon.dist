@@ -12,6 +12,8 @@ parameters:
     paths:
         - packages/review/src
         - packages/review/database
+        - packages/exchange/src
+        - packages/exchange/database
         - scripts/ci
     excludePaths:
         - vendor/*

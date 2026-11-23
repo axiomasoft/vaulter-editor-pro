@@ -1,10 +1,14 @@
 import { inject, provide, type InjectionKey } from 'vue'
 import type {
   AnchoredComment,
+  ApplyExchangeImportPayload,
+  ApplyExchangeReceipt,
   CommentAnchorInput,
   CommentFilterStatus,
   CursorPage,
+  ExchangeJob,
   PinReason,
+  RegisterExchangeJobPayload,
   RevisionCompare,
   RevisionPin,
   RevisionPreview,
@@ -59,6 +63,13 @@ export interface ReviewClient {
     reanchor(nodeId: string, commentId: string, anchor: CommentAnchorInput, anchorEtag: string, idempotencyKey?: string): Promise<AnchoredComment>
     remove(nodeId: string, commentId: string, etag: string): Promise<void>
   }
+  exchange: {
+    register(nodeId: string, input: RegisterExchangeJobPayload | FormData, idempotencyKey?: string): Promise<ExchangeJob>
+    status(nodeId: string, jobId: string, includePreview?: boolean): Promise<ExchangeJob>
+    fileUrl(nodeId: string, jobId: string): string
+    download(nodeId: string, jobId: string): Promise<Blob>
+    apply(nodeId: string, jobId: string, input: ApplyExchangeImportPayload, idempotencyKey?: string): Promise<ApplyExchangeReceipt>
+  }
 }
 
 function buildQueryString(query?: Record<string, string | number | boolean | null | undefined>): string {
@@ -85,6 +96,7 @@ export function createReviewClient(options: ReviewClientOptions = {}): ReviewCli
     init?: {
       query?: Record<string, string | number | boolean | null | undefined>
       json?: unknown
+      formData?: FormData
       etag?: string
       idempotencyKey?: string
     },
@@ -99,26 +111,17 @@ export function createReviewClient(options: ReviewClientOptions = {}): ReviewCli
       ...(init?.idempotencyKey ? { 'Idempotency-Key': init.idempotencyKey } : {}),
     }
 
+    const body = init?.formData ?? (init?.json !== undefined ? JSON.stringify(init.json) : undefined)
+
     const res = await fetchImpl(`${baseUrl}${path}${buildQueryString(init?.query)}`, {
       method,
       credentials: 'same-origin',
       headers,
-      body: init?.json !== undefined ? JSON.stringify(init.json) : undefined,
+      body,
     })
 
     if (!res.ok) {
-      let body: Record<string, unknown> = {}
-      try {
-        body = (await res.json()) as Record<string, unknown>
-      } catch {
-        // non-JSON problem response
-      }
-      throw new ReviewApiError({
-        status: res.status,
-        code: typeof body.code === 'string' ? body.code : `http_${res.status}`,
-        title: typeof body.title === 'string' ? body.title : res.statusText || 'Request failed',
-        detail: typeof body.detail === 'string' ? body.detail : undefined,
-      })
+      await throwProblemError(res)
     }
 
     if (res.status === 204) {
@@ -126,6 +129,21 @@ export function createReviewClient(options: ReviewClientOptions = {}): ReviewCli
     }
 
     return (await res.json()) as T
+  }
+
+  async function throwProblemError(res: Response): Promise<never> {
+    let body: Record<string, unknown> = {}
+    try {
+      body = (await res.json()) as Record<string, unknown>
+    } catch {
+      // non-JSON problem response
+    }
+    throw new ReviewApiError({
+      status: res.status,
+      code: typeof body.code === 'string' ? body.code : `http_${res.status}`,
+      title: typeof body.title === 'string' ? body.title : res.statusText || 'Request failed',
+      detail: typeof body.detail === 'string' ? body.detail : undefined,
+    })
   }
 
   return {
@@ -177,6 +195,46 @@ export function createReviewClient(options: ReviewClientOptions = {}): ReviewCli
         })).data,
       remove: (nodeId, commentId, etag) =>
         request<void>('DELETE', `/review/nodes/${nodeId}/comments/${commentId}`, { etag }),
+    },
+    exchange: {
+      register: async (nodeId, input, idempotencyKey) => {
+        const isForm = typeof FormData !== 'undefined' && input instanceof FormData
+        return (
+          await request<{ data: ExchangeJob }>('POST', `/documents/${nodeId}/exchange-jobs`, {
+            ...(isForm ? { formData: input } : { json: input }),
+            idempotencyKey,
+          })
+        ).data
+      },
+      status: async (nodeId, jobId, includePreview = true) =>
+        (
+          await request<{ data: ExchangeJob }>('GET', `/documents/${nodeId}/exchange-jobs/${jobId}`, {
+            query: includePreview ? { include_preview: 1 } : { include_preview: 0 },
+          })
+        ).data,
+      fileUrl: (nodeId, jobId) => `${baseUrl}/documents/${nodeId}/exchange-jobs/${jobId}/file`,
+      download: async (nodeId, jobId) => {
+        const provided = typeof options.headers === 'function' ? options.headers() : options.headers ?? {}
+        const res = await fetchImpl(`${baseUrl}/documents/${nodeId}/exchange-jobs/${jobId}/file`, {
+          method: 'GET',
+          credentials: 'same-origin',
+          headers: {
+            ...provided,
+            ...(options.csrfToken ? { 'X-CSRF-TOKEN': options.csrfToken } : {}),
+          },
+        })
+        if (!res.ok) {
+          await throwProblemError(res)
+        }
+        return res.blob()
+      },
+      apply: async (nodeId, jobId, input, idempotencyKey) =>
+        (
+          await request<{ data: ApplyExchangeReceipt }>('POST', `/documents/${nodeId}/exchange-jobs/${jobId}/apply`, {
+            json: input,
+            idempotencyKey,
+          })
+        ).data,
     },
   }
 }

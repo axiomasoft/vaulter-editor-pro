@@ -26,13 +26,13 @@ final readonly class RevisionPinRepository implements RevisionPruneProtection
             return [];
         }
 
-        return array_map(
+        return array_values(array_map(
             Identity::stringify(...),
             DocumentRevisionPin::query()->where('document_id', $documentId)
                 ->where(static fn ($query) => $query->whereNull('expires_at')->orWhere('expires_at', '>', Carbon::now()))
                 ->pluck('revision_id')
                 ->all(),
-        );
+        ));
     }
 
     public function upsert(
@@ -134,10 +134,12 @@ final readonly class RevisionPinRepository implements RevisionPruneProtection
             return 0;
         }
 
-        return DocumentRevisionPin::query()
+        $deleted = DocumentRevisionPin::query()
             ->where('document_id', $documentId)
             ->where('expires_at', '<=', Carbon::now())
             ->delete();
+
+        return is_int($deleted) ? $deleted : 0;
     }
 
     private function findModel(string|int $revisionId, string|int $documentId): ?DocumentRevisionPin

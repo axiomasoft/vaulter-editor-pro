@@ -38,7 +38,7 @@ describe('DOCX Corpus D1–D4 Roundtrip & Loss Report (10.1-A)', () => {
     const ns = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'
     const blank = await exportDocx({ type: 'doc', content: [{ type: 'paragraph' }] })
     const entries = unzipSync(blank.binary!)
-    entries['word/numbering.xml'] = encodeUtf8(`
+    entries['word/numbering.xml'] = new Uint8Array(encodeUtf8(`
       <w:numbering xmlns:w="${ns}">
         <w:abstractNum w:abstractNumId="1">
           <w:lvl w:ilvl="0"><w:pPr><w:ind w:left="240"/></w:pPr></w:lvl>
@@ -51,13 +51,13 @@ describe('DOCX Corpus D1–D4 Roundtrip & Loss Report (10.1-A)', () => {
             <w:lvl w:ilvl="1"><w:pPr><w:ind w:left="720" w:hanging="180"/><w:rPr><w:i/></w:rPr></w:pPr></w:lvl>
           </w:lvlOverride>
         </w:num>
-      </w:numbering>`)
-    entries['word/document.xml'] = encodeUtf8(`
+      </w:numbering>`))
+    entries['word/document.xml'] = new Uint8Array(encodeUtf8(`
       <w:document xmlns:w="${ns}"><w:body>
         <w:p><w:pPr><w:numPr><w:numId w:val="7"/></w:numPr></w:pPr><w:r><w:t>Root</w:t></w:r></w:p>
         <w:p><w:pPr><w:numPr><w:ilvl w:val="1"/><w:numId w:val="7"/></w:numPr><w:ind w:left="960"/></w:pPr>
           <w:r><w:t>Child &amp; sibling</w:t></w:r></w:p>
-      </w:body></w:document>`)
+      </w:body></w:document>`))
 
     const imported = await importDocx(zipSync(entries), { profile: 'standard' })
     expect(imported.model.sections[0].blocks).toMatchObject([

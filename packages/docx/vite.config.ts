@@ -16,6 +16,7 @@ export default defineConfig({
         index: fileURLToPath(new URL('./src/index.ts', import.meta.url)),
         browser: fileURLToPath(new URL('./src/browser.ts', import.meta.url)),
         node: fileURLToPath(new URL('./src/node.ts', import.meta.url)),
+        cli: fileURLToPath(new URL('./src/cli.ts', import.meta.url)),
       },
       formats: ['es', 'cjs'],
     },
@@ -33,6 +34,7 @@ export default defineConfig({
         'zlib',
         'events',
         'util',
+        'crypto',
       ],
       output: {
         exports: 'named',

@@ -156,3 +156,77 @@ export interface AnchorActuality {
   resolvedQuote: string | null
   needsReanchor: boolean
 }
+
+export type ExchangeJobKind = 'import' | 'export'
+
+export type ExchangeJobState =
+  | 'queued'
+  | 'running'
+  | 'preview_ready'
+  | 'completed'
+  | 'applied'
+  | 'failed'
+
+export interface ExchangeJob {
+  id: string
+  document_id: string
+  request_key: string
+  kind: ExchangeJobKind
+  format: 'docx'
+  profile_id: string
+  state: ExchangeJobState
+  source_blob_id: string | null
+  source_revision_id: string | null
+  source_generation: number | null
+  source_position: number | null
+  output_blob_id: string | null
+  apply_command_id: string | null
+  apply_receipt_id: string | null
+  diagnostics_report: Record<string, unknown> | null
+  error_code: string | null
+  preview?: Record<string, unknown> | null
+  semantic?: Record<string, unknown> | null
+  created_at: string
+  updated_at: string
+  finished_at: string | null
+}
+
+export interface RegisterExchangeJobPayload {
+  request_key: string
+  kind: ExchangeJobKind
+  format?: 'docx'
+  profile_id?: string
+  source_blob_id?: string
+  source_revision_id?: string
+  source_generation?: number
+  source_position?: number
+  source?: {
+    blob_id?: string
+    node_id?: string
+    revision_id?: string
+    generation?: number
+    position?: number
+  }
+  docx_b64?: string
+  request_fingerprint?: string
+  options?: Record<string, unknown>
+}
+
+export interface ApplyExchangeImportPayload {
+  apply_command_id: string
+  expected_generation?: number | null
+  expected_position?: number | null
+}
+
+export interface ApplyExchangeReceipt {
+  job_id: string
+  document_id: string
+  state: ExchangeJobState
+  apply_command_id: string
+  apply_receipt_id: string | null
+  write_mode: string
+  generation: number
+  position: number
+  replayed: boolean
+  pending_commit: boolean
+}

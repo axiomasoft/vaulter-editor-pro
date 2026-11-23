@@ -1,0 +1,76 @@
+{
+    "name": "axiomasoft/vaulter-editor-pro-exchange",
+    "description": "Vaulter Editor Pro — server-side DOCX exchange jobs, ZIP/XML security guards, Media blob retention and atomic import application.",
+    "type": "library",
+    "license": "proprietary",
+    "homepage": "https://github.com/axiomasoft/vaulter-editor-pro",
+    "authors": [
+        {
+            "name": "Dmitry Vostrikov",
+            "email": "dv.vostrikov@gmail.com"
+        }
+    ],
+    "require": {
+        "php": ">=8.4 <8.6",
+        "axiomasoft/packman": "^0.1",
+        "axiomasoft/packman-plugins": "^0.1",
+        "axiomasoft/packman-schema": "^0.1",
+        "axiomasoft/vaulter-core": "^1.0",
+        "axiomasoft/vaulter-documents": "^1.0",
+        "axiomasoft/vaulter-drive": "^1.0",
+        "axiomasoft/vaulter-media": "^1.0",
+        "ext-libxml": "*",
+        "ext-mbstring": "*",
+        "ext-xmlreader": "*",
+        "ext-zip": "*",
+        "illuminate/bus": "^13.0",
+        "illuminate/queue": "^13.0",
+        "illuminate/support": "^13.0",
+        "symfony/process": "^7.0 || ^8.0"
+    },
+    "suggest": {
+        "axiomasoft/vaulter-collaboration": "Required for applying DOCX imports when documents use collaboration journal write mode."
+    },
+    "require-dev": {
+        "axiomasoft/packman-testkit": "^0.1",
+        "axiomasoft/vaulter-collaboration": "^1.0",
+        "larastan/larastan": "^3.15",
+        "orchestra/testbench": "^11.3",
+        "pestphp/pest": "^5.2",
+        "phpstan/phpstan": "^2.2.16 <2.3.6"
+    },
+    "autoload": {
+        "psr-4": {
+            "Vaulter\\EditorPro\\Exchange\\": "src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "Vaulter\\EditorPro\\Exchange\\Tests\\": "tests/"
+        }
+    },
+    "extra": {
+        "packman": {
+            "schema-version": 1,
+            "package-type": "addon",
+            "stability": "stable",
+            "error-prefix": "exchange"
+        },
+        "laravel": {
+            "providers": [
+                "Vaulter\\EditorPro\\Exchange\\EditorProExchangeServiceProvider"
+            ]
+        },
+        "branch-alias": {
+            "dev-main": "1.0.x-dev"
+        }
+    },
+    "minimum-stability": "dev",
+    "prefer-stable": true,
+    "config": {
+        "sort-packages": true,
+        "allow-plugins": {
+            "pestphp/pest-plugin": true
+        }
+    }
+}

@@ -10,11 +10,15 @@
         <testsuite name="review">
             <directory>packages/review/tests</directory>
         </testsuite>
+        <testsuite name="exchange">
+            <directory>packages/exchange/tests</directory>
+        </testsuite>
     </testsuites>
 
     <source>
         <include>
             <directory>packages/review/src</directory>
+            <directory>packages/exchange/src</directory>
         </include>
     </source>
 
