@@ -119,17 +119,14 @@ export function trackText(
       || lowSurrogate.test($from.nodeAfter?.text ?? '') || lowSurrogate.test($to.nodeAfter?.text ?? '')) return null
 
     const rightInsertions = insertions($to.nodeAfter)
-    const ancestors = insertions($from.nodeBefore).filter(mark => mark.isInSet(rightInsertions))
-    for (let index = ancestors.length - 1; index >= 0; index--) {
-      const mark = ancestors[index]
-      for (let child = 0; child < removed.childCount; child++) {
-        if (!mark.isInSet(removed.child(child).marks)) {
-          ancestors.splice(index, 1)
-          break
-        }
-      }
-    }
+    const ancestors = removed.firstChild
+      ? insertions(removed.firstChild)
+      : insertions($from.nodeBefore).filter(mark => mark.isInSet(rightInsertions))
     const parentId = deepestInsertion(ancestors)
+    // The entire selection must use the same parent-relative coordinates.
+    for (let index = 1; index < removed.childCount; index++) {
+      if (deepestInsertion(insertions(removed.child(index))) !== parentId) return null
+    }
     const kind = from === to ? 'insert' : after === '' ? 'delete' : 'replace'
     if (!run || run.author !== author || run.kind !== kind || run.parentId !== parentId || kind === 'replace'
       || !touchesRun(removed, $from.nodeBefore, $to.nodeAfter, run)) {

@@ -1,6 +1,6 @@
 import { Editor, Extension } from '@tiptap/core'
 import { TextSelection } from '@tiptap/pm/state'
-import { undo } from '@tiptap/pm/history'
+import { redo, undo } from '@tiptap/pm/history'
 import StarterKit from '@tiptap/starter-kit'
 import { yDocToProsemirrorJSON, ySyncPlugin, ySyncPluginKey, yUndoPlugin, yUndoPluginKey } from '@tiptap/y-tiptap'
 import { afterEach, expect, it, vi } from 'vitest'
@@ -98,6 +98,38 @@ it('groups only adjacent edits of the same author and keeps parents when rejecti
   expect(first.onSuggestions).toHaveBeenCalledTimes(3)
 })
 
+it.each([
+  { from: 2, to: 3, before: 'X', after: '', proposed: 'aYZb' },
+  { from: 4, to: 5, before: 'Z', after: '', proposed: 'aXYb' },
+  { from: 2, to: 5, before: 'XYZ', after: '', proposed: 'ab' },
+  { from: 4, to: 5, before: 'Z', after: '!', proposed: 'aXY!b' },
+])('tracks an edit of "$before" to "$after" at a pending insertion boundary', ({ from, to, before, after, proposed }) => {
+  const { editor, onSuggestions } = openEditor('one', 'ab')
+  replace(editor, 2, 2, 'XYZ')
+  const parent = onSuggestions.mock.lastCall?.[0][0]
+  replace(editor, from, to, after)
+  expect(onSuggestions).toHaveBeenCalledTimes(2)
+  expect(onSuggestions.mock.lastCall?.[0][0]).toMatchObject({
+    parentId: parent?.suggestionId,
+    kind: after ? 'replace' : 'delete',
+    from: from - 2,
+    to: to - 2,
+    before,
+    after,
+  })
+  expect(projectTrackedChanges(editor.state.doc, 'original').textContent).toBe('ab')
+  expect(projectTrackedChanges(editor.state.doc, 'proposed').textContent).toBe(proposed)
+})
+
+it('leaves a deletion spanning original and pending text unsupported', () => {
+  const { editor, onSuggestions } = openEditor('one', 'ab')
+  replace(editor, 2, 2, 'XYZ')
+  const review = editor.state.doc
+  replace(editor, 1, 3, '')
+  expect(editor.state.doc).toBe(review)
+  expect(onSuggestions).toHaveBeenCalledOnce()
+})
+
 it('publishes no raw IME or local text deltas, ignores replay, and delegates Yjs undo', () => {
   const ydoc = new Y.Doc()
   documents.push(ydoc)
@@ -133,13 +165,15 @@ it('publishes no raw IME or local text deltas, ignores replay, and delegates Yjs
 it('bypasses explicit keys and preserves ordinary ProseMirror history', () => {
   const { editor, onSuggestions } = openEditor('one', 'a🦊z')
   for (const key of [ySyncPluginKey, yUndoPluginKey, 'y-undo', 'history', 'vaulter:untracked']) {
-    editor.view.dispatch(editor.state.tr.insertText('!', 1, 1).setMeta(key, false))
+    editor.view.dispatch(editor.state.tr.insertText('!', 1, 1).setMeta(key, false).setMeta('addToHistory', false))
   }
   expect(onSuggestions).not.toHaveBeenCalled()
   replace(editor, 7, 9, '')
   expect(projectTrackedChanges(editor.state.doc, 'proposed').textContent).toBe('!!!!!az')
   expect(undo(editor.state, editor.view.dispatch)).toBe(true)
-  expect(editor.state.doc.textContent).toBe('!!!!!a🦊z')
+  expect(projectTrackedChanges(editor.state.doc, 'proposed').textContent).toBe('!!!!!a🦊z')
+  expect(redo(editor.state, editor.view.dispatch)).toBe(true)
+  expect(projectTrackedChanges(editor.state.doc, 'proposed').textContent).toBe('!!!!!az')
   expect(onSuggestions).toHaveBeenCalledOnce()
 })
 

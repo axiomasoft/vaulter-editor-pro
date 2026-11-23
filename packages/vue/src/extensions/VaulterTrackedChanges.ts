@@ -1,5 +1,6 @@
 import { Extension, Mark } from '@tiptap/core'
 import type { Editor } from '@tiptap/core'
+import { isHistoryTransaction } from '@tiptap/pm/history'
 import type { Node } from '@tiptap/pm/model'
 import type { EditorState, Transaction } from '@tiptap/pm/state'
 import { Plugin } from '@tiptap/pm/state'
@@ -114,7 +115,7 @@ export const VaulterTrackedChanges = Extension.create<TrackedChangesOptions, Tra
   },
 
   dispatchTransaction({ transaction, next }) {
-    const bypass = passthrough.some(key => transaction.getMeta(key) !== undefined)
+    const bypass = isHistoryTransaction(transaction) || passthrough.some(key => transaction.getMeta(key) !== undefined)
     const composing = this.storage.composition
     if (bypass) {
       if (transaction.docChanged) {

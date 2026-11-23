@@ -167,15 +167,20 @@ function parseMarks(
     return { marks, commentIds, revision, formattingChange }
   }
 
-  // The intermediate model stores one revision per run. A nested deletion
-  // within an insertion must still be treated as pending in the original.
   const liveMarks = rawMarks.filter(mark =>
     mark.type === 'reviewSuggestion' && typeof mark.attrs?.suggestionId === 'string'
     && (mark.attrs?.kind === 'insert' || mark.attrs?.kind === 'delete'),
   )
-  const liveMark = (projection === 'review'
-    ? liveMarks.find(mark => !liveMarks.some(child => child.attrs?.parentId === mark.attrs?.suggestionId))
-    : liveMarks.find(mark => mark.attrs?.kind === (projection === 'original' ? 'insert' : 'delete')))
+  if (projection === 'review' && liveMarks.length > 1) {
+    diagnostics.block(
+      'NESTED_LIVE_REVISIONS_UNSUPPORTED',
+      'tracked_revisions',
+      location,
+      'Review export can represent only one live revision per run. Use the original or proposed projection, or resolve the overlapping suggestions.',
+    )
+  }
+  // Keep pending insertions out of the baseline, including in a blocked preview.
+  const liveMark = liveMarks.find(mark => mark.attrs?.kind === (projection === 'proposed' ? 'delete' : 'insert'))
     ?? liveMarks[0]
 
   for (const mark of rawMarks) {

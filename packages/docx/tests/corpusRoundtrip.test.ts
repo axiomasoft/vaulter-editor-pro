@@ -365,7 +365,7 @@ describe('DOCX Corpus D1–D4 Roundtrip & Loss Report (10.1-A)', () => {
     expect(origText).not.toContain('added clause')
   })
 
-  it('keeps pending live insertions out of the default projection even under a nested deletion', () => {
+  it('projects a nested live deletion and blocks its review export', async () => {
     const document = {
       type: 'doc' as const,
       content: [{
@@ -388,6 +388,16 @@ describe('DOCX Corpus D1–D4 Roundtrip & Loss Report (10.1-A)', () => {
     expect(fromIntermediate(original.model).document.content?.[0].content).toEqual([{ type: 'text', text: 'old' }])
     const proposed = toIntermediate(document, { profile: 'revisions', projection: 'proposed' })
     expect(fromIntermediate(proposed.model).document.content?.[0].content).toEqual([{ type: 'text', text: 'new' }])
+
+    const review = await exportDocx(document, { profile: 'revisions', projection: 'review' })
+    expect(review.blocked).toBe(true)
+    expect(review.binary).toBeNull()
+    expect(review.report.diagnostics).toContainEqual(expect.objectContaining({
+      code: 'NESTED_LIVE_REVISIONS_UNSUPPORTED',
+      severity: 'error',
+      action: 'blocked',
+      location: 'doc.block[0].inline[1]',
+    }))
   })
 
   it('blocks profile when an unsupported mandatory element or broken 2x2 merge geometry is present', async () => {
