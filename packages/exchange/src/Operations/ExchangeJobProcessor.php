@@ -137,8 +137,9 @@ final readonly class ExchangeJobProcessor
 
         $result = $this->runtime->importDocx($bytes, $job->profileId, $marker);
 
-        $normalizedDoc = $this->normalizeTipTapForStore($result->document);
         $report = $result->report;
+        $report['blocked'] = $result->blocked || ($report['blocked'] ?? false) === true;
+        $normalizedDoc = $this->normalizeTipTapForStore($result->document, $report);
         $report['source_head'] = [
             'generation' => $job->sourceGeneration ?? $headGeneration,
             'position' => $job->sourcePosition ?? $headPosition,
@@ -232,6 +233,13 @@ final readonly class ExchangeJobProcessor
         );
 
         $report = $result->report;
+        $this->recordLoss(
+            $report,
+            'body_only_export',
+            'document',
+            'Only the stored document body is available for export. Section layout, headers, footers, and document discussions are omitted.',
+            action: 'projected',
+        );
         if ($result->semantic !== null) {
             $report['semantic'] = $result->semantic;
         }
@@ -261,17 +269,74 @@ final readonly class ExchangeJobProcessor
      * scrub unsafe link/image URLs, assign unique `blockId` values, and verify strict validity.
      *
      * @param  array<string, mixed>  $rawDoc
+     * @param  array<string, mixed>  $report
      * @return array<string, mixed>
      */
-    private function normalizeTipTapForStore(array $rawDoc): array
+    private function normalizeTipTapForStore(array $rawDoc, array &$report): array
     {
         $schema = TipTapSchema::richText();
-        [$decayed] = TipTapContent::decayReporting($rawDoc, $schema);
+        [$decayed, $lossless] = TipTapContent::decayReporting($rawDoc, $schema);
+        if (! $lossless) {
+            $revisionLoss = ! $schema->allowsMark('suggestion') && self::hasSuggestionMark($rawDoc);
+            $this->recordLoss(
+                $report,
+                $revisionLoss ? 'host_revision_marks_unsupported' : 'host_schema_loss',
+                $revisionLoss ? 'revisions' : 'document',
+                $revisionLoss
+                    ? 'The document schema cannot preserve tracked insertions and deletions. This preview cannot be applied.'
+                    : 'The document schema discarded unsupported nodes, marks, or attributes.',
+                action: $revisionLoss ? 'blocked' : 'dropped',
+            );
+        }
         $sanitized = $decayed->withSanitizedUrls()->toArray();
         $withBlockIds = BlockIdentity::assignMissing($sanitized);
         $validated = TipTapContent::fromArray($withBlockIds, $schema);
 
         return $validated->toArray();
+    }
+
+    /** @param array<array-key, mixed> $node */
+    private static function hasSuggestionMark(array $node): bool
+    {
+        $marks = $node['marks'] ?? null;
+        foreach (is_array($marks) ? $marks : [] as $mark) {
+            if (is_array($mark) && ($mark['type'] ?? null) === 'suggestion') {
+                return true;
+            }
+        }
+        $content = $node['content'] ?? null;
+        foreach (is_array($content) ? $content : [] as $child) {
+            if (is_array($child) && self::hasSuggestionMark($child)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /** @param array<string, mixed> $report */
+    private function recordLoss(array &$report, string $code, string $feature, string $message, string $action): void
+    {
+        $severity = $action === 'blocked' ? 'error' : 'warning';
+        $diagnostics = is_array($report['diagnostics'] ?? null) ? $report['diagnostics'] : [];
+        $diagnostics[] = [
+            'code' => $code,
+            'severity' => $severity,
+            'feature' => $feature,
+            'location' => 'document',
+            'action' => $action,
+            'message' => $message,
+        ];
+        $report['diagnostics'] = $diagnostics;
+        $summary = is_array($report['summary'] ?? null) ? $report['summary'] : [];
+        $summary[$severity] = (is_int($summary[$severity] ?? null) ? $summary[$severity] : 0) + 1;
+        $report['summary'] = $summary;
+        if ($action === 'blocked') {
+            $report['blocked'] = true;
+            $reasons = is_array($report['blocking_reasons'] ?? null) ? $report['blocking_reasons'] : [];
+            $reasons[] = $code.' (document): '.$message;
+            $report['blocking_reasons'] = $reasons;
+        }
     }
 
     private function readBlobBounded(string $blobId, int $maxBytes): string

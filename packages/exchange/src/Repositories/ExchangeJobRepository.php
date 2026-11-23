@@ -402,29 +402,20 @@ final readonly class ExchangeJobRepository
         return $this->toData($row);
     }
 
-    public function recordPendingJournalApply(string $jobId, string $applyCommandId): void
+    public function recordPendingJournalApply(Connection $conn, ExchangeJobData $locked, string $applyCommandId): ExchangeJobData
     {
-        $this->database->transaction(function () use ($jobId, $applyCommandId): void {
-            $conn = $this->lookup->connection();
-            $row = $this->table($conn)->where('id', $jobId)->lockForUpdate()->first();
-            if (! $row instanceof stdClass) {
-                throw ExchangeException::jobNotFound($jobId);
-            }
-            if (Identity::stringify($row->state) !== ExchangeJobState::PreviewReady->value) {
-                return;
-            }
-            if ($row->apply_command_id !== null && Identity::stringify($row->apply_command_id) !== $applyCommandId) {
-                throw ExchangeException::idempotencyConflict('apply_command_id_mismatch');
-            }
+        if ($locked->applyCommandId === $applyCommandId) {
+            return $locked;
+        }
 
-            $this->table($conn)
-                ->where('id', $jobId)
-                ->where('state', ExchangeJobState::PreviewReady->value)
-                ->update([
-                    'apply_command_id' => $applyCommandId,
-                    'updated_at' => $this->lookup->dbNow($conn),
-                ]);
-        });
+        $this->table($conn)
+            ->where('id', $locked->id)
+            ->update([
+                'apply_command_id' => $applyCommandId,
+                'updated_at' => $this->lookup->dbNow($conn),
+            ]);
+
+        return $this->findById($locked->id, $conn) ?? throw ExchangeException::jobNotFound($locked->id);
     }
 
     public function markAppliedOnConnection(
@@ -553,71 +544,32 @@ final readonly class ExchangeJobRepository
     }
 
     /**
-     * Collect candidate jobs scoped to a drive (`project_scope`) before a purge operation.
-     *
-     * @return list<array{id: string, source_blob_id: string|null, output_blob_id: string|null}>
+     * Reconcile only this module's pins against the surviving owners in the purge transaction.
+     * A worker's output pin and its owner row become visible together, so no pre-purge snapshot is needed.
      */
-    public function findJobsForProjectScope(string $projectScope): array
+    public function releasePinsForDeletedJobs(Connection $conn): void
     {
-        if ($projectScope === '') {
-            return [];
+        $references = $this->lookup->table('blob_references');
+        $jobs = $this->lookup->table('document_exchange_jobs');
+
+        foreach ([self::SOURCE_PIN_OWNER, self::OUTPUT_PIN_OWNER] as $owner) {
+            $this->pins->releaseOwner($owner, static fn (): iterable => $conn
+                ->table($references, 'exchange_pin')
+                ->where('exchange_pin.owner_type', $owner)
+                ->whereNotExists(static function (Builder $query) use ($jobs, $conn): void {
+                    // reference_key is resolved from the outer pin query. Exchange keys are job UUIDs.
+                    $query->from($jobs, 'exchange_job')
+                        ->whereRaw(match ($conn->getDriverName()) {
+                            'pgsql' => 'id = CAST(reference_key AS uuid)',
+                            'mysql', 'mariadb' => 'id = CAST(reference_key AS CHAR(36))',
+                            default => 'id = reference_key',
+                        });
+                })
+                ->distinct()
+                ->select('exchange_pin.reference_key')
+                ->lazyById(column: 'exchange_pin.reference_key', alias: 'reference_key')
+                ->map(static fn (stdClass $row): string => Identity::stringify($row->reference_key)));
         }
-
-        $conn = $this->lookup->connection();
-        $rows = $this->table($conn)
-            ->where('project_scope', $projectScope)
-            ->get(['id', 'source_blob_id', 'output_blob_id']);
-
-        $out = [];
-        foreach ($rows as $row) {
-            $out[] = [
-                'id' => Identity::stringify($row->id),
-                'source_blob_id' => $row->source_blob_id !== null ? Identity::stringify($row->source_blob_id) : null,
-                'output_blob_id' => $row->output_blob_id !== null ? Identity::stringify($row->output_blob_id) : null,
-            ];
-        }
-
-        return $out;
-    }
-
-    /**
-     * Release pins for candidate jobs that were cascade-deleted when their parent document purged.
-     *
-     * @param  list<array{id: string, source_blob_id: string|null, output_blob_id: string|null}>  $candidates
-     */
-    public function releasePinsForDeletedJobs(array $candidates): int
-    {
-        if ($candidates === []) {
-            return 0;
-        }
-
-        $ids = array_map(static fn (array $item): string => $item['id'], $candidates);
-
-        return $this->database->transaction(function () use ($candidates, $ids): int {
-            $conn = $this->lookup->connection();
-            $stillPresent = array_flip(array_map(
-                Identity::stringify(...),
-                $this->table($conn)->whereIn('id', $ids)->pluck('id')->all(),
-            ));
-
-            $released = 0;
-            foreach ($candidates as $item) {
-                $jobId = $item['id'];
-                if (isset($stillPresent[$jobId])) {
-                    continue;
-                }
-                if ($item['source_blob_id'] !== null && $item['source_blob_id'] !== '') {
-                    $this->pins->unpin($item['source_blob_id'], self::SOURCE_PIN_OWNER, $jobId);
-                    $released++;
-                }
-                if ($item['output_blob_id'] !== null && $item['output_blob_id'] !== '') {
-                    $this->pins->unpin($item['output_blob_id'], self::OUTPUT_PIN_OWNER, $jobId);
-                    $released++;
-                }
-            }
-
-            return $released;
-        });
     }
 
     private function assertActiveLease(Connection $conn, mixed $row, string $leaseToken): void

@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import { exportDocx, importDocx, nodeZipReader, setDefaultZipReader } from './node'
-import { DocxProfileBlockedError } from './model/lossReport'
+import { DocxProfileBlockedError, LossReportBuilder } from './model/lossReport'
 import { DOCX_PROFILE_IDS } from './model/profiles'
 import type {
   DocxDiscussionInput,
@@ -135,6 +135,24 @@ export async function handleExchangeCliRequest(rawJson: string): Promise<string>
       const tiptap = fromIntermediate(result.model, {
         preserveSectionNodes: opts.preserveSectionNodes ?? false,
       })
+      const report = new LossReportBuilder()
+      report.merge(result.report.diagnostics)
+      const hasSectionMetadata = tiptap.sections.length > 1 || tiptap.sections.some(section =>
+        section.pageSize || section.margins || section.titlePg ||
+        Object.values(section.headers).some(Boolean) || Object.values(section.footers).some(Boolean),
+      )
+      if (hasSectionMetadata) {
+        report.warn(
+          'body_only_sections', 'sections', 'document', 'dropped',
+          'The import response carries the body only. Section layout, headers, and footers are not retained.',
+        )
+      }
+      if (tiptap.discussions.length > 0) {
+        report.warn(
+          'body_only_discussions', 'discussions', 'document', 'dropped',
+          'The import response does not retain discussion threads.',
+        )
+      }
 
       const response: DocxCliSuccessResponse = {
         version: 1,
@@ -147,7 +165,7 @@ export async function handleExchangeCliRequest(rawJson: string): Promise<string>
         document: tiptap.document,
         sections_count: tiptap.sections.length,
         discussions_count: tiptap.discussions.length,
-        report: result.report,
+        report: report.build(profile, result.report.source_marker),
         semantic: result.semantic,
       }
       return JSON.stringify(response)
@@ -172,7 +190,7 @@ export async function handleExchangeCliRequest(rawJson: string): Promise<string>
           projection: parsed.projection,
           sourceMarker: parsed.source_marker ?? null,
           enableDiscussions: opts.enableDiscussions ?? true,
-          enableRevisions: opts.enableRevisions ?? false,
+          enableRevisions: opts.enableRevisions,
           requireFormattingRevisions: opts.requireFormattingRevisions,
         },
       )

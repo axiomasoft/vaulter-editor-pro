@@ -6,6 +6,7 @@ use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
+use Vaulter\Collaboration\Persistence\CommandActor;
 use Vaulter\Collaboration\Persistence\CommandJournal;
 use Vaulter\Collaboration\Persistence\UpdateEnvelope;
 use Vaulter\Collaboration\Persistence\UpdateLog;
@@ -25,11 +26,13 @@ use Vaulter\EditorPro\Exchange\Enums\ExchangeJobState;
 use Vaulter\EditorPro\Exchange\Exceptions\ExchangeException;
 use Vaulter\EditorPro\Exchange\ExchangeManager;
 use Vaulter\EditorPro\Exchange\Repositories\ExchangeJobRepository;
+use Vaulter\EditorPro\Exchange\Runtime\CanonicalJson;
 use Vaulter\Media\Contracts\Cas\BlobPins;
 use Vaulter\Media\Contracts\Cas\BlobStore;
 use Vaulter\Media\Data\Snapshots\BlobSnapshot;
 use Vaulter\Media\Enums\Cas\BlobStatus;
 use Vaulter\Media\ValueObjects\Cas\BlobScope;
+use Vaulter\ValueObjects\Access\Actor;
 
 function sampleRichDocument(string $lead = 'Initial clause'): array
 {
@@ -219,7 +222,8 @@ it('roundtrips rich documents through server DOCX export, download, import previ
     $statusRes = $this->getJson('api/vaulter/v1/documents/'.$docNode->id.'/exchange-jobs/'.$exportJobId);
     $statusRes->assertOk()
         ->assertJsonPath('data.state', 'completed')
-        ->assertJsonPath('data.diagnostics_report.profile', 'standard');
+        ->assertJsonPath('data.diagnostics_report.profile', 'standard')
+        ->assertJsonFragment(['code' => 'body_only_export', 'action' => 'projected']);
 
     // 2. Download exported DOCX artifact with security headers and verify valid OOXML ZIP.
     $fileRes = $this->get('api/vaulter/v1/documents/'.$docNode->id.'/exchange-jobs/'.$exportJobId.'/file');
@@ -441,14 +445,10 @@ it('enforces request_key idempotency, repeat apply replay with identical apply_r
 
     $drive = app(Vaulter::class)->drive($storage)->actingAs($owner);
     $docs = app(DocumentsManager::class);
-    $blobs = app(BlobStore::class);
-
     $docNode = $docs->in($drive)->create('idempotent-doc', 'vaulter/rich-text', sampleRichDocument('Baseline clause'));
     $head = $docs->in($drive)->content($docNode);
 
     $docxBytes = makeDocxZip('<?xml version="1.0" encoding="UTF-8"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>Idempotent applied text</w:t></w:r></w:p></w:body></w:document>');
-    $sourceBlob = commitDocxToBlob($blobs, $storage->tenantId, $storage->id, $docxBytes);
-
     $this->actingAs($owner);
 
     $first = $this->withHeaders(['Idempotency-Key' => 'reg-key-1'])
@@ -456,7 +456,8 @@ it('enforces request_key idempotency, repeat apply replay with identical apply_r
             'request_key' => 'imp-same-key',
             'kind' => 'import',
             'profile_id' => 'standard',
-            'source_blob_id' => $sourceBlob->id,
+            'docx_b64' => base64_encode($docxBytes),
+            'request_fingerprint' => str_repeat('a', 64),
         ])
         ->assertStatus(202);
 
@@ -468,7 +469,8 @@ it('enforces request_key idempotency, repeat apply replay with identical apply_r
             'request_key' => 'imp-same-key',
             'kind' => 'import',
             'profile_id' => 'standard',
-            'source_blob_id' => $sourceBlob->id,
+            'docx_b64' => base64_encode($docxBytes),
+            'request_fingerprint' => str_repeat('a', 64),
         ]);
     $replayReg->assertStatus(200)
         ->assertHeader('Idempotent-Replayed', 'true')
@@ -480,7 +482,8 @@ it('enforces request_key idempotency, repeat apply replay with identical apply_r
             'request_key' => 'imp-same-key',
             'kind' => 'import',
             'profile_id' => 'discussions',
-            'source_blob_id' => $sourceBlob->id,
+            'docx_b64' => base64_encode($docxBytes),
+            'request_fingerprint' => str_repeat('a', 64),
         ])
         ->assertStatus(409)
         ->assertJsonPath('code', 'exchange_idempotency_conflict');
@@ -547,11 +550,13 @@ it('rejects stale preview on apply when document head advanced after preview gen
         ->assertStatus(202);
 
     // Advance working document head concurrently before apply!
-    $docs->in($drive)->update($docNode, sampleRichDocument('Concurrent edit v2'), expectedStateVersion: $v1->stateVersion);
+    $v2 = $docs->in($drive)->update($docNode, sampleRichDocument('Concurrent edit v2'), expectedStateVersion: $v1->stateVersion);
 
     $this->withHeaders(['Idempotency-Key' => 'stale-apply-1'])
         ->postJson('api/vaulter/v1/documents/'.$docNode->id.'/exchange-jobs/'.$import->json('data.id').'/apply', [
             'apply_command_id' => 'cmd-stale-apply',
+            'expected_generation' => $v2->epoch,
+            'expected_position' => $v2->stateVersion,
         ])
         ->assertStatus(409)
         ->assertJsonPath('code', 'exchange_stale_preview');
@@ -561,6 +566,80 @@ it('rejects stale preview on apply when document head advanced after preview gen
         ->not->toContain('Stale import candidate');
 });
 
+it('marks tracked-revision previews as blocked when the document schema cannot store the marks', function (): void {
+    $owner = AccessTestHelpers::user(1);
+    $storage = AccessTestHelpers::storage();
+    AccessTestHelpers::grant($storage->rootNode, RoleRegistry::OWNER, subjectId: 1);
+    $drive = app(Vaulter::class)->drive($storage)->actingAs($owner);
+    $docs = app(DocumentsManager::class)->in($drive);
+    $doc = $docs->create('tracked-import', 'vaulter/rich-text', sampleRichDocument());
+    $before = $docs->content($doc);
+    $bytes = file_get_contents(dirname(__DIR__, 4).'/tests/corpus/docx/d4-revisions.docx');
+    expect($bytes)->toBeString();
+
+    $url = 'api/vaulter/v1/documents/'.$doc->id.'/exchange-jobs';
+    $registered = $this->actingAs($owner)->withHeaders(['Idempotency-Key' => 'tracked-reg'])
+        ->postJson($url, [
+            'kind' => 'import',
+            'profile_id' => 'revisions',
+            'docx_b64' => base64_encode($bytes),
+        ])->assertStatus(202);
+    $jobUrl = $url.'/'.$registered->json('data.id');
+    $report = $this->getJson($jobUrl)->assertOk()
+        ->assertJsonPath('data.diagnostics_report.blocked', true)
+        ->json('data.diagnostics_report');
+    expect(array_column($report['diagnostics'], 'code'))->toContain('host_revision_marks_unsupported');
+
+    $this->withHeaders(['Idempotency-Key' => 'tracked-apply'])
+        ->postJson($jobUrl.'/apply', ['apply_command_id' => 'tracked-cmd'])
+        ->assertStatus(422)
+        ->assertJsonPath('code', 'exchange_profile_blocked');
+    expect($docs->content($doc)->stateVersion)->toBe($before->stateVersion);
+});
+
+it('exposes section and discussion loss in the server import preview report', function (string $fixture, string $code): void {
+    $owner = AccessTestHelpers::user(1);
+    $storage = AccessTestHelpers::storage();
+    AccessTestHelpers::grant($storage->rootNode, RoleRegistry::OWNER, subjectId: 1);
+    $drive = app(Vaulter::class)->drive($storage)->actingAs($owner);
+    $doc = app(DocumentsManager::class)->in($drive)->create('metadata-loss', 'vaulter/rich-text', sampleRichDocument());
+    $bytes = file_get_contents(dirname(__DIR__, 4).'/tests/corpus/docx/'.$fixture);
+    expect($bytes)->toBeString();
+
+    $url = 'api/vaulter/v1/documents/'.$doc->id.'/exchange-jobs';
+    $registered = $this->actingAs($owner)->withHeaders(['Idempotency-Key' => 'metadata-loss'])
+        ->postJson($url, [
+            'kind' => 'import',
+            'profile_id' => 'discussions',
+            'docx_b64' => base64_encode($bytes),
+        ])->assertStatus(202);
+
+    $this->getJson($url.'/'.$registered->json('data.id'))
+        ->assertOk()
+        ->assertJsonPath('data.state', 'preview_ready')
+        ->assertJsonPath('data.diagnostics_report.blocked', false)
+        ->assertJsonFragment(['code' => $code, 'action' => 'dropped']);
+})->with([
+    'sections' => ['d2-sections.docx', 'body_only_sections'],
+    'discussions' => ['d3-discussions.docx', 'body_only_discussions'],
+]);
+
+it('refuses to resolve a bare blob ID as an import source', function (): void {
+    $owner = AccessTestHelpers::user(1);
+    $storage = AccessTestHelpers::storage();
+    AccessTestHelpers::grant($storage->rootNode, RoleRegistry::OWNER, subjectId: 1);
+    $drive = app(Vaulter::class)->drive($storage)->actingAs($owner);
+    $doc = app(DocumentsManager::class)->in($drive)->create('blob-target', 'vaulter/rich-text', sampleRichDocument());
+    $bytes = makeDocxZip('<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p/></w:body></w:document>');
+    $blob = commitDocxToBlob(app(BlobStore::class), $storage->tenantId, $storage->id, $bytes);
+
+    $this->actingAs($owner)->withHeaders(['Idempotency-Key' => 'bare-blob'])
+        ->postJson('api/vaulter/v1/documents/'.$doc->id.'/exchange-jobs', [
+            'kind' => 'import',
+            'source_blob_id' => $blob->id,
+        ])->assertForbidden();
+});
+
 it('rejects corrupt archives, Zip Slip, XXE, and disallowed external relationships on import without modifying the document (10.2-B)', function (): void {
     $owner = AccessTestHelpers::user(1);
     $storage = AccessTestHelpers::storage();
@@ -568,8 +647,6 @@ it('rejects corrupt archives, Zip Slip, XXE, and disallowed external relationshi
 
     $drive = app(Vaulter::class)->drive($storage)->actingAs($owner);
     $docs = app(DocumentsManager::class);
-    $blobs = app(BlobStore::class);
-
     $docNode = $docs->in($drive)->create('security-target', 'vaulter/rich-text', sampleRichDocument('Untouched safe text'));
     $before = $docs->in($drive)->content($docNode);
 
@@ -588,14 +665,12 @@ it('rejects corrupt archives, Zip Slip, XXE, and disallowed external relationshi
     ];
 
     foreach ($cases as $label => $bytes) {
-        $blob = commitDocxToBlob($blobs, $storage->tenantId, $storage->id, $bytes);
-
         $res = $this->withHeaders(['Idempotency-Key' => 'sec-reg-'.$label])
             ->postJson('api/vaulter/v1/documents/'.$docNode->id.'/exchange-jobs', [
                 'request_key' => 'sec-'.$label,
                 'kind' => 'import',
                 'profile_id' => 'discussions',
-                'source_blob_id' => $blob->id,
+                'docx_b64' => base64_encode($bytes),
             ])
             ->assertStatus(202);
 
@@ -683,7 +758,7 @@ it('enforces ACL on import, export, download, preview, apply, and permission rev
     $this->getJson('api/vaulter/v1/documents/'.$docNode->id.'/exchange-jobs/'.$exportJobId)->assertNotFound();
 });
 
-it('applies imports through CommandJournal in strict journal write mode and syncs durable receipts', function (): void {
+it('rejects unsupported journal replacements and recovers legacy command receipts after the head advances', function (): void {
     $owner = AccessTestHelpers::user(1);
     $storage = AccessTestHelpers::storage();
     AccessTestHelpers::grant($storage->rootNode, RoleRegistry::OWNER, subjectId: 1);
@@ -694,6 +769,7 @@ it('applies imports through CommandJournal in strict journal write mode and sync
     $tables = app(DatabaseOptions::class);
 
     $docNode = $docs->in($drive)->create('journal-doc', 'vaulter/rich-text', sampleRichDocument('Initial journal text'));
+    $head = $docs->in($drive)->content($docNode);
 
     $this->actingAs($owner);
     $docxBytes = makeDocxZip('<?xml version="1.0" encoding="UTF-8"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>Journal settled clause</w:t></w:r></w:p></w:body></w:document>');
@@ -730,32 +806,49 @@ it('applies imports through CommandJournal in strict journal write mode and sync
     );
     app(UpdateLog::class)->appendFenced($docNode->id, $update('seed', 1), $roomOwner, 1, 0, static fn () => null);
 
-    // Apply queues an intent in CommandJournal (pending_commit = true -> HTTP 202).
-    $applyPending = $this->withHeaders(['Idempotency-Key' => 'journal-apply-1'])
-        ->postJson('api/vaulter/v1/documents/'.$docNode->id.'/exchange-jobs/'.$jobId.'/apply', [
-            'apply_command_id' => 'journal-cmd-77',
-            'expected_generation' => 0,
-            'expected_position' => 1,
-        ]);
+    $commandId = 'journal-cmd-77';
+    $applyUrl = 'api/vaulter/v1/documents/'.$docNode->id.'/exchange-jobs/'.$jobId.'/apply';
+    $this->withHeaders(['Idempotency-Key' => 'journal-refused'])
+        ->postJson($applyUrl, ['apply_command_id' => $commandId])
+        ->assertStatus(422)
+        ->assertJsonPath('code', 'exchange_unsupported_document');
+    expect(DB::table($tables->table('collaboration_commands'))->where('command_id', $commandId)->count())->toBe(0);
+    expect(app(ExchangeJobRepository::class)->findById($jobId)?->applyCommandId)->toBeNull();
 
-    $applyPending->assertStatus(202)
-        ->assertJsonPath('data.pending_commit', true)
-        ->assertJsonPath('data.write_mode', 'journal')
-        ->assertJsonPath('data.apply_receipt_id', null);
-
-    // Retry while still running returns the single pending command without duplicating collaboration_commands rows.
-    $this->withHeaders(['Idempotency-Key' => 'journal-apply-retry'])
-        ->postJson('api/vaulter/v1/documents/'.$docNode->id.'/exchange-jobs/'.$jobId.'/apply', [
-            'apply_command_id' => 'journal-cmd-77',
-        ])
-        ->assertStatus(202)
-        ->assertJsonPath('data.replayed', true);
-
-    $cmdRow = DB::table($tables->table('collaboration_commands'))
-        ->where('command_id', 'journal-cmd-77')
-        ->first();
-    expect($cmdRow)->not->toBeNull();
-    expect(DB::table($tables->table('collaboration_commands'))->where('command_id', 'journal-cmd-77')->count())->toBe(1);
+    // Recreate the pre-fix crash window: a durable command exists with no job link.
+    $preview = $this->getJson('api/vaulter/v1/documents/'.$docNode->id.'/exchange-jobs/'.$jobId)
+        ->assertOk()->json('data.preview');
+    $principal = Actor::user($owner)->ref();
+    $actor = new CommandActor(
+        $principal, $storage->tenantId === null ? null : (string) $storage->tenantId,
+        'drive:'.$storage->id, $principal->type.':'.$principal->id, (string) $storage->id, $docNode->id,
+    );
+    $hash = hash('sha256', 'proposal:'.$jobId.':'.$commandId);
+    $proposal = sprintf('%s-%s-4%s-%04x-%s', substr($hash, 0, 8), substr($hash, 8, 4),
+        substr($hash, 13, 3), (hexdec(substr($hash, 16, 4)) & 0x3FFF) | 0x8000, substr($hash, 20, 12));
+    app(CommandJournal::class)->register(
+        scope: $actor,
+        key: $commandId,
+        proposal: $proposal,
+        digest: CanonicalJson::sha256Hex([
+            'exchange_job_id' => $jobId,
+            'document_id' => $head->documentId,
+            'apply_command_id' => $commandId,
+            'generation' => 0,
+            'position' => 1,
+            'document' => $preview,
+        ]),
+        generation: 0,
+        schema: $head->schemaVersion,
+        readPosition: 1,
+        intent: [
+            'operation' => 'exchange.apply_import',
+            'exchange_job_id' => $jobId,
+            'format' => 'docx',
+            'profile_id' => 'standard',
+            'document' => $preview,
+        ],
+    );
 
     // Room owner discovers next pending intent and settles it into UpdateLog + durable receipt.
     $nextIntent = $db->transaction(static fn (): ?array => app(CommandJournal::class)->next(app(CollaborativeState::class)->lock($docNode->id)));
@@ -775,20 +868,23 @@ it('applies imports through CommandJournal in strict journal write mode and sync
     expect($settled['state'])->toBe('committed')
         ->and($settled['receipt_id'])->toBeString();
 
-    // Fetching status syncs state=applied & durable receipt_id, and replay apply returns the identical receipt!
-    $this->getJson('api/vaulter/v1/documents/'.$docNode->id.'/exchange-jobs/'.$jobId)
-        ->assertOk()
-        ->assertJsonPath('data.state', 'applied')
-        ->assertJsonPath('data.apply_receipt_id', $settled['receipt_id']);
+    DB::table($tables->table('documents'))->where('node_id', $docNode->id)->update(['state_version' => 2]);
+    $this->withHeaders(['Idempotency-Key' => 'journal-stale'])
+        ->postJson($applyUrl, ['apply_command_id' => 'different-command', 'expected_position' => 2])
+        ->assertStatus(409)
+        ->assertJsonPath('code', 'exchange_stale_preview');
 
     $this->withHeaders(['Idempotency-Key' => 'journal-apply-after-settle'])
-        ->postJson('api/vaulter/v1/documents/'.$docNode->id.'/exchange-jobs/'.$jobId.'/apply', [
-            'apply_command_id' => 'journal-cmd-77',
-        ])
+        ->postJson($applyUrl, ['apply_command_id' => $commandId])
         ->assertOk()
         ->assertJsonPath('data.state', 'applied')
         ->assertJsonPath('data.apply_receipt_id', $settled['receipt_id'])
         ->assertJsonPath('data.replayed', true);
+
+    $this->getJson('api/vaulter/v1/documents/'.$docNode->id.'/exchange-jobs/'.$jobId)
+        ->assertOk()
+        ->assertJsonPath('data.state', 'applied')
+        ->assertJsonPath('data.apply_receipt_id', $settled['receipt_id']);
 });
 
 it('releases exchange source/output pins on document trash purge and retention cleanup without touching sibling docs', function (): void {
@@ -804,13 +900,14 @@ it('releases exchange source/output pins on document trash purge and retention c
     $survivor = $docs->in($drive)->create('survivor-doc', 'vaulter/rich-text', sampleRichDocument('Survivor text'));
 
     $this->actingAs($owner);
-    $this->withHeaders(['Idempotency-Key' => 'purge-exp-doomed'])
+    $doomedRes = $this->withHeaders(['Idempotency-Key' => 'purge-exp-doomed'])
         ->postJson('api/vaulter/v1/documents/'.$doomed->id.'/exchange-jobs', [
             'request_key' => 'purge-exp-doomed',
             'kind' => 'export',
             'profile_id' => 'standard',
         ])
         ->assertStatus(202);
+    $doomedJobId = (string) $doomedRes->json('data.id');
 
     $survRes = $this->withHeaders(['Idempotency-Key' => 'purge-exp-survivor'])
         ->postJson('api/vaulter/v1/documents/'.$survivor->id.'/exchange-jobs', [
@@ -824,8 +921,24 @@ it('releases exchange source/output pins on document trash purge and retention c
     expect($pins->countByOwner()[ExchangeJobRepository::SOURCE_PIN_OWNER] ?? 0)->toBe(2)
         ->and($pins->countByOwner()[ExchangeJobRepository::OUTPUT_PIN_OWNER] ?? 0)->toBe(2);
 
-    $trashed = $drive->nodes()->trash($doomed->id);
-    $drive->trash()->purge($trashed->id);
+    $drive->nodes()->trash($doomed->id);
+    $jobs = app(ExchangeJobRepository::class);
+    $trash = $drive->withIdempotencyKey('nested-purge')->trash();
+    expect(fn () => app(VaulterDatabase::class)->transaction(function () use ($trash, $jobs, $pins, $doomedJobId): void {
+        expect($trash->empty())->toBe(1)
+            ->and($jobs->findById($doomedJobId))->toBeNull()
+            ->and($pins->countByOwner()[ExchangeJobRepository::SOURCE_PIN_OWNER] ?? 0)->toBe(1)
+            ->and($pins->countByOwner()[ExchangeJobRepository::OUTPUT_PIN_OWNER] ?? 0)->toBe(1);
+
+        throw new RuntimeException('Rollback the purge');
+    }))->toThrow(RuntimeException::class, 'Rollback the purge');
+
+    expect($jobs->findById($doomedJobId))->not->toBeNull()
+        ->and($pins->countByOwner()[ExchangeJobRepository::SOURCE_PIN_OWNER] ?? 0)->toBe(2)
+        ->and($pins->countByOwner()[ExchangeJobRepository::OUTPUT_PIN_OWNER] ?? 0)->toBe(2);
+
+    expect($trash->empty())->toBe(1)
+        ->and($jobs->findById($doomedJobId))->toBeNull();
 
     // Doomed document's job & pins are released while survivor keeps its 1+1 pins intact.
     expect($pins->countByOwner()[ExchangeJobRepository::SOURCE_PIN_OWNER] ?? 0)->toBe(1)

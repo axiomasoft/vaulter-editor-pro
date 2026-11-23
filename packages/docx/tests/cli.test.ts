@@ -1,11 +1,48 @@
 import { execFileSync } from 'node:child_process'
+import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
-import { zipSync, strToU8 } from 'fflate'
+import { strFromU8, unzipSync, zipSync, strToU8 } from 'fflate'
 import { describe, expect, it } from 'vitest'
 import { handleExchangeCliRequest } from '../src/cli'
-import { CORPUS_D1 } from '../../../tests/corpus/docx/corpus'
+import { CORPUS_D1, CORPUS_D4 } from '../../../tests/corpus/docx/corpus'
 
 describe('@vaulter/editor-pro-docx exchange CLI bridge', () => {
+  it.each(['revisions', 'strict-ooxml'])('uses the %s profile revision default and honors an explicit opt-out', async (profile_id) => {
+    const request = {
+      version: 1,
+      request_id: 'cli-revisions',
+      operation: 'export',
+      profile_id,
+      document: { ...CORPUS_D4.document, content: CORPUS_D4.document.content?.slice(0, 1) },
+    }
+    const documentXml = async (options?: { enableRevisions: boolean }) => {
+      const response = JSON.parse(await handleExchangeCliRequest(JSON.stringify({ ...request, options })))
+      expect(response).toMatchObject({ ok: true, blocked: false })
+      return strFromU8(unzipSync(Buffer.from(response.docx_b64, 'base64'))['word/document.xml'])
+    }
+
+    expect(await documentXml()).toMatch(/<w:ins\b/)
+    expect(await documentXml()).toMatch(/<w:del\b/)
+    expect(await documentXml({ enableRevisions: false })).not.toMatch(/<w:(?:ins|del)\b/)
+  })
+
+  it.each([
+    ['d2-sections.docx', 'body_only_sections'],
+    ['d3-discussions.docx', 'body_only_discussions'],
+  ])('reports metadata discarded from %s by the body-only import response', async (filename, code) => {
+    const payload = readFileSync(resolve(__dirname, '../../../tests/corpus/docx', filename))
+    const response = JSON.parse(await handleExchangeCliRequest(JSON.stringify({
+      version: 1,
+      request_id: 'cli-import-loss',
+      operation: 'import',
+      profile_id: 'discussions',
+      docx_b64: payload.toString('base64'),
+    })))
+
+    expect(response).toMatchObject({ ok: true, blocked: false })
+    expect(response.report.diagnostics).toContainEqual(expect.objectContaining({ code, action: 'dropped' }))
+  })
+
   it('roundtrips export -> import via handleExchangeCliRequest preserving D1 table merges and links', async () => {
     const exportReq = JSON.stringify({
       version: 1,

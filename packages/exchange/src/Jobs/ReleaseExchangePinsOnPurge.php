@@ -4,40 +4,29 @@ declare(strict_types=1);
 
 namespace Vaulter\EditorPro\Exchange\Jobs;
 
-use Closure;
 use Packman\Attributes\Internal;
+use Vaulter\Drive\Events\Nodes\NodePurged;
 use Vaulter\EditorPro\Exchange\Repositories\ExchangeJobRepository;
-use Vaulter\Operations\Operation;
-use Vaulter\Operations\OperationMiddleware;
-use Vaulter\ValueObjects\Operations\ScopeRef;
+use Vaulter\Events\DomainEvent;
+use Vaulter\Events\EventSink;
+use Vaulter\Events\SinkResult;
+use Vaulter\Events\SinkWriter;
 
 /**
  * Releases Media blob pins (`editor_pro.exchange_source` and `editor_pro.exchange_output`)
  * for exchange jobs cascade-deleted when a parent document node is permanently purged.
  */
 #[Internal]
-final readonly class ReleaseExchangePinsOnPurge implements OperationMiddleware
+final readonly class ReleaseExchangePinsOnPurge implements EventSink
 {
-    private const string PURGE = 'drive.trash.purge';
-
     public function __construct(private ExchangeJobRepository $jobs) {}
 
-    public function handle(Operation $operation, Closure $next): mixed
+    public function record(DomainEvent $event, SinkWriter $writer): SinkResult
     {
-        $scope = $operation->context->scope;
-        if ($operation->spec->name !== self::PURGE || $operation->isNested() || $scope->kind !== ScopeRef::DRIVE) {
-            return $next($operation);
+        if ($event instanceof NodePurged) {
+            $this->jobs->releasePinsForDeletedJobs($writer->connection());
         }
 
-        $projectScope = $scope->kind.':'.$scope->id;
-        $candidates = $this->jobs->findJobsForProjectScope($projectScope);
-
-        $result = $next($operation);
-
-        if ($candidates !== []) {
-            $this->jobs->releasePinsForDeletedJobs($candidates);
-        }
-
-        return $result;
+        return SinkResult::Skipped;
     }
 }

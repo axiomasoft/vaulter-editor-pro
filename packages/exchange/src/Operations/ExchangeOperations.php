@@ -137,6 +137,10 @@ final readonly class ExchangeOperations implements DriveExtension
                 'format' => $input->format->value,
                 'profile_id' => $profileId,
                 'source_blob_id' => $sourceBlobId,
+                ...($input->rawBytes === null && $input->sourceNodeId !== null ? [
+                    'source_node_id' => $input->sourceNodeId,
+                    'source_revision_id' => $input->sourceRevisionId,
+                ] : []),
                 'options' => $input->options,
             ];
             $requiredAbility = Ability::Edit;
@@ -492,14 +496,7 @@ final readonly class ExchangeOperations implements DriveExtension
                 throw ExchangeException::stalePreview('document_state_pending');
             }
 
-            $expectedGen = $input->expectedGeneration ?? $lockedJob->sourceGeneration;
-            $expectedPos = $input->expectedPosition ?? $lockedJob->sourcePosition;
-            if ($expectedGen !== null && $state->generation !== $expectedGen) {
-                throw ExchangeException::stalePreview('generation_changed');
-            }
-            if ($expectedPos !== null && $state->position !== $expectedPos) {
-                throw ExchangeException::stalePreview('position_changed');
-            }
+            $this->assertPreviewHead($lockedJob, $input, $state->generation, $state->position);
 
             $content = TipTapContent::fromArray($normalizedDoc, TipTapSchema::richText());
             $next = $locked->replace($content, $state->position);
@@ -526,6 +523,16 @@ final readonly class ExchangeOperations implements DriveExtension
         return $receipt;
     }
 
+    private function assertPreviewHead(ExchangeJobData $job, ApplyExchangeImportInput $input, int $generation, int $position): void
+    {
+        if ($job->sourceGeneration !== $generation || ($input->expectedGeneration !== null && $input->expectedGeneration !== $generation)) {
+            throw ExchangeException::stalePreview('generation_changed');
+        }
+        if ($job->sourcePosition !== $position || ($input->expectedPosition !== null && $input->expectedPosition !== $position)) {
+            throw ExchangeException::stalePreview('position_changed');
+        }
+    }
+
     /**
      * @param  array{id: int|string, node_id: int|string, tenant_id: int|string, type: string, collab_epoch: int, state_version: int, schema_version: int, write_mode: string}  $docMeta
      * @param  array<string, mixed>  $normalizedDoc
@@ -544,119 +551,110 @@ final readonly class ExchangeOperations implements DriveExtension
         }
         $actor = $this->buildCommandActor($nodeId, $docMeta['tenant_id']);
 
-        $expectedGen = $input->expectedGeneration ?? $job->sourceGeneration ?? $docMeta['collab_epoch'];
-        $expectedPos = $input->expectedPosition ?? $job->sourcePosition ?? $docMeta['state_version'];
-
-        $previouslySubmitted = $job->applyCommandId !== null;
-        if ($previouslySubmitted && $job->applyCommandId !== $applyCommandId) {
-            throw ExchangeException::idempotencyConflict('apply_command_id_mismatch');
-        }
-
-        if (! $previouslySubmitted) {
-            if ($docMeta['collab_epoch'] !== $expectedGen) {
-                throw ExchangeException::stalePreview('generation_changed');
-            }
-            if ($docMeta['state_version'] !== $expectedPos) {
-                throw ExchangeException::stalePreview('position_changed');
-            }
-        }
-
-        $proposalUuid = self::deterministicUuid('proposal:'.$job->id.':'.$applyCommandId);
-        $digest = CanonicalJson::sha256Hex([
-            'exchange_job_id' => $job->id,
-            'document_id' => $job->documentId,
-            'apply_command_id' => $applyCommandId,
-            'generation' => $expectedGen,
-            'position' => $expectedPos,
-            'document' => $normalizedDoc,
-        ]);
-
         try {
-            $record = $previouslySubmitted
-                ? ($journal->status($actor, $applyCommandId) ?? $journal->register(
-                    scope: $actor,
-                    key: $applyCommandId,
-                    proposal: $proposalUuid,
-                    digest: $digest,
-                    generation: $expectedGen,
-                    schema: $docMeta['schema_version'],
-                    readPosition: $expectedPos,
-                    intent: [
-                        'operation' => 'exchange.apply_import',
-                        'exchange_job_id' => $job->id,
-                        'format' => $job->format->value,
-                        'profile_id' => $job->profileId,
-                        'document' => $normalizedDoc,
-                    ],
-                ))
-                : $journal->register(
-                    scope: $actor,
-                    key: $applyCommandId,
-                    proposal: $proposalUuid,
-                    digest: $digest,
-                    generation: $expectedGen,
-                    schema: $docMeta['schema_version'],
-                    readPosition: $expectedPos,
-                    intent: [
-                        'operation' => 'exchange.apply_import',
-                        'exchange_job_id' => $job->id,
-                        'format' => $job->format->value,
-                        'profile_id' => $job->profileId,
-                        'document' => $normalizedDoc,
-                    ],
+            return $this->database->transaction(function (Connection $conn) use (
+                $journal, $actor, $nodeId, $job, $input, $applyCommandId, $normalizedDoc,
+            ): ApplyExchangeReceiptData {
+                // Status locks document authority first, matching journal and snapshot lock order.
+                $record = $journal->status($actor, $applyCommandId);
+                $lockedJob = $this->jobs->lockForApply($conn, $job->id, $job->documentId);
+                $meta = $this->lookup->documentForNode($nodeId);
+
+                if ($lockedJob->applyCommandId !== null && $lockedJob->applyCommandId !== $applyCommandId) {
+                    throw $lockedJob->state === ExchangeJobState::Applied
+                        ? ExchangeException::alreadyApplied()
+                        : ExchangeException::idempotencyConflict('apply_command_id_mismatch');
+                }
+
+                if ($lockedJob->state === ExchangeJobState::Applied) {
+                    return new ApplyExchangeReceiptData(
+                        job: $lockedJob,
+                        applyCommandId: $applyCommandId,
+                        applyReceiptId: $lockedJob->applyReceiptId,
+                        writeMode: 'journal',
+                        generation: $meta['collab_epoch'],
+                        position: $meta['state_version'],
+                        replayed: true,
+                    );
+                }
+
+                if ($lockedJob->state !== ExchangeJobState::PreviewReady) {
+                    throw ExchangeException::jobNotReady($lockedJob->state->value);
+                }
+
+                $generation = $lockedJob->sourceGeneration;
+                $position = $lockedJob->sourcePosition;
+                if ($generation === null || $position === null) {
+                    throw ExchangeException::stalePreview('preview_head_missing');
+                }
+
+                if ($record === null) {
+                    $this->assertPreviewHead($lockedJob, $input, $meta['collab_epoch'], $meta['state_version']);
+                    if ($meta['write_mode'] !== 'journal') {
+                        throw ExchangeException::stalePreview('write_mode_changed');
+                    }
+
+                    // The strict Hub has no whole-document replacement effect.
+                    throw ExchangeException::unsupportedDocument('journal_import_replacement_unavailable');
+                }
+
+                if ($lockedJob->applyCommandId === null) {
+                    // For an unlinked legacy command, register verifies the old fingerprint before
+                    // linking the receipt. The document lock keeps the lookup and verification together.
+                    $record = $journal->register(
+                        scope: $actor,
+                        key: $applyCommandId,
+                        proposal: self::deterministicUuid('proposal:'.$lockedJob->id.':'.$applyCommandId),
+                        digest: CanonicalJson::sha256Hex([
+                            'exchange_job_id' => $lockedJob->id,
+                            'document_id' => $lockedJob->documentId,
+                            'apply_command_id' => $applyCommandId,
+                            'generation' => $generation,
+                            'position' => $position,
+                            'document' => $normalizedDoc,
+                        ]),
+                        generation: $generation,
+                        schema: is_int($record['schema_version'] ?? null) ? $record['schema_version'] : $meta['schema_version'],
+                        readPosition: $position,
+                        intent: [
+                            'operation' => 'exchange.apply_import',
+                            'exchange_job_id' => $lockedJob->id,
+                            'format' => $lockedJob->format->value,
+                            'profile_id' => $lockedJob->profileId,
+                            'document' => $normalizedDoc,
+                        ],
+                    );
+                }
+
+                $journalState = $record['state'] ?? null;
+                if ($journalState === 'rejected') {
+                    $reason = $record['rejection_code'] ?? null;
+                    throw ExchangeException::stalePreview(is_string($reason) ? $reason : 'journal_rejected');
+                }
+
+                $receiptId = $record['receipt_id'] ?? null;
+                $committed = $journalState === 'committed' && is_string($receiptId);
+                $updatedJob = $committed
+                    ? $this->jobs->markAppliedOnConnection($conn, $lockedJob->id, $applyCommandId, $receiptId)
+                    : $this->jobs->recordPendingJournalApply($conn, $lockedJob, $applyCommandId);
+
+                return new ApplyExchangeReceiptData(
+                    job: $updatedJob,
+                    applyCommandId: $applyCommandId,
+                    applyReceiptId: $committed ? $receiptId : null,
+                    writeMode: 'journal',
+                    generation: is_int($record['generation'] ?? null) ? $record['generation'] : $generation,
+                    position: is_int($record['to_seq'] ?? null) ? $record['to_seq'] : $position,
+                    replayed: true,
+                    pendingCommit: ! $committed,
                 );
+            });
         } catch (RoomWriteConflict $conflict) {
             throw match ($conflict->reason) {
                 'key_conflict' => ExchangeException::idempotencyConflict('journal_key_conflict'),
                 default => ExchangeException::stalePreview($conflict->reason),
             };
         }
-
-        $journalState = is_string($record['state'] ?? null) ? $record['state'] : 'running';
-        $receiptId = is_string($record['receipt_id'] ?? null) ? $record['receipt_id'] : null;
-
-        if ($journalState === 'committed' && $receiptId !== null) {
-            $applied = $this->database->transaction(function (Connection $conn) use ($job, $applyCommandId, $receiptId): ExchangeJobData {
-                $locked = $this->jobs->lockForApply($conn, $job->id, $job->documentId);
-                if ($locked->state === ExchangeJobState::Applied) {
-                    return $locked;
-                }
-
-                return $this->jobs->markAppliedOnConnection($conn, $job->id, $applyCommandId, $receiptId);
-            });
-
-            $pos = is_numeric($record['to_seq'] ?? null) ? (int) $record['to_seq'] : $expectedPos;
-            $gen = is_numeric($record['generation'] ?? null) ? (int) $record['generation'] : $expectedGen;
-
-            return new ApplyExchangeReceiptData(
-                job: $applied,
-                applyCommandId: $applyCommandId,
-                applyReceiptId: $receiptId,
-                writeMode: 'journal',
-                generation: $gen,
-                position: $pos,
-                replayed: $previouslySubmitted,
-            );
-        }
-
-        if ($journalState === 'rejected') {
-            $rej = is_string($record['rejection_code'] ?? null) ? $record['rejection_code'] : 'journal_rejected';
-            throw ExchangeException::stalePreview($rej);
-        }
-
-        $this->jobs->recordPendingJournalApply($job->id, $applyCommandId);
-        $fresh = $this->jobs->findById($job->id) ?? $job;
-
-        return new ApplyExchangeReceiptData(
-            job: $fresh,
-            applyCommandId: $applyCommandId,
-            applyReceiptId: null,
-            writeMode: 'journal',
-            generation: $expectedGen,
-            position: $expectedPos,
-            replayed: $previouslySubmitted,
-            pendingCommit: true,
-        );
     }
 
     private function syncPendingJournalState(string $nodeId, ExchangeJobData $job): ?ExchangeJobData
@@ -737,32 +735,11 @@ final readonly class ExchangeOperations implements DriveExtension
             return $this->commitBlobBytes($bytes);
         }
 
-        $blobId = trim((string) $input->sourceBlobId);
-        if ($blobId === '' || ! $this->lookup->fitsKey($blobId)) {
-            throw ExchangeException::invalidCommand('import job requires source_blob_id, source.node_id, or uploaded file.');
+        if ($input->sourceBlobId !== null && trim($input->sourceBlobId) !== '') {
+            throw PermissionDeniedException::forAbility(Ability::Download->value);
         }
 
-        $stream = $this->blobs->read($blobId);
-        if (! is_resource($stream)) {
-            throw ExchangeException::sourceUnavailable('source_blob_not_found');
-        }
-        $total = 0;
-        try {
-            while (! feof($stream)) {
-                $chunk = fread($stream, 65_536);
-                if ($chunk === false) {
-                    throw ExchangeException::sourceUnavailable('source_blob_read_failed');
-                }
-                $total += strlen($chunk);
-                if ($total > $this->options->maxImportBytes) {
-                    throw ExchangeException::zipLimitExceeded('import_size_limit');
-                }
-            }
-        } finally {
-            fclose($stream);
-        }
-
-        return $blobId;
+        throw ExchangeException::invalidCommand('Import requires an uploaded file or an authorized source.node_id.');
     }
 
     /**
@@ -775,8 +752,6 @@ final readonly class ExchangeOperations implements DriveExtension
             if (preg_match('/\A[0-9a-f]{64}\z/', $norm) !== 1) {
                 throw ExchangeException::invalidCommand('request_fingerprint must be a 64-character hex SHA-256 digest.');
             }
-
-            return $norm;
         }
 
         return CanonicalJson::sha256Hex($fingerprintInput);
@@ -842,7 +817,10 @@ final readonly class ExchangeOperations implements DriveExtension
     private function normalizeTipTapArray(array $doc): array
     {
         $schema = TipTapSchema::richText();
-        [$decayed] = TipTapContent::decayReporting($doc, $schema);
+        [$decayed, $lossless] = TipTapContent::decayReporting($doc, $schema);
+        if (! $lossless) {
+            throw ExchangeException::profileBlocked('host_schema_loss');
+        }
         $withBlockIds = BlockIdentity::assignMissing($decayed->withSanitizedUrls()->toArray());
         try {
             return TipTapContent::fromArray($withBlockIds, $schema)->toArray();

@@ -30,10 +30,10 @@ use Vaulter\EditorPro\Exchange\Operations\ExchangeOperations;
 use Vaulter\EditorPro\Exchange\Providers\ExchangeBindings;
 use Vaulter\EditorPro\Exchange\Schema\ExchangeSchema;
 use Vaulter\EditorPro\Exchange\Schema\ExchangeSchemaSets;
+use Vaulter\Events\EventSink;
 use Vaulter\Modules\Activation;
 use Vaulter\Modules\PluginModuleSpec;
 use Vaulter\Modules\WithModuleRuntime;
-use Vaulter\Operations\OperationMiddleware;
 
 /**
  * Vaulter Editor Pro DOCX Exchange extension plugin (`vaulter.exchange`):
@@ -128,7 +128,7 @@ final class EditorProExchangeModule implements ExtensionPlugin, WithConfiguratio
         return [
             ['slot' => RouteLabelSource::class, 'id' => 'exchange.routes', 'implementation' => ExchangeRouteLabels::class],
             ['slot' => DriveExtension::class, 'id' => 'exchange.jobs', 'implementation' => ExchangeOperations::class, 'key' => ExchangeOperations::class],
-            ['slot' => OperationMiddleware::class, 'id' => 'exchange.purge-pins', 'implementation' => ReleaseExchangePinsOnPurge::class],
+            ['slot' => EventSink::class, 'id' => 'exchange.purge-pins', 'implementation' => ReleaseExchangePinsOnPurge::class],
         ];
     }
 
