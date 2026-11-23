@@ -1,4 +1,4 @@
-import type { Mark, Node as ProseMirrorNode, Schema } from '@tiptap/pm/model'
+import { Fragment, type Mark, type Node as ProseMirrorNode, type Schema } from '@tiptap/pm/model'
 import { StepMap } from '@tiptap/pm/transform'
 import { ChangeSet, type Span, type TokenEncoder } from 'prosemirror-changeset'
 
@@ -479,6 +479,7 @@ function diffAlignedBlockWithChangeSet(
   offsetB: number,
   spansOut: InlineDiffSpan[],
   attrsOut: AttrChangeEntry[],
+  parent?: ProseMirrorNode,
 ): void {
   // If container holds nested alignable children (listItem/tableRow), diff own attrs once then align children recursively.
   if (
@@ -524,6 +525,7 @@ function diffAlignedBlockWithChangeSet(
           offsetB + 1 + sub.fromPosB,
           spansOut,
           attrsOut,
+          blockA,
         )
       } else if (sub.kind === 'inserted' && sub.toNode && sub.fromPosB !== null) {
         spansOut.push({
@@ -554,21 +556,25 @@ function diffAlignedBlockWithChangeSet(
 
   diffNodeAttributesRecursive(blockA, blockB, offsetB, attrsOut)
 
-  const docA = schema.topNodeType.createAndFill(null, blockA)
-  const docB = schema.topNodeType.createAndFill(null, blockB)
+  // A list item or row requires its parent in a valid document. Account for the
+  // synthetic parent’s opening token when translating the diff back to the original document.
+  const docA = schema.topNodeType.createAndFill(null, parent ? parent.copy(Fragment.from(blockA)) : blockA)
+  const docB = schema.topNodeType.createAndFill(null, parent ? parent.copy(Fragment.from(blockB)) : blockB)
   if (!docA || !docB) {
     return
   }
+  const docOffsetA = parent ? offsetA - 1 : offsetA
+  const docOffsetB = parent ? offsetB - 1 : offsetB
 
   const cs = ChangeSet.create<number>(docA, (a, b) => (a === b ? a : a), MarkAwareEncoder)
   const map = new StepMap([0, docA.content.size, docB.content.size])
   const nextCs = cs.addSteps(docB, [map], 1)
 
   for (const ch of nextCs.changes) {
-    const absFromA = offsetA + ch.fromA
-    const absToA = offsetA + ch.toA
-    const absFromB = offsetB + ch.fromB
-    const absToB = offsetB + ch.toB
+    const absFromA = docOffsetA + ch.fromA
+    const absToA = docOffsetA + ch.toA
+    const absFromB = docOffsetB + ch.fromB
+    const absToB = docOffsetB + ch.toB
 
     const textA = docA.textBetween(ch.fromA, ch.toA, '\n', '\n')
     const textB = docB.textBetween(ch.fromB, ch.toB, '\n', '\n')
@@ -578,7 +584,7 @@ function diffAlignedBlockWithChangeSet(
     // Identical text with changed marks/attrs detected by MarkAwareEncoder!
     if (textA.length > 0 && textA === textB) {
       const beforeCount = spansOut.length
-      splitMarkRuns(docA, ch.fromA, ch.toA, docB, ch.fromB, ch.toB, offsetA, offsetB, spansOut)
+      splitMarkRuns(docA, ch.fromA, ch.toA, docB, ch.fromB, ch.toB, docOffsetA, docOffsetB, spansOut)
       if (spansOut.length === beforeCount) {
         spansOut.push({
           kind: 'mark_change',

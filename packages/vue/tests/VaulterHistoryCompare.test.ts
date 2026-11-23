@@ -8,6 +8,27 @@ import { BlockId } from '@vaulter/vue'
 import VaulterHistoryCompare from '../src/components/VaulterHistoryCompare.vue'
 
 describe('VaulterHistoryCompare (REVIEW-HISTORY)', () => {
+  it('previews a rich-text image through the default schema', () => {
+    const wrapper = mount(VaulterHistoryCompare, {
+      props: {
+        mode: 'preview',
+        fromContent: {
+          type: 'doc',
+          content: [
+            { type: 'image', attrs: { src: 'https://vaulter.test/revision.png', alt: 'Revision image', width: 240 } },
+            { type: 'image', attrs: { src: 'data:image/png;base64,AA==' } },
+          ],
+        },
+      },
+    })
+
+    expect(wrapper.findAll('img')).toHaveLength(1)
+    expect(wrapper.get('img').attributes()).toMatchObject({
+      src: 'https://vaulter.test/revision.png', alt: 'Revision image', width: '240',
+    })
+    wrapper.unmount()
+  })
+
   it('renders isolated read-only structural compare with marks & attrs while emitting zero live updates', () => {
     const versionH = {
       type: 'doc',

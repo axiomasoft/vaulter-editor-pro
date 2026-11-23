@@ -47,6 +47,32 @@ function setupCollabEditor(initialJson: Record<string, unknown>) {
 }
 
 describe('safeResolveRelativePos & Yjs range anchor lifecycle (COMMENTS / #8614)', () => {
+  it('round-trips a range after a marked run and hard break', () => {
+    const { editor, ydoc, fragment, getMapping } = setupCollabEditor({
+      type: 'doc',
+      content: [{
+        type: 'paragraph',
+        attrs: { blockId: 'blk_marked' },
+        content: [
+          { type: 'text', text: 'abc', marks: [{ type: 'bold' }] },
+          { type: 'hardBreak' },
+          { type: 'text', text: 'xyz' },
+        ],
+      }],
+    })
+
+    try {
+      const mapping = getMapping()
+      const payload = buildYjsRelativePayload(ydoc, fragment, 5, 8, 'blk_marked', mapping)
+      expect(payload).not.toBeNull()
+      expect(resolveYjsRangeAnchor(ydoc, fragment, payload!, mapping, (from, to) => editor.state.doc.textBetween(from, to)))
+        .toMatchObject({ state: 'attached', from: 5, to: 8, quoteText: 'xyz' })
+    } finally {
+      editor.destroy()
+      ydoc.destroy()
+    }
+  })
+
   it('resolves "Xhello" after deleting "X" to pos === 1 even when upstream returns null (#8614)', () => {
     const { editor, ydoc, fragment, getMapping } = setupCollabEditor({
       type: 'doc',

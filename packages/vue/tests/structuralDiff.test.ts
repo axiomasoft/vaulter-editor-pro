@@ -27,6 +27,28 @@ const schema = getSchema([
 ])
 
 describe('Two-stage structural diff (prosemirror-changeset + MarkAwareEncoder + attr_change)', () => {
+  it.each(['list', 'table'])('reports mark-only edits at document positions inside a %s', (kind) => {
+    const makeDoc = (bold: boolean) => {
+      const paragraph = {
+        type: 'paragraph',
+        content: [{ type: 'text', text: 'target', marks: bold ? [{ type: 'bold' }] : [] }],
+      }
+      const container = kind === 'list'
+        ? { type: 'bulletList', content: [{ type: 'listItem', content: [paragraph] }] }
+        : { type: 'table', content: [{ type: 'tableRow', content: [{ type: 'tableCell', content: [paragraph] }] }] }
+      return schema.nodeFromJSON({ type: 'doc', content: [{ type: 'paragraph' }, container] })
+    }
+
+    const before = makeDoc(false)
+    const after = makeDoc(true)
+    const { inlineSpans } = computeStructuralDiff(before, after)
+    expect(inlineSpans).toHaveLength(1)
+    const [span] = inlineSpans
+    expect(span).toMatchObject({ kind: 'mark_change', text: 'target', marksAfter: [{ type: 'bold' }] })
+    expect(before.textBetween(span.fromA, span.toA)).toBe('target')
+    expect(after.textBetween(span.fromB, span.toB)).toBe('target')
+  })
+
   it('aligns moved blocks by attrs.blockId and falls back to type + simhash LCS without blockId', () => {
     const docA = schema.nodeFromJSON({
       type: 'doc',

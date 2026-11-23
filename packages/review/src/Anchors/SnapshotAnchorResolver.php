@@ -93,6 +93,12 @@ final readonly class SnapshotAnchorResolver
         $newTo = $this->mapEndOffset($to, $delStart, $delEnd, $delta);
 
         if ($newFrom >= $newTo) {
+            // Another copy in the old text could survive even when this range was deleted.
+            if ($this->findUtf16Occurrences($oldText, $anchor->quoteText) === [$from]
+                && self::utf16Substr($oldText, $from, $to - $from) === $anchor->quoteText) {
+                return $this->recoverQuote($anchor, $newText, self::utf16Length($anchor->quoteText));
+            }
+
             return $this->detach($anchor);
         }
 
@@ -162,7 +168,11 @@ final readonly class SnapshotAnchorResolver
             return new SnapshotResolutionResult(AnchorState::Attached, $anchor->selectorPayload, $anchor->quoteText, false);
         }
 
-        // Look up all occurrences of quote_text in UTF-16 code units.
+        return $this->recoverQuote($anchor, $text, $quoteLen);
+    }
+
+    private function recoverQuote(CommentAnchorData $anchor, string $text, int $quoteLen): SnapshotResolutionResult
+    {
         $matches = $this->findUtf16Occurrences($text, $anchor->quoteText);
         if (count($matches) === 1) {
             return $this->remapToOffset($anchor, $text, $matches[0], $quoteLen);

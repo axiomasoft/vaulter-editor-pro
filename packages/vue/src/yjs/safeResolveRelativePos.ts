@@ -162,7 +162,7 @@ export function resolveXmlTextPosition(
         const relZero = Y.createRelativePositionFromTypeIndex(child, 0, 0)
         const abs = safeResolveRelativePos(ydoc, fragment, relZero, mapping)
         if (abs !== null) {
-          candidates.push({ type: child, absStart: abs, length: child.toString().length })
+          candidates.push({ type: child, absStart: abs, length: child.length })
         }
       } else if (child instanceof Y.XmlElement) {
         walk(child)

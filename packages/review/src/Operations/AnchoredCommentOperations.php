@@ -13,6 +13,7 @@ use Vaulter\Documents\Data\Comments\AddCommentInput;
 use Vaulter\Documents\Data\Snapshots\CommentSnapshot;
 use Vaulter\Documents\DocumentsManager;
 use Vaulter\Documents\Exceptions\CommentNotFoundException;
+use Vaulter\Documents\Operations\CommentOperations;
 use Vaulter\Drive\Contracts\DriveExtension;
 use Vaulter\Drive\Contracts\DriveHandle;
 use Vaulter\Drive\Data\ListOptions;
@@ -83,11 +84,16 @@ final readonly class AnchoredCommentOperations implements DriveExtension
         ?ListOptions $options = null,
     ): Page {
         $drive = $this->drive();
-        $commentPage = $this->documents->comments($drive)->list($node, $options);
+        $documentComments = $this->documents->comments($drive);
+        $commentPage = $documentComments->list($node, $options);
         $comments = $commentPage->items;
 
         $ids = array_map(static fn (CommentSnapshot $c): string => $c->id, $comments);
-        $anchorsByComment = $this->anchors->mapByCommentIds($ids);
+        $roots = $filter === CommentFilterStatus::All ? [] : $this->threadRoots($documentComments, $node, $comments);
+        foreach ($roots as $root) {
+            $ids[] = $root->id;
+        }
+        $anchorsByComment = $this->anchors->mapByCommentIds(array_values(array_unique($ids)));
 
         $merged = array_map(
             static fn (CommentSnapshot $c): AnchoredCommentData => new AnchoredCommentData(
@@ -102,20 +108,15 @@ final readonly class AnchoredCommentOperations implements DriveExtension
             return new Page(items: $merged, nextCursor: $commentPage->nextCursor);
         }
 
-        // Compute bucket per root thread so replies stay grouped with their root's status.
-        $rootById = [];
-        foreach ($merged as $item) {
-            if ($item->comment->parentId === null) {
-                $rootById[$item->comment->id] = $item;
-            }
-        }
-
         $filtered = array_values(array_filter(
             $merged,
-            static function (AnchoredCommentData $item) use ($filter, $rootById): bool {
-                $subject = $item->comment->parentId === null
-                    ? $item
-                    : ($rootById[$item->comment->parentId] ?? $item);
+            static function (AnchoredCommentData $item) use ($filter, $roots, $anchorsByComment): bool {
+                $root = $roots[$item->comment->id] ?? null;
+                $subject = $root === null ? $item : new AnchoredCommentData(
+                    comment: $root,
+                    anchor: $anchorsByComment[$root->id] ?? null,
+                    etag: self::commentTag($root),
+                );
 
                 return match ($filter) {
                     CommentFilterStatus::Resolved => $subject->isResolved(),
@@ -126,6 +127,55 @@ final readonly class AnchoredCommentOperations implements DriveExtension
         ));
 
         return new Page(items: $filtered, nextCursor: $commentPage->nextCursor);
+    }
+
+    /**
+     * @param  list<CommentSnapshot>  $comments
+     * @return array<string, CommentSnapshot> Thread roots keyed by reply ID
+     */
+    private function threadRoots(CommentOperations $documents, NodeSnapshot|string|int $node, array $comments): array
+    {
+        $known = [];
+        $replies = [];
+        foreach ($comments as $comment) {
+            $known[$comment->id] = $comment;
+            if ($comment->parentId !== null) {
+                $replies[$comment->id] = $comment->parentId;
+            }
+        }
+
+        $roots = [];
+        $cursor = null;
+        $hasMore = true;
+        while ($replies !== []) {
+            foreach ($replies as $replyId => $parentId) {
+                while (isset($known[$parentId])) {
+                    $parent = $known[$parentId];
+                    if ($parent->parentId === null) {
+                        $roots[$replyId] = $parent;
+                        unset($replies[$replyId]);
+                        break;
+                    }
+
+                    $parentId = $parent->parentId;
+                    $replies[$replyId] = $parentId;
+                }
+            }
+
+            if ($replies === [] || ! $hasMore) {
+                break;
+            }
+
+            // Documents exposes the scoped comment list as a cursor feed.
+            $page = $documents->list($node, new ListOptions(perPage: 200, cursor: $cursor));
+            foreach ($page->items as $comment) {
+                $known[$comment->id] = $comment;
+            }
+            $cursor = $page->nextCursor;
+            $hasMore = $cursor !== null;
+        }
+
+        return $roots;
     }
 
     public function find(NodeSnapshot|string|int $node, CommentSnapshot|string|int $comment): AnchoredCommentData
@@ -232,6 +282,13 @@ final readonly class AnchoredCommentOperations implements DriveExtension
                         anchor: $legacyAnchorSummary,
                     ),
                 );
+
+                // Documents holds the node lock until this operation commits. If a restore won
+                // that lock before the add, the refusal rolls back the delegated comment as well.
+                $doc = $this->lookup->documentForNode($nodeSnapshot->id);
+                if ($anchorInput->generation !== $doc['collab_epoch']) {
+                    throw InvalidCommentStateException::staleGeneration($anchorInput->generation, $doc['collab_epoch']);
+                }
 
                 $anchorData = $this->anchors->create(
                     tenantId: $doc['tenant_id'],
@@ -497,6 +554,11 @@ final readonly class AnchoredCommentOperations implements DriveExtension
 
                 $existingAnchor = $this->anchors->findByComment($commentId);
                 if ($existingAnchor === null) {
+                    $commentVersion = is_numeric($row->version ?? null) ? (int) $row->version : 0;
+                    if ($expectedAnchorVersion !== null && $expectedAnchorVersion !== $commentVersion) {
+                        throw StaleWriteException::of('documents.comment', $commentId);
+                    }
+
                     $anchor = $this->anchors->create(
                         tenantId: $doc['tenant_id'],
                         commentId: $commentId,

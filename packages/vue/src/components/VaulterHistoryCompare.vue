@@ -1,11 +1,10 @@
 <script setup lang="ts">
-import { Extension, getSchema, type Extensions } from '@tiptap/core'
+import { Extension, getSchema, Node, type Extensions } from '@tiptap/core'
 import StarterKit from '@tiptap/starter-kit'
 import { TableKit } from '@tiptap/extension-table'
 import { Node as ProseMirrorNode, Schema } from '@tiptap/pm/model'
 import { EditorState, Plugin, PluginKey } from '@tiptap/pm/state'
 import { Decoration, DecorationSet, EditorView } from '@tiptap/pm/view'
-import { BlockId } from '@vaulter/vue'
 import { computed, onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vue'
 import { computeStructuralDiff, type StructuralDiffResult } from '../compare/structuralDiff'
 
@@ -28,6 +27,38 @@ const props = withDefaults(
 const emit = defineEmits<{
   compared: [result: StructuralDiffResult]
 }>()
+
+const ReviewBlockId = Extension.create({
+  name: 'reviewBlockId',
+  addGlobalAttributes() {
+    return [{
+      types: ['paragraph', 'heading'],
+      attributes: {
+        blockId: {
+          default: null,
+          renderHTML: ({ blockId }) => typeof blockId === 'string' && blockId !== '' ? { 'data-block-id': blockId } : {},
+        },
+      },
+    }]
+  },
+})
+
+const ReviewImage = Node.create({
+  name: 'image',
+  group: 'block',
+  addAttributes() {
+    return {
+      src: { default: null },
+      alt: { default: null },
+      title: { default: null },
+      width: { default: null },
+      height: { default: null },
+    }
+  },
+  renderHTML({ HTMLAttributes }) {
+    return ['img', HTMLAttributes]
+  },
+})
 
 const ReviewTableCellAlign = Extension.create({
   name: 'reviewTableCellAlign',
@@ -52,7 +83,8 @@ function createIsolatedSchema(custom?: Extensions): Schema {
       link: { openOnClick: false },
     }),
     TableKit,
-    BlockId,
+    ReviewBlockId,
+    ReviewImage,
     ReviewTableCellAlign,
   ])
 }

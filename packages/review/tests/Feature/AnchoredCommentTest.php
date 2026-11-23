@@ -2,11 +2,16 @@
 
 declare(strict_types=1);
 
+use Illuminate\Database\Events\QueryExecuted;
+use Vaulter\Configuration\DatabaseOptions;
+use Vaulter\Database\VaulterDatabase;
 use Vaulter\Documents\Data\Comments\AddCommentInput;
 use Vaulter\Documents\DocumentsManager;
 use Vaulter\Drive\Access\Roles\RoleRegistry;
+use Vaulter\Drive\Data\ListOptions;
 use Vaulter\Drive\Testing\Access\AccessTestHelpers;
 use Vaulter\Drive\Vaulter;
+use Vaulter\EditorPro\Review\Anchors\SnapshotAnchorResolver;
 use Vaulter\EditorPro\Review\Data\AddAnchoredCommentInput;
 use Vaulter\EditorPro\Review\Data\CommentAnchorInput;
 use Vaulter\EditorPro\Review\Enums\AnchorState;
@@ -159,6 +164,19 @@ it('validates yjs_relative assoc polarity, rejects author spoofing, and blocks r
     $res->assertJsonPath('data.author.id', '1');
     $commentId = $res->json('data.id');
 
+    $this->postJson('api/vaulter/v1/review/nodes/'.$doc->id.'/comments', [
+        'body' => 'Reply from the sidebar',
+        'parent_id' => $commentId,
+        'anchor' => null,
+    ])->assertCreated()
+        ->assertJsonPath('data.parent_id', $commentId)
+        ->assertJsonPath('data.anchor', null);
+
+    $this->postJson('api/vaulter/v1/review/nodes/'.$doc->id.'/comments', [
+        'body' => 'Incomplete selector',
+        'anchor' => [],
+    ])->assertUnprocessable();
+
     // Reply cannot carry a range anchor.
     expect(fn () => $review->comments($drive)->add($doc, new AddAnchoredCommentInput(
         body: 'reply with anchor',
@@ -271,6 +289,64 @@ it('enforces CAS on resolve, reopen, and reanchor races plus HTTP preconditions 
         'selector_payload' => ['from_utf16' => 0, 'to_utf16' => 5],
         'quote_text' => 'hello',
     ], ['If-Match' => $anchorTag])->assertStatus(412);
+
+    $plain = $review->comments($driveAuthor)->add($doc, new AddAnchoredCommentInput('Initially unanchored'));
+    $review->comments($driveAuthor)->resolve($doc, $plain->comment->id, expectedVersion: $plain->comment->version);
+    $firstAnchorUrl = 'api/vaulter/v1/review/nodes/'.$doc->id.'/comments/'.$plain->comment->id.'/reanchor';
+    $firstAnchor = [
+        'generation' => 0,
+        'source_position' => 1,
+        'schema_version' => 2,
+        'block_id' => 'blk_p42',
+        'selector_kind' => 'snapshot_utf16',
+        'selector_payload' => ['from_utf16' => 0, 'to_utf16' => 5],
+        'quote_text' => 'hello',
+    ];
+    $this->postJson($firstAnchorUrl, $firstAnchor, [
+        'If-Match' => $plain->etag,
+        'Idempotency-Key' => 'stale-first-anchor',
+    ])->assertStatus(412);
+    $resolvedPlain = $review->comments($driveAuthor)->find($doc, $plain->comment->id);
+    expect($resolvedPlain->anchor)->toBeNull();
+    $this->postJson($firstAnchorUrl, $firstAnchor, ['If-Match' => $resolvedPlain->etag])
+        ->assertOk()
+        ->assertJsonPath('data.anchor.quote_text', 'hello');
+});
+
+it('rolls back the delegated comment if the generation changes after the preliminary lookup', function (): void {
+    $owner = AccessTestHelpers::user(1);
+    $storage = AccessTestHelpers::storage();
+    AccessTestHelpers::grant($storage->rootNode, RoleRegistry::OWNER, subjectId: 1);
+    $drive = app(Vaulter::class)->drive($storage)->actingAs($owner);
+    $documents = app(DocumentsManager::class)->in($drive);
+    $review = app(ReviewManager::class)->comments($drive);
+    $doc = $documents->create('anchor-after-restore', 'vaulter/rich-text', makeTextBlockDoc('hello world'));
+    $revision = $documents->snapshot($doc, 'before comment');
+
+    $restoredEpoch = null;
+    $interleaved = false;
+    $table = app(DatabaseOptions::class)->table('documents');
+    app(VaulterDatabase::class)->connection()->listen(function (QueryExecuted $query) use ($doc, $documents, $revision, $table, &$interleaved, &$restoredEpoch): void {
+        if (! $interleaved && str_contains($query->sql, '"collab_epoch"') && str_contains($query->sql, 'from "'.$table.'"')) {
+            $interleaved = true;
+            $restoredEpoch = $documents->restore($doc, $revision)->epoch;
+        }
+    });
+
+    expect(fn () => $review->add($doc, new AddAnchoredCommentInput(
+        body: 'Stale range',
+        anchor: new CommentAnchorInput(
+            generation: 0,
+            sourcePosition: 1,
+            schemaVersion: 2,
+            blockId: 'blk_p42',
+            selectorKind: SelectorKind::SnapshotUtf16,
+            selectorPayload: ['from_utf16' => 0, 'to_utf16' => 5],
+            quoteText: 'hello',
+        ),
+    )))->toThrow(InvalidCommentStateException::class);
+    expect($restoredEpoch)->toBe(1)
+        ->and($review->list($doc)->items)->toBe([]);
 });
 
 it('handles snapshot edit narrowing, full-deletion detach without losing replies, reanchor, and restore-detach', function (): void {
@@ -307,9 +383,16 @@ it('handles snapshot edit narrowing, full-deletion detach without losing replies
     ));
     $reply = $review->comments($drive)->add($doc, new AddAnchoredCommentInput('Keep this reply!', parentId: $root->comment->id));
 
+    $deletedDuplicate = app(SnapshotAnchorResolver::class)->resolveOnEdit(
+        $root->anchor,
+        makeTextBlockDoc('👋 Xhello world then hello', 'blk_main'),
+        makeTextBlockDoc('👋 Xworld then hello', 'blk_main'),
+    );
+    expect($deletedDuplicate->state)->toBe(AnchorState::Detached);
+
     // 1. Delete 'X' right before 'hello' + insert 'Z' immediately after 'hello' ("👋 helloZ world").
     // Start has assoc=0 and end has assoc=-1, so Z does NOT expand range!
-    $shiftedDoc = makeTextBlockDoc('👋 hello world', 'blk_main');
+    $shiftedDoc = makeTextBlockDoc('👋 helloZ world', 'blk_main');
     $review->comments($drive)->reconcileSnapshot($doc, $shiftedDoc, $oldDoc);
     $afterShift = $review->comments($drive)->find($doc, $root->comment->id);
     expect($afterShift->anchor->anchorState)->toBe(AnchorState::Attached)
@@ -346,6 +429,18 @@ it('handles snapshot edit narrowing, full-deletion detach without losing replies
     $detachedList = $review->comments($drive)->list($doc, CommentFilterStatus::Detached);
     expect(array_map(static fn ($x): string => $x->comment->id, $detachedList->items))
         ->toContain($root->comment->id, $reply->comment->id);
+
+    $firstPage = $review->comments($drive)->list($doc, CommentFilterStatus::Detached, new ListOptions(perPage: 1));
+    expect($firstPage->items[0]->comment->id)->toBe($root->comment->id)
+        ->and($firstPage->nextCursor)->not->toBeNull();
+    $secondPage = $review->comments($drive)->list($doc, CommentFilterStatus::Detached, new ListOptions(perPage: 1, cursor: $firstPage->nextCursor));
+    expect($secondPage->items)->toHaveCount(1)
+        ->and($secondPage->items[0]->comment->id)->toBe($reply->comment->id);
+
+    $review->comments($drive)->resolve($doc, $root->comment->id);
+    $resolvedReply = $review->comments($drive)->list($doc, CommentFilterStatus::Resolved, new ListOptions(perPage: 1, cursor: $firstPage->nextCursor));
+    expect($resolvedReply->items)->toHaveCount(1)
+        ->and($resolvedReply->items[0]->comment->id)->toBe($reply->comment->id);
 
     // 4. Reanchor restores Attached state.
     $reattached = $review->comments($drive)->reanchor(

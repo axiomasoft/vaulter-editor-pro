@@ -23,14 +23,14 @@ final class AddAnchoredCommentRequest extends VaulterFormRequest
         return [
             'body' => ['required', 'string', 'max:5000'],
             'parent_id' => ['nullable', 'string', 'max:191'],
-            'anchor' => ['nullable', 'array'],
+            'anchor' => ['nullable', 'array', 'min:1'],
             'anchor.generation' => ['required_with:anchor', 'integer', 'min:0'],
             'anchor.source_position' => ['required_with:anchor', 'integer', 'min:0'],
             'anchor.schema_version' => ['required_with:anchor', 'integer', 'min:1'],
             'anchor.block_id' => ['required_with:anchor', 'string', 'min:1', 'max:255'],
             'anchor.selector_kind' => ['required_with:anchor', 'string', Rule::in($kinds)],
             'anchor.selector_payload' => ['required_with:anchor', 'array'],
-            'anchor.quote_text' => ['present_with:anchor', 'string', 'max:4096'],
+            'anchor.quote_text' => ['exclude_if:anchor,null', 'present_with:anchor', 'string', 'max:4096'],
             'anchor.pin_revision_id' => ['nullable', 'string', 'max:191'],
         ];
     }
