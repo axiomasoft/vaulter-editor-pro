@@ -21,6 +21,9 @@
         "ext-mbstring": "*",
         "illuminate/support": "^13.0"
     },
+    "suggest": {
+        "axiomasoft/vaulter-collaboration": "Required for accepting or rejecting suggestions on documents in collaboration journal mode."
+    },
     "require-dev": {
         "axiomasoft/packman-testkit": "^0.1",
         "axiomasoft/vaulter-collaboration": "^1.0",

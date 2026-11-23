@@ -61,14 +61,40 @@ export { DiffOverlay } from './extensions/DiffOverlay'
 export type { DiffOverlayOptions } from './extensions/DiffOverlay'
 export { RANGE_ANCHOR_PLUGIN_KEY, RangeAnchorHighlight } from './extensions/RangeAnchorMark'
 export type { ActiveRangeDecoration, RangeAnchorHighlightOptions } from './extensions/RangeAnchorMark'
-export { VaulterTrackedChanges } from './extensions/VaulterTrackedChanges'
-export type { TrackedChangesOptions } from './extensions/VaulterTrackedChanges'
-export { applySuggestionDecision, projectTrackedChanges } from './review/trackedProjection'
-export type { TrackedProjection, TrackedSuggestionSelection, TrackedTextSuggestion } from './review/trackedProjection'
+export { REVIEW_TRACKED_PLUGIN_KEY, VaulterTrackedChanges } from './extensions/VaulterTrackedChanges'
+export type { TrackedChangesOptions, TrackedChangesPluginState } from './extensions/VaulterTrackedChanges'
+export {
+  applySuggestionDecision,
+  isStructuralSuggestion,
+  isTextSuggestion,
+  projectTrackedChanges,
+  structuralSuggestionKindList,
+} from './review/trackedProjection'
+export type {
+  TrackedProjection,
+  TrackedStructuralSuggestion,
+  TrackedSuggestion,
+  TrackedSuggestionSelection,
+  TrackedTextSuggestion,
+} from './review/trackedProjection'
+export {
+  getDocSnapshot,
+  isTableNodeTextual,
+  registerDocSnapshot,
+  suggestionsOverlap,
+} from './review/structuralReverter'
+export type {
+  TextSuggestionMetadata,
+  TrackedDocSnapshotState,
+  TrackedStructuralRecord,
+} from './review/structuralReverter'
+export { DEFAULT_REVIEW_CAPABILITIES } from './types/review'
 
 // Composables
 export { isDetachedAnchor, useRangeComments } from './composables/useRangeComments'
 export type { CommentThreadItem, UseRangeCommentsOptions, UseRangeCommentsReturn } from './composables/useRangeComments'
+export { useTrackedChanges } from './composables/useTrackedChanges'
+export type { UseTrackedChangesOptions, UseTrackedChangesReturn } from './composables/useTrackedChanges'
 export { useRevisionCompare } from './composables/useRevisionCompare'
 export type { UseRevisionCompareOptions, UseRevisionCompareReturn } from './composables/useRevisionCompare'
 export { DOCX_MIME_TYPE, LocalDocxExportError, useLocalDocxExport } from './composables/useLocalDocxExport'
@@ -88,3 +114,4 @@ export { default as VaulterHistoryCompare } from './components/VaulterHistoryCom
 export { default as VaulterRangeComments } from './components/VaulterRangeComments.vue'
 export { default as VaulterLocalDocxExport } from './components/VaulterLocalDocxExport.vue'
 export { default as VaulterDocxExchange } from './components/VaulterDocxExchange.vue'
+export { default as VaulterTrackedChangesPanel } from './components/VaulterTrackedChangesPanel.vue'

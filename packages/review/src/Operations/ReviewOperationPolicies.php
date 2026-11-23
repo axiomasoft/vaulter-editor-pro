@@ -27,6 +27,12 @@ final class ReviewOperationPolicies implements OperationPolicySource
             'review.comments.reanchor' => new OperationPolicy('review.comment_anchor', ConcurrencyPolicy::IfMatch, IdempotencyPolicy::Receipt, ['review.comments.reanchor']),
             'review.comments.delete' => new OperationPolicy('review.comment_anchor', ConcurrencyPolicy::IfMatch, IdempotencyPolicy::Receipt, ['review.comments.destroy']),
             'review.comments.reconcile_snapshot' => new OperationPolicy('review.comment_anchor', ConcurrencyPolicy::Natural, IdempotencyPolicy::Natural),
+
+            'review.suggestions.save' => new OperationPolicy('review.suggestion', ConcurrencyPolicy::IfMatch, IdempotencyPolicy::Receipt, ['review.suggestions.store']),
+            'review.suggestions.accept' => new OperationPolicy('review.suggestion', ConcurrencyPolicy::IfMatch, IdempotencyPolicy::Receipt, ['review.suggestions.accept']),
+            'review.suggestions.reject' => new OperationPolicy('review.suggestion', ConcurrencyPolicy::IfMatch, IdempotencyPolicy::Receipt, ['review.suggestions.reject']),
+            'review.suggestions.accept_group' => new OperationPolicy('review.suggestion', ConcurrencyPolicy::IfMatch, IdempotencyPolicy::Receipt, ['review.suggestions.groups.accept']),
+            'review.suggestions.reject_group' => new OperationPolicy('review.suggestion', ConcurrencyPolicy::IfMatch, IdempotencyPolicy::Receipt, ['review.suggestions.groups.reject']),
         ];
     }
 }

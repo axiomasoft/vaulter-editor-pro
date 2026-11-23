@@ -4,7 +4,8 @@ import { Mapping, ReplaceStep } from '@tiptap/pm/transform'
 import { TextSelection } from '@tiptap/pm/state'
 import type { EditorState, Transaction } from '@tiptap/pm/state'
 import { REVIEW_SUGGESTION_MARK, suggestionMarker } from './trackedProjection'
-import type { TrackedTextSuggestion } from './trackedProjection'
+import type { TrackedSuggestion, TrackedTextSuggestion } from './trackedProjection'
+import { suggestionsOverlap } from './structuralReverter'
 
 export interface TextRun {
   author: string
@@ -12,6 +13,10 @@ export interface TextRun {
   groupId: string
   parentId: string | null
   kind: TrackedTextSuggestion['kind']
+}
+
+export interface TrackTextOptions {
+  existingSuggestions?: readonly TrackedSuggestion[]
 }
 
 function textOnly(fragment: Fragment): boolean {
@@ -79,11 +84,65 @@ function describe(doc: Node, run: TextRun, blockId: string): TrackedTextSuggesti
     })
     const kind = before === '' ? 'insert' : after === '' ? 'delete' : 'replace'
     if (from !== undefined && to !== undefined && !disjoint && kind === run.kind && before !== after) {
-      result = { suggestionId: run.id, groupId: run.groupId, parentId: run.parentId, kind, blockId, from, to, before, after }
+      result = {
+        suggestionId: run.id,
+        groupId: run.groupId,
+        parentId: run.parentId,
+        kind,
+        blockId,
+        from,
+        to,
+        before,
+        after,
+        author: run.author,
+      }
     }
     return false
   })
   return result
+}
+
+function attachOverlapConflict(
+  change: TrackedTextSuggestion,
+  existingSuggestions: readonly TrackedSuggestion[],
+): TrackedTextSuggestion {
+  for (const peer of existingSuggestions) {
+    if (peer.suggestionId === change.suggestionId) continue
+    if (change.parentId === peer.suggestionId || peer.parentId === change.suggestionId) continue
+    if (!suggestionsOverlap(
+      {
+        suggestionId: change.suggestionId,
+        parentId: change.parentId,
+        kind: change.kind,
+        blockId: change.blockId,
+        from: change.from,
+        to: change.to,
+      },
+      {
+        suggestionId: peer.suggestionId,
+        parentId: peer.parentId,
+        kind: peer.kind,
+        blockId: peer.blockId,
+        from: peer.from,
+        to: peer.to,
+        payload: 'payload' in peer ? peer.payload : undefined,
+      },
+    )) {
+      continue
+    }
+
+    const peerAuthor = 'author' in peer ? peer.author : undefined
+    const isStructuralPeer = peer.kind !== 'insert' && peer.kind !== 'delete' && peer.kind !== 'replace'
+    if (isStructuralPeer || (peerAuthor !== undefined && peerAuthor !== change.author)) {
+      return {
+        ...change,
+        conflicted: true,
+        conflictWithId: peer.suggestionId,
+        conflictReason: isStructuralPeer ? `overlaps_${peer.kind}` : 'overlapping_suggestion',
+      }
+    }
+  }
+  return change
 }
 
 export function trackText(
@@ -92,6 +151,7 @@ export function trackText(
   author: string,
   previous: TextRun | null,
   createId: () => string,
+  options?: TrackTextOptions,
 ): { transaction: Transaction; run: TextRun | null; suggestions: TrackedTextSuggestion[] } | null {
   const markType = state.schema.marks[REVIEW_SUGGESTION_MARK]
   const outgoing = state.tr
@@ -134,7 +194,7 @@ export function trackText(
     }
     touched.set(run.id, { run, blockId })
 
-    const marker = { suggestionId: run.id, parentId }
+    const marker = { suggestionId: run.id, parentId, groupId: run.groupId, author }
     if (from !== to) {
       outgoing.addMark(from, to, markType.create({ ...marker, kind: 'delete' }))
     }
@@ -155,11 +215,12 @@ export function trackText(
     mapping = next
   }
 
+  const existingSuggestions = options?.existingSuggestions ?? []
   const suggestions: TrackedTextSuggestion[] = []
-  for (const { run, blockId } of touched.values()) {
-    const change = describe(outgoing.doc, run, blockId)
+  for (const { run: touchedRun, blockId } of touched.values()) {
+    const change = describe(outgoing.doc, touchedRun, blockId)
     if (!change) return null
-    suggestions.push(change)
+    suggestions.push(attachOverlapConflict(change, existingSuggestions))
   }
   if (incoming.selection.empty && incoming.selection.from === collapsedDeletion) {
     const from = mapping.map(collapsedDeletion, -1)

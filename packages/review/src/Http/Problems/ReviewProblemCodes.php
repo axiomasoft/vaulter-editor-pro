@@ -9,6 +9,8 @@ use Vaulter\EditorPro\Review\Exceptions\InvalidAnchorSelectorException;
 use Vaulter\EditorPro\Review\Exceptions\InvalidCommentStateException;
 use Vaulter\EditorPro\Review\Exceptions\ReviewAnchorNotFoundException;
 use Vaulter\EditorPro\Review\Exceptions\RevisionPinNotFoundException;
+use Vaulter\EditorPro\Review\Exceptions\SuggestionConflictException;
+use Vaulter\EditorPro\Review\Exceptions\UnsupportedSuggestionException;
 use Vaulter\Http\Problems\ProblemCodeSource;
 use Vaulter\Http\Problems\ProblemSpec;
 use Vaulter\Http\Problems\ReceiptPolicy;
@@ -29,6 +31,8 @@ final class ReviewProblemCodes implements ProblemCodeSource
             'invalid_anchor_selector' => new ProblemSpec(422, InvalidAnchorSelectorException::class, receipt: ReceiptPolicy::Cacheable),
             'revision_pin_not_found' => new ProblemSpec(404, RevisionPinNotFoundException::class),
             'invalid_comment_state' => new ProblemSpec(409, InvalidCommentStateException::class, receipt: ReceiptPolicy::Cacheable),
+            'suggestion_conflict' => new ProblemSpec(409, SuggestionConflictException::class, receipt: ReceiptPolicy::Cacheable),
+            'unsupported_suggestion' => new ProblemSpec(422, UnsupportedSuggestionException::class, receipt: ReceiptPolicy::Cacheable),
         ];
     }
 }

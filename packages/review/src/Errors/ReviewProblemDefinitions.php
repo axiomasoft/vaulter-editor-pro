@@ -44,6 +44,8 @@ final class ReviewProblemDefinitions implements ProblemDefinitionProvider
             ReviewErrorCode::InvalidSelector => [422, 'Invalid anchor selector', false, ErrorCategory::Validation, ['reason']],
             ReviewErrorCode::PinNotFound => [404, 'Revision pin not found', false, ErrorCategory::NotFound, []],
             ReviewErrorCode::InvalidCommentState => [409, 'Invalid comment state', false, ErrorCategory::Conflict, []],
+            ReviewErrorCode::SuggestionConflict => [409, 'Suggestion conflict', false, ErrorCategory::Conflict, ['reason']],
+            ReviewErrorCode::UnsupportedSuggestion => [422, 'Unsupported suggestion structure', false, ErrorCategory::Validation, ['reason']],
         };
     }
 }

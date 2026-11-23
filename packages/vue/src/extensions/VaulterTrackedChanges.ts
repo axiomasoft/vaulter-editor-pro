@@ -3,22 +3,53 @@ import type { Editor } from '@tiptap/core'
 import { isHistoryTransaction } from '@tiptap/pm/history'
 import type { Node } from '@tiptap/pm/model'
 import type { EditorState, Transaction } from '@tiptap/pm/state'
-import { Plugin } from '@tiptap/pm/state'
+import { Plugin, PluginKey } from '@tiptap/pm/state'
 import { Mapping } from '@tiptap/pm/transform'
+import { Decoration, DecorationSet } from '@tiptap/pm/view'
 import { ySyncPluginKey, yUndoPluginKey } from '@tiptap/y-tiptap'
+import { trackStructure } from '../review/trackStructure'
 import { trackText } from '../review/trackText'
 import type { TextRun } from '../review/trackText'
-import { REVIEW_SUGGESTION_MARK, UNTRACKED_TRANSACTION } from '../review/trackedProjection'
-import type { TrackedTextSuggestion } from '../review/trackedProjection'
+import {
+  findBlockPosById,
+  getDocSnapshot,
+  registerDocSnapshot,
+  type TextSuggestionMetadata,
+  type TrackedDocSnapshotState,
+  type TrackedStructuralRecord,
+} from '../review/structuralReverter'
+import {
+  REVIEW_DECISION_META,
+  REVIEW_SUGGESTION_MARK,
+  suggestionMarker,
+  UNTRACKED_TRANSACTION,
+  type TrackedStructuralSuggestion,
+  type TrackedSuggestion,
+  type TrackedTextSuggestion,
+} from '../review/trackedProjection'
+import { DEFAULT_REVIEW_CAPABILITIES, type SuggestionCapabilities } from '../types/review'
+
+export interface TrackedChangesPluginState {
+  structural: readonly TrackedStructuralRecord[]
+  textMeta: Readonly<Record<string, TextSuggestionMetadata>>
+}
+
+export const REVIEW_TRACKED_PLUGIN_KEY = new PluginKey<TrackedChangesPluginState>('vaulterTrackedChanges')
+export const REVIEW_STRUCTURE_META = 'vaulter:reviewStructureUpdate'
 
 export interface TrackedChangesOptions {
   /** A stable local identity for grouping. The server determines persisted authorship. */
   author: () => string
   /** Enabled tracking requires the editor's text blocks to carry stable blockId attributes. */
   enabled: () => boolean
+  /** Runtime capabilities constraining structural tracking & UI controls. */
+  capabilities?: () => SuggestionCapabilities
   createId: () => string
   onSuggestions: (suggestions: readonly TrackedTextSuggestion[]) => void
-  onUnsupportedEdit: (transaction: Transaction) => void
+  onStructuralSuggestions?: (suggestions: readonly TrackedStructuralSuggestion[]) => void
+  onStateChange?: (state: TrackedDocSnapshotState) => void
+  onConflict?: (conflict: { suggestion: TrackedSuggestion; conflictWithId: string; reason: string }) => void
+  onUnsupportedEdit: (transaction: Transaction, reason?: string) => void
 }
 
 interface Composition {
@@ -45,6 +76,11 @@ const SuggestionMark = Mark.create({
       suggestionId: { default: null, rendered: false },
       kind: { default: null, rendered: false },
       parentId: { default: null, rendered: false },
+      groupId: { default: null, rendered: false },
+      author: { default: null, rendered: false },
+      markName: { default: null, rendered: false },
+      markAttrs: { default: null, rendered: false },
+      operation: { default: null, rendered: false },
     }
   },
 
@@ -61,14 +97,18 @@ const SuggestionMark = Mark.create({
   },
 
   renderHTML({ mark }) {
-    return [
-      mark.attrs.kind === 'delete' ? 'del' : 'ins',
-      {
-        'data-suggestion-id': mark.attrs.suggestionId,
-        ...(mark.attrs.parentId ? { 'data-suggestion-parent': mark.attrs.parentId } : {}),
-      },
-      0,
-    ]
+    const attrs: Record<string, string> = {
+      'data-suggestion-id': String(mark.attrs.suggestionId ?? ''),
+    }
+    if (mark.attrs.parentId) {
+      attrs['data-suggestion-parent'] = String(mark.attrs.parentId)
+    }
+    if (mark.attrs.kind === 'mark_change') {
+      attrs['data-suggestion-kind'] = 'mark_change'
+      if (mark.attrs.markName) attrs['data-suggestion-mark'] = String(mark.attrs.markName)
+      return ['span', attrs, 0]
+    }
+    return [mark.attrs.kind === 'delete' ? 'del' : 'ins', attrs, 0]
   },
 })
 
@@ -92,6 +132,83 @@ function splitsSurrogate(doc: Node, position: number): boolean {
   return /^[\uDC00-\uDFFF]/.test(doc.resolve(position).nodeAfter?.text ?? '')
 }
 
+function collectCurrentSuggestions(
+  doc: Node,
+  pluginState: TrackedChangesPluginState,
+): TrackedSuggestion[] {
+  const results: TrackedSuggestion[] = [...pluginState.structural]
+  const seen = new Set<string>(pluginState.structural.map(s => s.suggestionId))
+
+  // Collect open text suggestions anchored inside doc blocks using textMeta where available
+  const textAgg = new Map<string, TrackedTextSuggestion>()
+  doc.descendants(block => {
+    if (!block.isTextblock || typeof block.attrs?.blockId !== 'string') return undefined
+    const blockId = block.attrs.blockId
+    let offset = 0
+    block.forEach(node => {
+      for (const mark of node.marks) {
+        const marker = suggestionMarker(mark)
+        if (!marker || marker.kind === 'mark_change' || seen.has(marker.suggestionId)) continue
+        const meta = pluginState.textMeta[marker.suggestionId]
+        const prev = textAgg.get(marker.suggestionId)
+        const text = node.text ?? ''
+        const end = offset + node.nodeSize
+        if (!prev) {
+          textAgg.set(marker.suggestionId, {
+            suggestionId: marker.suggestionId,
+            groupId: meta?.groupId ?? marker.groupId ?? marker.suggestionId,
+            parentId: marker.parentId,
+            kind: marker.kind,
+            blockId,
+            from: offset,
+            to: marker.kind === 'insert' ? offset : end,
+            before: marker.kind === 'delete' ? text : '',
+            after: marker.kind === 'insert' ? text : '',
+            author: meta?.author ?? marker.author ?? '',
+            conflicted: meta?.conflicted ?? false,
+            conflictReason: meta?.conflictReason ?? null,
+            conflictWithId: meta?.conflictWithId ?? null,
+          })
+        } else {
+          if (marker.kind === 'delete') {
+            prev.to = end
+            prev.before += text
+            prev.kind = prev.after ? 'replace' : 'delete'
+          } else {
+            prev.after += text
+            prev.kind = prev.before ? 'replace' : 'insert'
+          }
+        }
+      }
+      offset += node.nodeSize
+    })
+    return false
+  })
+
+  for (const s of textAgg.values()) {
+    results.push(s)
+  }
+  return results
+}
+
+function buildDecorations(doc: Node, state: TrackedChangesPluginState): DecorationSet {
+  const decorations: Decoration[] = []
+  for (const rec of state.structural) {
+    if (rec.kind === 'mark_change') continue
+    const hit = findBlockPosById(doc, rec.blockId)
+    if (!hit) continue
+    decorations.push(
+      Decoration.node(hit.pos, hit.pos + hit.node.nodeSize, {
+        class: rec.conflicted ? 'vaulter-structural-suggestion is-conflicted' : 'vaulter-structural-suggestion',
+        'data-structural-suggestion-id': rec.suggestionId,
+        'data-structural-kind': rec.kind,
+        ...(rec.conflicted ? { 'data-conflicted': 'true' } : {}),
+      }),
+    )
+  }
+  return DecorationSet.create(doc, decorations)
+}
+
 export const VaulterTrackedChanges = Extension.create<TrackedChangesOptions, TrackedChangesStorage>({
   name: 'vaulterTrackedChanges',
   priority: 1000,
@@ -100,8 +217,12 @@ export const VaulterTrackedChanges = Extension.create<TrackedChangesOptions, Tra
     return {
       author: () => '',
       enabled: () => true,
+      capabilities: () => DEFAULT_REVIEW_CAPABILITIES,
       createId: () => crypto.randomUUID(),
       onSuggestions: () => {},
+      onStructuralSuggestions: undefined,
+      onStateChange: undefined,
+      onConflict: undefined,
       onUnsupportedEdit: () => {},
     }
   },
@@ -117,6 +238,10 @@ export const VaulterTrackedChanges = Extension.create<TrackedChangesOptions, Tra
   dispatchTransaction({ transaction, next }) {
     const bypass = isHistoryTransaction(transaction) || passthrough.some(key => transaction.getMeta(key) !== undefined)
     const composing = this.storage.composition
+    const currentPluginState = REVIEW_TRACKED_PLUGIN_KEY.getState(this.editor.state)
+      ?? getDocSnapshot(this.editor.state.doc)
+      ?? { structural: [], textMeta: {} }
+
     if (bypass) {
       if (transaction.docChanged) {
         this.storage.run = null
@@ -125,6 +250,14 @@ export const VaulterTrackedChanges = Extension.create<TrackedChangesOptions, Tra
       }
       if (composing && !transaction.docChanged) locally(this.editor, () => next(transaction))
       else next(transaction)
+
+      const updatedPluginState = REVIEW_TRACKED_PLUGIN_KEY.getState(this.editor.state)
+      if (updatedPluginState) {
+        registerDocSnapshot(this.editor.state.doc, updatedPluginState)
+        if (transaction.getMeta(REVIEW_DECISION_META) || transaction.docChanged) {
+          this.options.onStateChange?.(updatedPluginState)
+        }
+      }
       const suggestions = transaction.getMeta(dispatchMeta) as TrackedTextSuggestion[] | undefined
       if (suggestions) this.options.onSuggestions(suggestions)
       return
@@ -139,19 +272,177 @@ export const VaulterTrackedChanges = Extension.create<TrackedChangesOptions, Tra
       next(transaction)
       return
     }
-    const result = trackText(this.editor.state, transaction, this.options.author(), this.storage.run, this.options.createId)
-    if (!result) {
-      this.options.onUnsupportedEdit(transaction)
+
+    const capabilities = this.options.capabilities?.() ?? DEFAULT_REVIEW_CAPABILITIES
+    const existingSuggestions = collectCurrentSuggestions(this.editor.state.doc, currentPluginState)
+    const author = this.options.author()
+
+    const structuralOutcome = trackStructure(
+      this.editor.state,
+      transaction,
+      author,
+      this.options.createId,
+      capabilities,
+      currentPluginState.structural,
+      existingSuggestions,
+    )
+
+    if (structuralOutcome.status === 'unsupported') {
+      this.options.onUnsupportedEdit(transaction, structuralOutcome.reason)
       return
     }
+
+    if (structuralOutcome.status === 'handled') {
+      this.storage.run = null
+      const res = structuralOutcome.result
+      res.transaction.setMeta(REVIEW_STRUCTURE_META, {
+        addedRecords: res.addedRecords,
+        updatedRecords: res.updatedRecords,
+        removedIds: res.removedIds,
+      })
+      next(res.transaction)
+
+      const nextState = REVIEW_TRACKED_PLUGIN_KEY.getState(this.editor.state)
+      if (nextState) {
+        registerDocSnapshot(this.editor.state.doc, nextState)
+        this.options.onStateChange?.(nextState)
+      }
+      if (res.added.length > 0) {
+        this.options.onStructuralSuggestions?.(res.added)
+        for (const s of res.added) {
+          if (s.conflicted && s.conflictWithId) {
+            this.options.onConflict?.({
+              suggestion: s,
+              conflictWithId: s.conflictWithId,
+              reason: s.conflictReason ?? 'overlapping_suggestion',
+            })
+          }
+        }
+      }
+      return
+    }
+
+    const result = trackText(
+      this.editor.state,
+      transaction,
+      author,
+      this.storage.run,
+      this.options.createId,
+      { existingSuggestions },
+    )
+    if (!result) {
+      this.options.onUnsupportedEdit(transaction, 'unsupported_text_edit')
+      return
+    }
+
     this.storage.run = result.run
+    const nextMeta: Record<string, TextSuggestionMetadata> = { ...currentPluginState.textMeta }
+    for (const s of result.suggestions) {
+      nextMeta[s.suggestionId] = {
+        author,
+        groupId: s.groupId,
+        blockId: s.blockId,
+        conflicted: s.conflicted,
+        conflictReason: s.conflictReason,
+        conflictWithId: s.conflictWithId,
+      }
+    }
+    result.transaction.setMeta(REVIEW_STRUCTURE_META, { textMeta: nextMeta })
     next(result.transaction)
+
+    const nextPluginState = REVIEW_TRACKED_PLUGIN_KEY.getState(this.editor.state)
+    if (nextPluginState) {
+      registerDocSnapshot(this.editor.state.doc, nextPluginState)
+      this.options.onStateChange?.(nextPluginState)
+    }
     this.options.onSuggestions(result.suggestions)
+    for (const s of result.suggestions) {
+      if (s.conflicted && s.conflictWithId) {
+        this.options.onConflict?.({
+          suggestion: s,
+          conflictWithId: s.conflictWithId,
+          reason: s.conflictReason ?? 'overlapping_suggestion',
+        })
+      }
+    }
   },
 
   addProseMirrorPlugins() {
-    return [new Plugin({
+    return [new Plugin<TrackedChangesPluginState>({
+      key: REVIEW_TRACKED_PLUGIN_KEY,
+      state: {
+        init: (_config, instance) => {
+          const initial: TrackedChangesPluginState = { structural: [], textMeta: {} }
+          registerDocSnapshot(instance.doc, initial)
+          return initial
+        },
+        apply: (tr, prev) => {
+          const decisionMeta = tr.getMeta(REVIEW_DECISION_META) as {
+            structural: readonly TrackedStructuralRecord[]
+            textMeta: Readonly<Record<string, TextSuggestionMetadata>>
+          } | undefined
+          if (decisionMeta) {
+            const decided: TrackedChangesPluginState = {
+              structural: decisionMeta.structural,
+              textMeta: decisionMeta.textMeta,
+            }
+            registerDocSnapshot(tr.doc, decided)
+            return decided
+          }
+
+          const structureMeta = tr.getMeta(REVIEW_STRUCTURE_META) as {
+            addedRecords?: TrackedStructuralRecord[]
+            updatedRecords?: TrackedStructuralRecord[]
+            removedIds?: string[]
+            textMeta?: Readonly<Record<string, TextSuggestionMetadata>>
+          } | undefined
+
+          let structural = [...prev.structural]
+          let textMeta = prev.textMeta
+
+          if (structureMeta) {
+            if (structureMeta.removedIds?.length) {
+              const removed = new Set(structureMeta.removedIds)
+              structural = structural.filter(r => !removed.has(r.suggestionId))
+            }
+            if (structureMeta.updatedRecords?.length) {
+              const byId = new Map(structureMeta.updatedRecords.map(r => [r.suggestionId, r]))
+              structural = structural.map(r => byId.get(r.suggestionId) ?? r)
+            }
+            if (structureMeta.addedRecords?.length) {
+              structural.push(...structureMeta.addedRecords)
+            }
+            if (structureMeta.textMeta) {
+              textMeta = structureMeta.textMeta
+            }
+          } else if (tr.docChanged) {
+            // Preserve live doc snapshot state on text edits / history replay
+            if (isHistoryTransaction(tr)) {
+              // Filter out structural records whose block/marks are no longer present after undo
+              structural = structural.filter(r => {
+                if (r.kind === 'mark_change') {
+                  let hasMark = false
+                  tr.doc.descendants(n => {
+                    if (n.marks.some(m => m.attrs?.suggestionId === r.suggestionId)) hasMark = true
+                  })
+                  return hasMark
+                }
+                return true
+              })
+            }
+          }
+
+          const nextState: TrackedChangesPluginState = { structural, textMeta }
+          registerDocSnapshot(tr.doc, nextState)
+          return nextState
+        },
+      },
       props: {
+        decorations: state => {
+          const pluginState = REVIEW_TRACKED_PLUGIN_KEY.getState(state)
+          if (!pluginState || pluginState.structural.length === 0) return DecorationSet.empty
+          return buildDecorations(state.doc, pluginState)
+        },
         handleDOMEvents: {
           compositionstart: view => {
             if (this.options.enabled() && !this.storage.composition) {
@@ -181,9 +472,17 @@ export const VaulterTrackedChanges = Extension.create<TrackedChangesOptions, Tra
               const widen = splitsSurrogate(base.doc, baseEnd) || splitsSurrogate(raw.doc, rawEnd) ? 1 : 0
               const diff = base.tr.replace(start, baseEnd + widen, raw.doc.slice(start, rawEnd + widen))
               diff.setSelection(raw.selection.map(diff.doc, new Mapping()))
-              const result = trackText(base, diff, this.options.author(), this.storage.run, this.options.createId)
+              const basePluginState = REVIEW_TRACKED_PLUGIN_KEY.getState(base) ?? { structural: [], textMeta: {} }
+              const result = trackText(
+                base,
+                diff,
+                this.options.author(),
+                this.storage.run,
+                this.options.createId,
+                { existingSuggestions: collectCurrentSuggestions(base.doc, basePluginState) },
+              )
               if (!result) {
-                this.options.onUnsupportedEdit(diff)
+                this.options.onUnsupportedEdit(diff, 'unsupported_composition_edit')
                 return
               }
               view.dispatch(result.transaction.setMeta(UNTRACKED_TRANSACTION, true).setMeta(dispatchMeta, result.suggestions))

@@ -1,0 +1,158 @@
+import { describe, expect, it, vi } from 'vitest'
+import { mount, flushPromises } from '@vue/test-utils'
+import VaulterTrackedChangesPanel from '../src/components/VaulterTrackedChangesPanel.vue'
+import type { ReviewClient } from '../src/api/reviewClient'
+import { DEFAULT_REVIEW_CAPABILITIES, type DocumentSuggestion, type SuggestionCapabilities } from '../src/types/review'
+
+function makeSuggestion(overrides: Partial<DocumentSuggestion> = {}): DocumentSuggestion {
+  return {
+    id: 's_1',
+    group_id: 'g_1',
+    proposal_id: null,
+    document_id: 'doc_1',
+    generation: 0,
+    base_position: 1,
+    schema_version: 2,
+    author_subject: 'user:1',
+    kind: 'mark_change',
+    target_block_id: 'b_1',
+    target_selector: { schema: 1, block_id: 'b_1', from_utf16: 0, to_utf16: 4 },
+    payload: { mark_name: 'bold', operation: 'added' },
+    from: 0,
+    to: 4,
+    parent_id: null,
+    conflicted: false,
+    conflict_reason: null,
+    conflict_with_id: null,
+    before: '',
+    after: '',
+    state: 'open',
+    version: 1,
+    etag: '"suggestion.s_1.1"',
+    receipt_id: null,
+    decided_by_subject: null,
+    decided_at: null,
+    pending_commit: false,
+    journal_command_id: null,
+    journal_state: null,
+    committed_position: null,
+    ...overrides,
+  }
+}
+
+function makeMockClient(initial: DocumentSuggestion[], capabilities: SuggestionCapabilities = DEFAULT_REVIEW_CAPABILITIES): ReviewClient {
+  let store = [...initial]
+  return {
+    pins: { list: vi.fn(), pin: vi.fn(), unpin: vi.fn(), preview: vi.fn(), compare: vi.fn() },
+    comments: { list: vi.fn(), add: vi.fn(), resolve: vi.fn(), reopen: vi.fn(), reanchor: vi.fn(), remove: vi.fn() },
+    exchange: { register: vi.fn(), status: vi.fn(), fileUrl: vi.fn(), download: vi.fn(), apply: vi.fn() },
+    suggestions: {
+      capabilities: vi.fn().mockResolvedValue(capabilities),
+      list: vi.fn().mockImplementation(async () => [...store]),
+      save: vi.fn(),
+      accept: vi.fn().mockImplementation(async (_node, id) => {
+        const current = store.find(s => s.id === id)!
+        const updated: DocumentSuggestion = { ...current, state: 'accepted', version: current.version + 1, receipt_id: 'rcpt-1' }
+        store = store.map(s => (s.id === id ? updated : s))
+        return updated
+      }),
+      reject: vi.fn().mockImplementation(async (_node, id) => {
+        const current = store.find(s => s.id === id)!
+        const updated: DocumentSuggestion = { ...current, state: 'rejected', version: current.version + 1, receipt_id: 'rcpt-2' }
+        store = store.map(s => {
+          if (s.id === id) return updated
+          if (s.conflict_with_id === id) {
+            return { ...s, conflicted: false, conflict_reason: null, conflict_with_id: null }
+          }
+          return s
+        })
+        return updated
+      }),
+      acceptGroup: vi.fn().mockResolvedValue([]),
+      rejectGroup: vi.fn().mockResolvedValue([]),
+    },
+  }
+}
+
+describe('VaulterTrackedChangesPanel', () => {
+  it('hides unsupported node_type_change UI by capability and enforces conflict rules in actions', async () => {
+    const s1 = makeSuggestion({ id: 's1', group_id: 'g1', author_subject: 'user:alice', kind: 'block_split' })
+    const s2 = makeSuggestion({
+      id: 's2',
+      group_id: 'g2',
+      author_subject: 'user:bob',
+      kind: 'table_change',
+      conflicted: true,
+      conflict_with_id: 's1',
+      conflict_reason: 'overlaps_block_split',
+    })
+    const client = makeMockClient([s1, s2])
+
+    const wrapper = mount(VaulterTrackedChangesPanel, {
+      props: {
+        nodeId: 'doc_1',
+        clientOptions: { client },
+      },
+    })
+    await flushPromises()
+
+    // v1 hides node_type_change UI because node_type_change_types is empty
+    expect(wrapper.find('[data-capability-node-type-change]').exists()).toBe(false)
+    expect(wrapper.find('[data-capability-table-mode="text_only"]').exists()).toBe(true)
+    expect(wrapper.find('[data-capability-kind="block_split"]').exists()).toBe(true)
+
+    // Preserves author_subject on conflicted suggestion and disables Accept while keeping Reject enabled
+    const row2 = wrapper.find('[data-suggestion-id="s2"]')
+    expect(row2.attributes('data-author')).toBe('user:bob')
+    expect(row2.attributes('data-conflicted')).toBe('true')
+    const s2AcceptBtn = row2.find('.vaulter-tracked-changes__accept')
+    const s2RejectBtn = row2.find('.vaulter-tracked-changes__reject')
+    expect((s2AcceptBtn.element as HTMLButtonElement).disabled).toBe(true)
+    expect((s2RejectBtn.element as HTMLButtonElement).disabled).toBe(false)
+
+    // Group g2 accept button is also disabled due to conflict
+    const g2AcceptBtn = wrapper.find('[data-group-id="g2"] .vaulter-tracked-changes__group-accept')
+    expect((g2AcceptBtn.element as HTMLButtonElement).disabled).toBe(true)
+
+    // Rejecting s1 clears conflict on s2 and enables s2 Accept button
+    await wrapper.find('[data-suggestion-id="s1"] .vaulter-tracked-changes__reject').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.find('[data-suggestion-id="s2"]').attributes('data-conflicted')).toBe('false')
+    expect((wrapper.find('[data-suggestion-id="s2"] .vaulter-tracked-changes__accept').element as HTMLButtonElement).disabled).toBe(false)
+
+    // Switching projection emits projectionChange
+    await wrapper.find('[data-projection="original"]').trigger('click')
+    expect(wrapper.emitted('projectionChange')?.[0]).toEqual(['original'])
+  })
+
+  it('hides table capability chip when capabilities disallow table_change and shows pending_commit state', async () => {
+    const customCaps: SuggestionCapabilities = {
+      ...DEFAULT_REVIEW_CAPABILITIES,
+      supported_kinds: ['insert', 'delete', 'replace', 'mark_change'],
+      structural_kinds: ['mark_change'],
+      node_type_change_types: ['paragraph->heading'],
+    }
+    const pendingItem = makeSuggestion({
+      id: 'sp',
+      pending_commit: true,
+      journal_command_id: 'cmd-99',
+      journal_state: 'pending',
+    })
+    const client = makeMockClient([pendingItem], customCaps)
+
+    const wrapper = mount(VaulterTrackedChangesPanel, {
+      props: {
+        nodeId: 'doc_1',
+        clientOptions: { client },
+      },
+    })
+    await flushPromises()
+
+    expect(wrapper.find('[data-capability-table-mode]').exists()).toBe(false)
+    expect(wrapper.find('[data-capability-node-type-change="enabled"]').exists()).toBe(true)
+    expect(wrapper.find('[data-pending-commit="true"]').exists()).toBe(true)
+    expect((wrapper.find('[data-suggestion-id="sp"] .vaulter-tracked-changes__accept').element as HTMLButtonElement).disabled).toBe(true)
+    expect((wrapper.find('[data-suggestion-id="sp"] .vaulter-tracked-changes__reject').element as HTMLButtonElement).disabled).toBe(true)
+  })
+})

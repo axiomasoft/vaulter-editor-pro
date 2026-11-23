@@ -27,6 +27,11 @@ final class ReviewTags
         return self::versioned('comment_anchor', $id, $version);
     }
 
+    public static function suggestion(string $id, int $version): string
+    {
+        return self::versioned('suggestion', $id, $version);
+    }
+
     public static function iso(?DateTimeImmutable $time): ?string
     {
         return $time?->setTimezone(new DateTimeZone('UTC'))->format('Y-m-d\TH:i:s.u\Z');

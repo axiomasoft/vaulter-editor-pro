@@ -6,6 +6,7 @@ use Illuminate\Support\Facades\Route;
 use Vaulter\Configuration\RoutesOptions;
 use Vaulter\EditorPro\Review\Http\Controllers\AnchoredCommentController;
 use Vaulter\EditorPro\Review\Http\Controllers\RevisionPinController;
+use Vaulter\EditorPro\Review\Http\Controllers\SuggestionController;
 
 $routes = app(RoutesOptions::class);
 $id = '[A-Za-z0-9_-]+';
@@ -13,7 +14,7 @@ $id = '[A-Za-z0-9_-]+';
 Route::prefix($routes->versionedPrefix())
     ->name('vaulter.v1.')
     ->middleware($routes->authenticatedMiddleware())
-    ->where(['node' => $id, 'revision' => $id, 'comment' => $id])
+    ->where(['node' => $id, 'revision' => $id, 'comment' => $id, 'suggestion' => $id, 'group' => $id])
     ->group(static function (): void {
         Route::get('review/documents/{node}/pins', [RevisionPinController::class, 'index'])
             ->name('review.pins.index');
@@ -45,5 +46,25 @@ Route::prefix($routes->versionedPrefix())
             ->middleware('vaulter.idempotency');
         Route::delete('review/nodes/{node}/comments/{comment}', [AnchoredCommentController::class, 'destroy'])
             ->name('review.comments.destroy')
+            ->middleware('vaulter.idempotency');
+
+        Route::get('review/documents/{node}/suggestions/capabilities', [SuggestionController::class, 'capabilities'])
+            ->name('review.suggestions.capabilities');
+        Route::get('review/documents/{node}/suggestions', [SuggestionController::class, 'index'])
+            ->name('review.suggestions.index');
+        Route::post('review/documents/{node}/suggestions', [SuggestionController::class, 'store'])
+            ->name('review.suggestions.store')
+            ->middleware('vaulter.idempotency');
+        Route::post('review/documents/{node}/suggestions/{suggestion}/accept', [SuggestionController::class, 'accept'])
+            ->name('review.suggestions.accept')
+            ->middleware('vaulter.idempotency');
+        Route::post('review/documents/{node}/suggestions/{suggestion}/reject', [SuggestionController::class, 'reject'])
+            ->name('review.suggestions.reject')
+            ->middleware('vaulter.idempotency');
+        Route::post('review/documents/{node}/suggestions/groups/{group}/accept', [SuggestionController::class, 'acceptGroup'])
+            ->name('review.suggestions.groups.accept')
+            ->middleware('vaulter.idempotency');
+        Route::post('review/documents/{node}/suggestions/groups/{group}/reject', [SuggestionController::class, 'rejectGroup'])
+            ->name('review.suggestions.groups.reject')
             ->middleware('vaulter.idempotency');
     });

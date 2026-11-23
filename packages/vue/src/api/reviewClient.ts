@@ -6,12 +6,17 @@ import type {
   CommentAnchorInput,
   CommentFilterStatus,
   CursorPage,
+  DecideGroupSuggestionsPayload,
+  DecideSuggestionPayload,
+  DocumentSuggestion,
   ExchangeJob,
   PinReason,
   RegisterExchangeJobPayload,
   RevisionCompare,
   RevisionPin,
   RevisionPreview,
+  SaveSuggestionPayload,
+  SuggestionCapabilities,
 } from '../types/review'
 
 export interface ReviewClientOptions {
@@ -69,6 +74,15 @@ export interface ReviewClient {
     fileUrl(nodeId: string, jobId: string): string
     download(nodeId: string, jobId: string): Promise<Blob>
     apply(nodeId: string, jobId: string, input: ApplyExchangeImportPayload, idempotencyKey?: string): Promise<ApplyExchangeReceipt>
+  }
+  suggestions?: {
+    capabilities(nodeId?: string): Promise<SuggestionCapabilities>
+    list(nodeId: string, query?: { proposal_id?: string | null }): Promise<DocumentSuggestion[]>
+    save(nodeId: string, input: SaveSuggestionPayload, idempotencyKey?: string): Promise<DocumentSuggestion>
+    accept(nodeId: string, suggestionId: string, payload: DecideSuggestionPayload, idempotencyKey?: string): Promise<DocumentSuggestion>
+    reject(nodeId: string, suggestionId: string, payload: DecideSuggestionPayload, idempotencyKey?: string): Promise<DocumentSuggestion>
+    acceptGroup(nodeId: string, groupId: string, payload: DecideGroupSuggestionsPayload, idempotencyKey?: string): Promise<DocumentSuggestion[]>
+    rejectGroup(nodeId: string, groupId: string, payload: DecideGroupSuggestionsPayload, idempotencyKey?: string): Promise<DocumentSuggestion[]>
   }
 }
 
@@ -232,6 +246,56 @@ export function createReviewClient(options: ReviewClientOptions = {}): ReviewCli
         (
           await request<{ data: ApplyExchangeReceipt }>('POST', `/documents/${nodeId}/exchange-jobs/${jobId}/apply`, {
             json: input,
+            idempotencyKey,
+          })
+        ).data,
+    },
+    suggestions: {
+      capabilities: async (nodeId) =>
+        (
+          await request<{ data: SuggestionCapabilities }>(
+            'GET',
+            nodeId ? `/review/documents/${nodeId}/suggestions/capabilities` : '/review/suggestions/capabilities',
+          )
+        ).data,
+      list: async (nodeId, query) =>
+        (
+          await request<{ data: DocumentSuggestion[] }>('GET', `/review/documents/${nodeId}/suggestions`, {
+            query: query?.proposal_id ? { proposal_id: query.proposal_id } : undefined,
+          })
+        ).data,
+      save: async (nodeId, input, idempotencyKey) =>
+        (
+          await request<{ data: DocumentSuggestion }>('POST', `/review/documents/${nodeId}/suggestions`, {
+            json: input,
+            idempotencyKey,
+          })
+        ).data,
+      accept: async (nodeId, suggestionId, payload, idempotencyKey) =>
+        (
+          await request<{ data: DocumentSuggestion }>('POST', `/review/documents/${nodeId}/suggestions/${suggestionId}/accept`, {
+            json: payload,
+            idempotencyKey,
+          })
+        ).data,
+      reject: async (nodeId, suggestionId, payload, idempotencyKey) =>
+        (
+          await request<{ data: DocumentSuggestion }>('POST', `/review/documents/${nodeId}/suggestions/${suggestionId}/reject`, {
+            json: payload,
+            idempotencyKey,
+          })
+        ).data,
+      acceptGroup: async (nodeId, groupId, payload, idempotencyKey) =>
+        (
+          await request<{ data: DocumentSuggestion[] }>('POST', `/review/documents/${nodeId}/suggestions/groups/${groupId}/accept`, {
+            json: payload,
+            idempotencyKey,
+          })
+        ).data,
+      rejectGroup: async (nodeId, groupId, payload, idempotencyKey) =>
+        (
+          await request<{ data: DocumentSuggestion[] }>('POST', `/review/documents/${nodeId}/suggestions/groups/${groupId}/reject`, {
+            json: payload,
             idempotencyKey,
           })
         ).data,

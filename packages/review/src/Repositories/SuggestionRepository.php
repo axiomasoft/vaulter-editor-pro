@@ -5,12 +5,14 @@ declare(strict_types=1);
 namespace Vaulter\EditorPro\Review\Repositories;
 
 use DateTimeImmutable;
+use DateTimeZone;
 use Illuminate\Database\Connection;
 use Illuminate\Database\Query\Builder;
 use Packman\Attributes\Internal;
 use stdClass;
 use Vaulter\Configuration\DatabaseOptions;
 use Vaulter\EditorPro\Review\Data\TextSuggestion;
+use Vaulter\EditorPro\Review\Enums\SuggestionKind;
 use Vaulter\EditorPro\Review\Exceptions\SuggestionConflictException;
 
 #[Internal]
@@ -25,14 +27,28 @@ final readonly class SuggestionRepository
 
     public function forDocument(Connection $connection, string $documentId, int $generation): Builder
     {
-        return $this->query($connection)->where('document_id', $documentId)->where('generation', $generation)
-            ->whereIn('kind', ['insert', 'delete', 'replace']);
+        return $this->query($connection)
+            ->where('document_id', $documentId)
+            ->where('generation', $generation)
+            ->whereIn('kind', SuggestionKind::allValues());
     }
 
     /** @return list<TextSuggestion> */
     public function read(Builder $query): array
     {
         return array_values($query->orderBy('id')->get()->map(self::data(...))->all());
+    }
+
+    /** @return array<string, mixed>|null */
+    public function readProvenance(Connection $connection, string $id): ?array
+    {
+        $raw = $this->query($connection)->where('id', $id)->value('provenance_json');
+        if (! is_string($raw) || $raw === '') {
+            return null;
+        }
+        $decoded = json_decode($raw, true, flags: JSON_THROW_ON_ERROR);
+
+        return is_array($decoded) ? self::stringKeyMap($decoded) : null;
     }
 
     /** @param array<string, int|string|null> $values */
@@ -46,25 +62,91 @@ final readonly class SuggestionRepository
         }
     }
 
-    public static function selector(int $from, int $to, ?string $parentId, bool $conflicted = false): string
-    {
-        return json_encode([
+    /**
+     * @param  array<string, mixed>  $extra
+     */
+    public static function selector(
+        int $from,
+        int $to,
+        ?string $parentId,
+        bool $conflicted = false,
+        array $extra = [],
+        ?string $conflictReason = null,
+        ?string $conflictWithId = null,
+    ): string {
+        $data = array_merge($extra, [
             'schema' => 1,
             'from_utf16' => $from,
             'to_utf16' => $to,
             'parentId' => $parentId,
             'conflicted' => $conflicted,
-        ], JSON_THROW_ON_ERROR);
+        ]);
+        if ($conflictReason !== null) {
+            $data['conflict_reason'] = $conflictReason;
+        } else {
+            unset($data['conflict_reason']);
+        }
+        if ($conflictWithId !== null) {
+            $data['conflict_with_id'] = $conflictWithId;
+        } else {
+            unset($data['conflict_with_id']);
+        }
+
+        return json_encode($data, JSON_THROW_ON_ERROR);
+    }
+
+    /** @param array<string, mixed> $provenance */
+    public static function encodeProvenance(array $provenance): ?string
+    {
+        if ($provenance === []) {
+            return null;
+        }
+
+        return json_encode($provenance, JSON_THROW_ON_ERROR);
     }
 
     private static function data(stdClass $row): TextSuggestion
     {
-        /** @var array{id: string, group_id: string, proposal_id: string|null, document_id: int|string, generation: int|string, base_position: int|string, schema_version: int|string, author_subject: string, kind: string, target_block_id: string, target_selector: string, payload: string, state: string, version: int|string, receipt_id: string|null, decided_by_subject: string|null, decided_at: string|null} $values */
+        /** @var array{id: string, group_id: string, proposal_id: string|null, document_id: int|string, generation: int|string, base_position: int|string, schema_version: int|string, author_subject: string, provenance_json?: string|null, kind: string, target_block_id: string, target_selector: string, payload: string, state: string, version: int|string, receipt_id: string|null, decided_by_subject: string|null, decided_at: string|null} $values */
         $values = (array) $row;
-        /** @var array{from_utf16: int, to_utf16: int, parentId: string|null, conflicted: bool} $selector */
-        $selector = json_decode($values['target_selector'], true, flags: JSON_THROW_ON_ERROR);
-        /** @var array{before: string, after: string} $payload */
-        $payload = json_decode($values['payload'], true, flags: JSON_THROW_ON_ERROR);
+        $rawSelector = json_decode($values['target_selector'], true, flags: JSON_THROW_ON_ERROR);
+        $selector = is_array($rawSelector) ? self::stringKeyMap($rawSelector) : [];
+        $rawPayload = json_decode($values['payload'], true, flags: JSON_THROW_ON_ERROR);
+        $payload = is_array($rawPayload) ? self::stringKeyMap($rawPayload) : [];
+
+        $provenance = [];
+        $rawProvenance = $values['provenance_json'] ?? null;
+        if (is_string($rawProvenance) && $rawProvenance !== '') {
+            $decodedProv = json_decode($rawProvenance, true, flags: JSON_THROW_ON_ERROR);
+            if (is_array($decodedProv)) {
+                $provenance = self::stringKeyMap($decodedProv);
+            }
+        }
+
+        $pendingJournal = is_array($provenance['pending_journal'] ?? null)
+            ? self::stringKeyMap($provenance['pending_journal'])
+            : [];
+        $journalCommandId = is_string($pendingJournal['command_id'] ?? null)
+            ? $pendingJournal['command_id']
+            : (is_string($provenance['journal_command_id'] ?? null) ? $provenance['journal_command_id'] : null);
+        $journalState = is_string($pendingJournal['state'] ?? null)
+            ? $pendingJournal['state']
+            : (is_string($provenance['journal_state'] ?? null) ? $provenance['journal_state'] : null);
+        $committedPosition = is_int($provenance['committed_position'] ?? null)
+            ? $provenance['committed_position']
+            : null;
+
+        $from = is_int($selector['from_utf16'] ?? null) ? $selector['from_utf16'] : 0;
+        $to = is_int($selector['to_utf16'] ?? null) ? $selector['to_utf16'] : $from;
+        $parentId = is_string($selector['parentId'] ?? null) ? $selector['parentId'] : null;
+        $conflicted = (bool) ($selector['conflicted'] ?? false);
+        $conflictReason = is_string($selector['conflict_reason'] ?? null) ? $selector['conflict_reason'] : null;
+        $conflictWithId = is_string($selector['conflict_with_id'] ?? null) ? $selector['conflict_with_id'] : null;
+
+        $beforeRaw = $payload['before'] ?? '';
+        $afterRaw = $payload['after'] ?? '';
+        $before = is_string($beforeRaw) ? $beforeRaw : json_encode($beforeRaw, JSON_THROW_ON_ERROR);
+        $after = is_string($afterRaw) ? $afterRaw : json_encode($afterRaw, JSON_THROW_ON_ERROR);
 
         return new TextSuggestion(
             id: $values['id'],
@@ -77,17 +159,38 @@ final readonly class SuggestionRepository
             authorSubject: $values['author_subject'],
             kind: $values['kind'],
             targetBlockId: $values['target_block_id'],
-            from: $selector['from_utf16'],
-            to: $selector['to_utf16'],
-            parentId: $selector['parentId'],
-            conflicted: $selector['conflicted'],
-            before: $payload['before'],
-            after: $payload['after'],
+            from: $from,
+            to: $to,
+            parentId: $parentId,
+            conflicted: $conflicted,
+            before: $before,
+            after: $after,
             state: $values['state'],
             version: (int) $values['version'],
             receiptId: $values['receipt_id'],
             decidedBySubject: $values['decided_by_subject'],
-            decidedAt: $values['decided_at'] === null ? null : new DateTimeImmutable($values['decided_at'], new \DateTimeZone('UTC')),
+            decidedAt: $values['decided_at'] === null ? null : new DateTimeImmutable($values['decided_at'], new DateTimeZone('UTC')),
+            targetSelector: $selector,
+            payload: $payload,
+            conflictReason: $conflictReason,
+            conflictWithId: $conflictWithId,
+            journalCommandId: $journalCommandId,
+            journalState: $journalState,
+            committedPosition: $committedPosition,
         );
+    }
+
+    /**
+     * @param  array<array-key, mixed>  $raw
+     * @return array<string, mixed>
+     */
+    private static function stringKeyMap(array $raw): array
+    {
+        $out = [];
+        foreach ($raw as $k => $v) {
+            $out[(string) $k] = $v;
+        }
+
+        return $out;
     }
 }

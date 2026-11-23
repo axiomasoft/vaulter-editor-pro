@@ -25,6 +25,13 @@ final class ReviewRouteLabels implements RouteLabelSource
             'vaulter.v1.review.comments.reopen' => 'comment',
             'vaulter.v1.review.comments.reanchor' => 'comment',
             'vaulter.v1.review.comments.destroy' => 'comment',
+            'vaulter.v1.review.suggestions.capabilities' => 'doc_read',
+            'vaulter.v1.review.suggestions.index' => 'doc_read',
+            'vaulter.v1.review.suggestions.store' => 'doc_write',
+            'vaulter.v1.review.suggestions.accept' => 'doc_write',
+            'vaulter.v1.review.suggestions.reject' => 'doc_write',
+            'vaulter.v1.review.suggestions.groups.accept' => 'doc_write',
+            'vaulter.v1.review.suggestions.groups.reject' => 'doc_write',
         ];
     }
 
@@ -40,6 +47,13 @@ final class ReviewRouteLabels implements RouteLabelSource
             ['methods' => ['POST'], 'pattern' => 'v1/review/nodes/{id}/comments/{id}/resolve', 'operation' => 'comment'],
             ['methods' => ['POST'], 'pattern' => 'v1/review/nodes/{id}/comments/{id}/reopen', 'operation' => 'comment'],
             ['methods' => ['POST'], 'pattern' => 'v1/review/nodes/{id}/comments/{id}/reanchor', 'operation' => 'comment'],
+            ['methods' => ['GET'], 'pattern' => 'v1/review/documents/{id}/suggestions/capabilities', 'operation' => 'doc_read'],
+            ['methods' => ['GET'], 'pattern' => 'v1/review/documents/{id}/suggestions', 'operation' => 'doc_read'],
+            ['methods' => ['POST'], 'pattern' => 'v1/review/documents/{id}/suggestions', 'operation' => 'doc_write'],
+            ['methods' => ['POST'], 'pattern' => 'v1/review/documents/{id}/suggestions/{id}/accept', 'operation' => 'doc_write'],
+            ['methods' => ['POST'], 'pattern' => 'v1/review/documents/{id}/suggestions/{id}/reject', 'operation' => 'doc_write'],
+            ['methods' => ['POST'], 'pattern' => 'v1/review/documents/{id}/suggestions/groups/{id}/accept', 'operation' => 'doc_write'],
+            ['methods' => ['POST'], 'pattern' => 'v1/review/documents/{id}/suggestions/groups/{id}/reject', 'operation' => 'doc_write'],
         ];
     }
 

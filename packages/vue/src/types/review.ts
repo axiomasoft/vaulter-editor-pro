@@ -230,3 +230,145 @@ export interface ApplyExchangeReceipt {
   replayed: boolean
   pending_commit: boolean
 }
+
+export type TextSuggestionKind = 'insert' | 'delete' | 'replace'
+
+export type StructuralSuggestionKind =
+  | 'mark_change'
+  | 'attr_change'
+  | 'block_split'
+  | 'block_join'
+  | 'list_change'
+  | 'table_change'
+
+export type SuggestionKind = TextSuggestionKind | StructuralSuggestionKind
+
+export type SuggestionState = 'open' | 'accepted' | 'rejected' | 'superseded'
+
+export interface SuggestionCapabilities {
+  supported_kinds: SuggestionKind[]
+  text_kinds: TextSuggestionKind[]
+  structural_kinds: StructuralSuggestionKind[]
+  node_type_change_types: string[]
+  table_mode: 'text_only'
+  allowed_marks: string[]
+  allowed_attributes: Record<string, string[]>
+  list_operations: string[]
+  table_operations: string[]
+  overlap_policy: 'keep_open_with_conflict'
+  document_type: string | null
+  write_mode: string | null
+  journal_supported: boolean
+}
+
+export const DEFAULT_REVIEW_CAPABILITIES: SuggestionCapabilities = {
+  supported_kinds: [
+    'insert',
+    'delete',
+    'replace',
+    'mark_change',
+    'attr_change',
+    'block_split',
+    'block_join',
+    'list_change',
+    'table_change',
+  ],
+  text_kinds: ['insert', 'delete', 'replace'],
+  structural_kinds: [
+    'mark_change',
+    'attr_change',
+    'block_split',
+    'block_join',
+    'list_change',
+    'table_change',
+  ],
+  node_type_change_types: [],
+  table_mode: 'text_only',
+  allowed_marks: ['bold', 'italic', 'strike', 'code', 'link', 'underline'],
+  allowed_attributes: {
+    heading: ['level'],
+    orderedList: ['start', 'type'],
+    tableCell: ['colspan', 'rowspan', 'colwidth', 'align'],
+    tableHeader: ['colspan', 'rowspan', 'colwidth', 'align'],
+    link: ['href', 'target', 'rel', 'class', 'title'],
+  },
+  list_operations: ['wrap_bullet', 'wrap_ordered', 'lift', 'toggle_type', 'sink_item', 'split_item'],
+  table_operations: [
+    'insert_table',
+    'insert_row',
+    'delete_row',
+    'insert_column',
+    'delete_column',
+    'toggle_header_row',
+    'toggle_header_cell',
+    'set_cell_attr',
+  ],
+  overlap_policy: 'keep_open_with_conflict',
+  document_type: 'vaulter/rich-text',
+  write_mode: null,
+  journal_supported: false,
+}
+
+export interface DocumentSuggestion {
+  id: string
+  group_id: string
+  proposal_id: string | null
+  document_id: string
+  generation: number
+  base_position: number
+  schema_version: number
+  author_subject: string
+  kind: SuggestionKind
+  target_block_id: string
+  target_selector: Record<string, unknown>
+  payload: Record<string, unknown>
+  from: number
+  to: number
+  parent_id: string | null
+  conflicted: boolean
+  conflict_reason: string | null
+  conflict_with_id: string | null
+  before: string
+  after: string
+  state: SuggestionState
+  version: number
+  etag: string
+  receipt_id: string | null
+  decided_by_subject: string | null
+  decided_at: string | null
+  pending_commit: boolean
+  journal_command_id: string | null
+  journal_state: string | null
+  committed_position: number | null
+}
+
+export interface SaveSuggestionPayload {
+  id: string
+  group_id: string
+  generation: number
+  base_position: number
+  schema_version: number
+  kind: SuggestionKind | string
+  target_block_id: string
+  proposal_id?: string | null
+  parent_id?: string | null
+  expected_version?: number
+  from?: number
+  to?: number
+  before?: string
+  after?: string
+  target_selector?: Record<string, unknown>
+  payload?: Record<string, unknown>
+}
+
+export interface DecideSuggestionPayload {
+  generation: number
+  expected_version: number
+  command_id?: string | null
+}
+
+export interface DecideGroupSuggestionsPayload {
+  generation: number
+  expected_versions: Record<string, number>
+  command_id?: string | null
+}

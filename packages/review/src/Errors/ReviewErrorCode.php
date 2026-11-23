@@ -16,6 +16,8 @@ enum ReviewErrorCode: string implements ErrorCode
     case InvalidSelector = 'review.invalid_anchor_selector';
     case PinNotFound = 'review.revision_pin_not_found';
     case InvalidCommentState = 'review.invalid_comment_state';
+    case SuggestionConflict = 'review.suggestion_conflict';
+    case UnsupportedSuggestion = 'review.unsupported_suggestion';
 
     #[Override]
     public function value(): string

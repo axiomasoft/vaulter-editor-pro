@@ -7,10 +7,15 @@ namespace Vaulter\EditorPro\Review\Data;
 use DateTimeImmutable;
 use Packman\Attributes\Api;
 use Packman\Attributes\Internal;
+use Vaulter\EditorPro\Review\Support\ReviewTags;
 
 #[Api(since: '1.0')]
 final readonly class TextSuggestion
 {
+    /**
+     * @param  array<string, mixed>  $targetSelector
+     * @param  array<string, mixed>  $payload
+     */
     #[Internal]
     public function __construct(
         public string $id,
@@ -34,5 +39,27 @@ final readonly class TextSuggestion
         public ?string $receiptId,
         public ?string $decidedBySubject,
         public ?DateTimeImmutable $decidedAt,
+        public array $targetSelector = [],
+        public array $payload = [],
+        public ?string $conflictReason = null,
+        public ?string $conflictWithId = null,
+        public ?string $journalCommandId = null,
+        public ?string $journalState = null,
+        public ?int $committedPosition = null,
     ) {}
+
+    public function isStructural(): bool
+    {
+        return ! in_array($this->kind, ['insert', 'delete', 'replace'], true);
+    }
+
+    public function isPendingJournal(): bool
+    {
+        return $this->state === 'open' && $this->journalCommandId !== null && $this->journalState === 'running';
+    }
+
+    public function etag(): string
+    {
+        return ReviewTags::suggestion($this->id, $this->version);
+    }
 }

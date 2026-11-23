@@ -15,10 +15,16 @@ use Vaulter\EditorPro\Review\Configuration\ReviewOptions;
 use Vaulter\EditorPro\Review\Http\Support\ReviewPreconditions;
 use Vaulter\EditorPro\Review\Operations\AnchoredCommentOperations;
 use Vaulter\EditorPro\Review\Operations\RevisionPinOperations;
+use Vaulter\EditorPro\Review\Operations\SuggestionOperations;
 use Vaulter\EditorPro\Review\Repositories\CommentAnchorRepository;
 use Vaulter\EditorPro\Review\Repositories\ReviewLookup;
 use Vaulter\EditorPro\Review\Repositories\RevisionPinRepository;
+use Vaulter\EditorPro\Review\Repositories\SuggestionRepository;
 use Vaulter\EditorPro\Review\ReviewManager;
+use Vaulter\EditorPro\Review\Suggestions\ReviewCapabilities;
+use Vaulter\EditorPro\Review\Suggestions\SnapshotStructuralEdit;
+use Vaulter\EditorPro\Review\Suggestions\SuggestionJournalBridge;
+use Vaulter\EditorPro\Review\Suggestions\SuggestionOverlapDetector;
 use Vaulter\Modules\ModuleBindings;
 
 /** Container bindings and configuration validator for `vaulter.review`. */
@@ -50,12 +56,18 @@ final class ReviewBindings implements ModuleBindings
         $app->singleton(ReviewLookup::class);
         $app->singleton(RevisionPinRepository::class);
         $app->singleton(CommentAnchorRepository::class);
+        $app->singleton(SuggestionRepository::class);
+        $app->singleton(ReviewCapabilities::class);
+        $app->singleton(SnapshotStructuralEdit::class);
+        $app->singleton(SuggestionOverlapDetector::class);
+        $app->singleton(SuggestionJournalBridge::class);
         $app->singleton(ReviewPreconditions::class);
         $app->singleton(ReviewManager::class);
         $app->alias(ReviewManager::class, 'vaulter.review');
 
         $app->bind(RevisionPinOperations::class);
         $app->bind(AnchoredCommentOperations::class);
+        $app->bind(SuggestionOperations::class);
     }
 
     public function boot(Application $app): void {}
