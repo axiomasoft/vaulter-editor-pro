@@ -151,6 +151,7 @@ function parseMarks(
   rawMarks: readonly TipTapMark[] | undefined,
   location: string,
   diagnostics: LossReportBuilder,
+  projection: DocxProjectionMode,
 ): {
   marks: IntermediateMark[]
   commentIds: string[]
@@ -165,6 +166,17 @@ function parseMarks(
   if (!rawMarks) {
     return { marks, commentIds, revision, formattingChange }
   }
+
+  // The intermediate model stores one revision per run. A nested deletion
+  // within an insertion must still be treated as pending in the original.
+  const liveMarks = rawMarks.filter(mark =>
+    mark.type === 'reviewSuggestion' && typeof mark.attrs?.suggestionId === 'string'
+    && (mark.attrs?.kind === 'insert' || mark.attrs?.kind === 'delete'),
+  )
+  const liveMark = (projection === 'review'
+    ? liveMarks.find(mark => !liveMarks.some(child => child.attrs?.parentId === mark.attrs?.suggestionId))
+    : liveMarks.find(mark => mark.attrs?.kind === (projection === 'original' ? 'insert' : 'delete')))
+    ?? liveMarks[0]
 
   for (const mark of rawMarks) {
     const attrs = mark.attrs ?? {}
@@ -246,6 +258,7 @@ function parseMarks(
       }
       case 'suggestion':
       case 'reviewSuggestion': {
+        if (liveMarks.includes(mark)) break
         const rawType = String(attrs.type ?? attrs.kind ?? 'insert')
         const revId = typeof attrs.id === 'string' && attrs.id !== '' ? attrs.id : `rev_${location}`
         const userMeta = (attrs.userMetadata ?? {}) as Record<string, unknown>
@@ -309,6 +322,17 @@ function parseMarks(
     }
   }
 
+  const liveId = liveMark?.attrs?.suggestionId
+  const liveKind = liveMark?.attrs?.kind
+  if (typeof liveId === 'string' && (liveKind === 'insert' || liveKind === 'delete')) {
+    revision = {
+      id: liveId,
+      kind: liveKind,
+      groupId: liveId,
+      author: 'Unknown Author',
+      date: '1970-01-01T00:00:00Z',
+    }
+  }
   return { marks, commentIds, revision, formattingChange }
 }
 
@@ -369,6 +393,7 @@ function parseInlines(
   content: readonly TipTapNode[] | undefined,
   location: string,
   diagnostics: LossReportBuilder,
+  projection: DocxProjectionMode,
 ): IntermediateInline[] {
   if (!content) {
     return []
@@ -379,7 +404,7 @@ function parseInlines(
     const child = content[i]
     const childLoc = `${location}.inline[${i}]`
     if (child.type === 'text') {
-      const parsed = parseMarks(child.marks, childLoc, diagnostics)
+      const parsed = parseMarks(child.marks, childLoc, diagnostics, projection)
       result.push({
         type: 'text',
         text: child.text ?? '',
@@ -389,7 +414,7 @@ function parseInlines(
         ...(parsed.formattingChange ? { formattingChange: parsed.formattingChange } : {}),
       })
     } else if (child.type === 'hardBreak') {
-      const parsed = parseMarks(child.marks, childLoc, diagnostics)
+      const parsed = parseMarks(child.marks, childLoc, diagnostics, projection)
       result.push({
         type: 'hardBreak',
         ...(parsed.commentIds.length > 0 ? { commentIds: parsed.commentIds } : {}),
@@ -435,9 +460,10 @@ function parseInlines(
   return result
 }
 
-interface NumberingTracker {
+interface ConversionState {
   nextNumId: number
   definitions: NumberingDefinition[]
+  projection: DocxProjectionMode
 }
 
 function convertListNode(
@@ -447,7 +473,7 @@ function convertListNode(
   numId: number,
   location: string,
   diagnostics: LossReportBuilder,
-  tracker: NumberingTracker,
+  tracker: ConversionState,
 ): IntermediateBlock[] {
   const blocks: IntermediateBlock[] = []
   const start = kind === 'ordered' && typeof listNode.attrs?.start === 'number' ? listNode.attrs.start : 1
@@ -482,7 +508,7 @@ function convertListNode(
             child,
             firstParagraphInItem ? { kind, level, numId, start, format } : null,
           ),
-          inlines: parseInlines(child.content, `${itemLoc}.p[${j}]`, diagnostics),
+          inlines: parseInlines(child.content, `${itemLoc}.p[${j}]`, diagnostics, tracker.projection),
         })
         firstParagraphInItem = false
       } else if (child.type === 'bulletList' || child.type === 'orderedList') {
@@ -510,7 +536,7 @@ function convertTableNode(
   tableNode: TipTapNode,
   location: string,
   diagnostics: LossReportBuilder,
-  tracker: NumberingTracker,
+  tracker: ConversionState,
 ): IntermediateTableBlock {
   const attrs = tableNode.attrs ?? {}
   let tableWidth = parseOoxmlWidth(
@@ -683,7 +709,7 @@ function convertBlockNode(
   node: TipTapNode,
   location: string,
   diagnostics: LossReportBuilder,
-  tracker: NumberingTracker,
+  tracker: ConversionState,
 ): IntermediateBlock[] {
   const attrs = node.attrs ?? {}
   const blockId = typeof attrs.blockId === 'string' ? attrs.blockId : null
@@ -695,7 +721,7 @@ function convertBlockNode(
           type: 'paragraph',
           id: blockId,
           attrs: parseParagraphAttrs(node),
-          inlines: parseInlines(node.content, location, diagnostics),
+          inlines: parseInlines(node.content, location, diagnostics, tracker.projection),
         },
       ]
     case 'heading': {
@@ -707,7 +733,7 @@ function convertBlockNode(
           id: blockId,
           level,
           attrs: parseParagraphAttrs(node),
-          inlines: parseInlines(node.content, location, diagnostics),
+          inlines: parseInlines(node.content, location, diagnostics, tracker.projection),
         },
       ]
     }
@@ -766,7 +792,7 @@ function convertHeaderFooterSlot(
   slot: TipTapDoc | HeaderFooterContent | string | null | undefined,
   location: string,
   diagnostics: LossReportBuilder,
-  tracker: NumberingTracker,
+  tracker: ConversionState,
 ): HeaderFooterContent | null {
   if (slot === undefined || slot === null) {
     return null
@@ -1121,8 +1147,9 @@ export function toIntermediate(
   const profile = options.profile ?? 'discussions'
   const capabilities = getProfileCapabilities(profile, options)
   const projection = options.projection ?? capabilities.defaultProjection
+  const effectiveProjection: DocxProjectionMode = capabilities.revisionsEnabled ? projection : 'original'
   const diagnostics = new LossReportBuilder()
-  const tracker: NumberingTracker = { nextNumId: 1, definitions: [] }
+  const tracker: ConversionState = { nextNumId: 1, definitions: [], projection: effectiveProjection }
 
   const rawContent = document.content ?? []
   const sectionNodes = rawContent.filter((n) => n.type === 'section')
@@ -1342,7 +1369,6 @@ export function toIntermediate(
     }
   }
 
-  const effectiveProjection: DocxProjectionMode = capabilities.revisionsEnabled ? projection : 'original'
   const projected = projectIntermediateModel(model, effectiveProjection)
   model = projected.model
 

@@ -30,6 +30,7 @@ use Vaulter\EditorPro\Review\Http\Support\ReviewRouteLabels;
 use Vaulter\EditorPro\Review\Operations\AnchoredCommentOperations;
 use Vaulter\EditorPro\Review\Operations\ReviewOperationPolicies;
 use Vaulter\EditorPro\Review\Operations\RevisionPinOperations;
+use Vaulter\EditorPro\Review\Operations\SuggestionOperations;
 use Vaulter\EditorPro\Review\Providers\ReviewBindings;
 use Vaulter\EditorPro\Review\Repositories\RevisionPinRepository;
 use Vaulter\EditorPro\Review\Schema\ReviewSchema;
@@ -95,7 +96,7 @@ final class EditorProReviewModule implements ExtensionPlugin, WithConfiguration,
     #[Override]
     public function tableNouns(): array
     {
-        return ['document_revision_pins', 'document_comment_anchors'];
+        return ['document_revision_pins', 'document_comment_anchors', 'document_suggestions'];
     }
 
     #[Override]
@@ -133,6 +134,7 @@ final class EditorProReviewModule implements ExtensionPlugin, WithConfiguration,
             ['slot' => RouteLabelSource::class, 'id' => 'review.routes', 'implementation' => ReviewRouteLabels::class],
             ['slot' => DriveExtension::class, 'id' => 'review.pins', 'implementation' => RevisionPinOperations::class, 'key' => RevisionPinOperations::class],
             ['slot' => DriveExtension::class, 'id' => 'review.comments', 'implementation' => AnchoredCommentOperations::class, 'key' => AnchoredCommentOperations::class],
+            ['slot' => DriveExtension::class, 'id' => 'review.suggestions', 'implementation' => SuggestionOperations::class, 'key' => SuggestionOperations::class],
             ['slot' => EventSink::class, 'id' => RestoreAnchorTransitionSink::ID, 'implementation' => RestoreAnchorTransitionSink::class],
             ['slot' => SnapshotWriteHook::class, 'id' => 'review.snapshot-anchors', 'implementation' => SnapshotAnchorReconciler::class, 'key' => 'review'],
             ['slot' => RevisionPruneProtection::class, 'id' => 'review.revision-pins', 'implementation' => RevisionPinRepository::class, 'key' => 'review'],

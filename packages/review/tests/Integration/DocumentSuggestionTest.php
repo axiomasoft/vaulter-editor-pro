@@ -1,0 +1,163 @@
+<?php
+
+declare(strict_types=1);
+
+use Illuminate\Database\QueryException;
+use Illuminate\Support\Str;
+use Vaulter\Database\VaulterDatabase;
+use Vaulter\Documents\DocumentsManager;
+use Vaulter\Drive\Access\Roles\RoleRegistry;
+use Vaulter\Drive\Exceptions\Nodes\NodeNotFoundException;
+use Vaulter\Drive\Testing\Access\AccessTestHelpers;
+use Vaulter\Drive\Vaulter;
+use Vaulter\EditorPro\Review\Data\TextSuggestionInput;
+use Vaulter\EditorPro\Review\Exceptions\SuggestionConflictException;
+use Vaulter\EditorPro\Review\ReviewManager;
+
+beforeEach(function (): void {
+    $storage = AccessTestHelpers::storage();
+    AccessTestHelpers::grant($storage->rootNode, RoleRegistry::OWNER, subjectId: 1);
+    $this->root = $storage->rootNode;
+    $this->grant = AccessTestHelpers::grant($this->root, RoleRegistry::WRITER, subjectId: 2);
+    $vaulter = app(Vaulter::class);
+    $this->owner = $vaulter->drive($storage)->actingAs(AccessTestHelpers::user(1));
+    $this->editor = $vaulter->drive($storage)->actingAs(AccessTestHelpers::user(2));
+    $this->docs = app(DocumentsManager::class)->in($this->owner);
+    $this->node = $this->docs->create('tracked', 'vaulter/rich-text', [
+        'type' => 'doc',
+        'content' => [[
+            'type' => 'paragraph',
+            'attrs' => ['blockId' => 'review_block'],
+            'content' => [
+                ['type' => 'text', 'text' => '🦊 red', 'marks' => [['type' => 'bold']]],
+                ['type' => 'text', 'text' => ' blue'],
+            ],
+        ]],
+    ]);
+    $this->first = app(ReviewManager::class)->suggestions($this->owner);
+    $this->second = app(ReviewManager::class)->suggestions($this->editor);
+});
+
+function reviewTextEdit(
+    int $from,
+    int $to,
+    string $before,
+    string $after,
+    ?string $proposalId = null,
+    ?string $parentId = null,
+    ?string $groupId = null,
+): TextSuggestionInput {
+    return new TextSuggestionInput(
+        id: (string) Str::uuid7(),
+        groupId: $groupId ?? (string) Str::uuid7(),
+        generation: 0,
+        basePosition: 1,
+        schemaVersion: 2,
+        targetBlockId: 'review_block',
+        from: $from,
+        to: $to,
+        before: $before,
+        after: $after,
+        proposalId: $proposalId,
+        parentId: $parentId,
+    );
+}
+
+function acceptedReviewText($docs, $node): string
+{
+    return implode('', array_column($docs->content($node)->content->toArray()['content'][0]['content'] ?? [], 'text'));
+}
+
+it('accepts a replacement group once, rebases independent edits, and preserves open overlaps', function (): void {
+    $replace = $this->first->save($this->node->id, reviewTextEdit(3, 6, 'red', 'green'));
+    $overlap = $this->second->save($this->node->id, reviewTextEdit(4, 8, 'ed b', ''));
+    $independent = $this->second->save($this->node->id, reviewTextEdit(7, 11, 'blue', 'gold'));
+    expect($replace->authorSubject)->not->toBe($overlap->authorSubject)
+        ->and(acceptedReviewText($this->docs, $this->node))->toBe('🦊 red blue');
+
+    $selection = [$replace->id => 1];
+    $accepted = $this->first->acceptGroup($this->node->id, $replace->groupId, 0, $selection);
+    expect($accepted[0]->receiptId)->not->toBeNull()
+        ->and($this->first->acceptGroup($this->node->id, $replace->groupId, 0, $selection))->toEqual($accepted)
+        ->and(acceptedReviewText($this->docs, $this->node))->toBe('🦊 green blue');
+
+    $open = array_column($this->second->list($this->node->id), null, 'id');
+    expect($open[$overlap->id]->state)->toBe('open')
+        ->and($open[$overlap->id]->conflicted)->toBeTrue()
+        ->and($open[$independent->id]->from)->toBe(9);
+    expect(fn () => $this->second->accept($this->node->id, $overlap->id, 0, $open[$overlap->id]->version))
+        ->toThrow(SuggestionConflictException::class);
+    $this->second->reject($this->node->id, $overlap->id, 0, $open[$overlap->id]->version);
+    expect(acceptedReviewText($this->docs, $this->node))->toBe('🦊 green blue');
+    $this->second->accept($this->node->id, $independent->id, 0, $open[$independent->id]->version);
+    expect(acceptedReviewText($this->docs, $this->node))->toBe('🦊 green gold');
+    expect($this->docs->content($this->node)->content->toArray()['content'][0]['content'][0]['marks'])
+        ->toBe([['type' => 'bold']]);
+});
+
+it('cascades nested rejection, protects proposal decisions, and reauthorizes repeat calls', function (): void {
+    $parent = $this->first->save($this->node->id, reviewTextEdit(6, 6, '', ' bag'));
+    $child = $this->second->save($this->node->id, reviewTextEdit(1, 3, 'ba', 'ru', parentId: $parent->id));
+    $proposalId = (string) Str::uuid7();
+    $proposal = $this->first->save($this->node->id, reviewTextEdit(0, 2, '🦊', '🦉', proposalId: $proposalId));
+    $otherProposal = $this->second->save($this->node->id, reviewTextEdit(0, 2, '🦊', '🦝', proposalId: (string) Str::uuid7()));
+    expect($this->first->list($this->node->id, $proposalId)[0]->id)->toBe($proposal->id)
+        ->and($this->first->list($this->node->id, $proposalId))->toHaveCount(1)
+        ->and(fn () => $this->first->accept($this->node->id, $proposal->id, 0, 1))->toThrow(SuggestionConflictException::class)
+        ->and(fn () => $this->second->reject($this->node->id, $otherProposal->id, 0, 1))->toThrow(SuggestionConflictException::class);
+
+    $this->first->reject($this->node->id, $parent->id, 0, 1);
+    expect(array_column($this->first->list($this->node->id), 'state', 'id')[$child->id])->toBe('superseded')
+        ->and(acceptedReviewText($this->docs, $this->node))->toBe('🦊 red blue');
+
+    $accepted = $this->second->save($this->node->id, reviewTextEdit(3, 6, 'red', 'rose'));
+    $pending = $this->second->save($this->node->id, reviewTextEdit(7, 11, 'blue', 'navy'));
+    $this->second->accept($this->node->id, $accepted->id, 0, 1);
+    $this->owner->access()->revoke($this->root->id, $this->grant->id);
+    expect(fn () => $this->second->accept($this->node->id, $accepted->id, 0, 1))->toThrow(NodeNotFoundException::class)
+        ->and(fn () => $this->second->reject($this->node->id, $pending->id, 0, 2))->toThrow(NodeNotFoundException::class);
+});
+
+it('enforces the database receipt and text range invariants', function (): void {
+    expect(fn () => $this->first->save($this->node->id, reviewTextEdit(1, 1, '', '!')))
+        ->toThrow(SuggestionConflictException::class);
+    $draft = $this->first->save($this->node->id, reviewTextEdit(3, 6, 'red', 'rose'));
+    $table = app(VaulterDatabase::class)->connection()->table('v_document_suggestions')->where('id', $draft->id);
+    expect(fn () => $table->update(['state' => 'accepted']))->toThrow(QueryException::class);
+});
+
+it('uses one receipt for a complete group and rolls back text if recording the receipt fails', function (): void {
+    $group = (string) Str::uuid7();
+    $one = $this->first->save($this->node->id, reviewTextEdit(3, 6, 'red', 'green', groupId: $group));
+    $two = $this->first->save($this->node->id, reviewTextEdit(7, 11, 'blue', '', groupId: $group));
+    $versions = [$one->id => 1, $two->id => 1];
+    expect(fn () => $this->first->acceptGroup($this->node->id, $group, 0, [$one->id => 1]))
+        ->toThrow(SuggestionConflictException::class);
+
+    $db = app(VaulterDatabase::class)->connection();
+    $driver = $db->getDriverName();
+    if ($driver === 'pgsql') {
+        $db->unprepared("CREATE FUNCTION abort_review_write() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'receipt write failed'; END $$");
+        $db->unprepared('CREATE TRIGGER abort_review_write BEFORE UPDATE ON v_document_suggestions FOR EACH ROW EXECUTE FUNCTION abort_review_write()');
+    } elseif ($driver === 'sqlite') {
+        $db->unprepared("CREATE TRIGGER abort_review_write BEFORE UPDATE ON v_document_suggestions BEGIN SELECT RAISE(ABORT, 'receipt write failed'); END");
+    } else {
+        $db->unprepared("CREATE TRIGGER abort_review_write BEFORE UPDATE ON v_document_suggestions FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'receipt write failed'");
+    }
+    try {
+        expect(fn () => $this->first->acceptGroup($this->node->id, $group, 0, $versions))->toThrow(QueryException::class, 'receipt write failed');
+        expect(acceptedReviewText($this->docs, $this->node))->toBe('🦊 red blue')
+            ->and(array_column($this->first->list($this->node->id), 'state'))->toBe(['open', 'open']);
+    } finally {
+        if ($driver === 'pgsql') {
+            $db->unprepared('DROP TRIGGER abort_review_write ON v_document_suggestions');
+            $db->unprepared('DROP FUNCTION abort_review_write()');
+        } else {
+            $db->unprepared('DROP TRIGGER abort_review_write');
+        }
+    }
+    $resolved = $this->first->acceptGroup($this->node->id, $group, 0, $versions);
+    expect(array_unique(array_column($resolved, 'receiptId')))->toHaveCount(1)
+        ->and($resolved[0]->receiptId)->not->toBeNull()
+        ->and(acceptedReviewText($this->docs, $this->node))->toBe('🦊 green ');
+});

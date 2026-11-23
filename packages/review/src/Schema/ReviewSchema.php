@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Vaulter\EditorPro\Review\Schema;
 
+use Illuminate\Database\Query\Expression;
 use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Support\Arr;
 use InvalidArgumentException;
@@ -16,8 +17,7 @@ use Vaulter\Schema\SchemaHelpers;
 use Vaulter\Schema\ValueObjects\KeyColumnExpectation;
 
 /**
- * Schema builder for the review extension tables (`v_document_revision_pins` and
- * `v_document_comment_anchors`) matching `plan/spec/database/sql/editor-pro-review.sql`.
+ * Schema builder for the review tables in `plan/spec/database/sql/editor-pro-review.sql`.
  */
 #[Internal]
 final class ReviewSchema implements ModuleSchema
@@ -35,6 +35,7 @@ final class ReviewSchema implements ModuleSchema
         return [
             'document_revision_pins',
             'document_comment_anchors',
+            'document_suggestions',
         ];
     }
 
@@ -48,6 +49,8 @@ final class ReviewSchema implements ModuleSchema
             new KeyColumnExpectation('document_comment_anchors', 'tenant_id', 'HK'),
             new KeyColumnExpectation('document_comment_anchors', 'comment_id', 'REF'),
             new KeyColumnExpectation('document_comment_anchors', 'document_id', 'REF'),
+            new KeyColumnExpectation('document_suggestions', 'tenant_id', 'HK'),
+            new KeyColumnExpectation('document_suggestions', 'document_id', 'REF'),
         ];
     }
 
@@ -55,18 +58,107 @@ final class ReviewSchema implements ModuleSchema
     {
         $ids = $this->helpers->ids();
 
+        if ($entity === 'document_suggestions') {
+            $conn = $this->helpers->dbConnection();
+            if ($this->driver() === 'pgsql' && $conn->transactionLevel() > 0) {
+                $conn->statement("SET LOCAL lock_timeout = '2s'");
+                $conn->statement("SET LOCAL statement_timeout = '15s'");
+            }
+        }
+
         $this->helpers->schemaConnection()->create(
             $this->helpers->table($entity),
             function (Blueprint $table) use ($ids, $entity): void {
                 match ($entity) {
                     'document_revision_pins' => $this->defineRevisionPins($table, $ids),
                     'document_comment_anchors' => $this->defineCommentAnchors($table, $ids),
+                    'document_suggestions' => $this->defineSuggestions($table, $ids),
                     default => throw new InvalidArgumentException(sprintf('Unknown review entity [%s].', $entity)),
                 };
             },
         );
 
         $this->afterCreate($entity);
+    }
+
+    private function defineSuggestions(Blueprint $table, IdStrategy $ids): void
+    {
+        $name = $table->getTable();
+        $driver = $this->driver();
+        $id = $table->uuid('id')->primary();
+        if ($driver === 'pgsql') {
+            $id->default(new Expression('uuidv7()'));
+        }
+        HostKeyColumns::add(table: $table, column: 'tenant_id', nullable: false, index: false);
+        $ids->reference(table: $table, column: 'document_id');
+        Arr::last($table->getColumns())?->index(false);
+        $table->uuid('group_id');
+        $table->uuid('proposal_id')->nullable();
+        $table->bigInteger('generation');
+        $table->bigInteger('base_position');
+        $table->integer('schema_version');
+        $subjects = [
+            $table->string('author_subject', 255),
+            $table->string('target_block_id', 255),
+            $table->string('decided_by_subject', 255)->nullable(),
+        ];
+        if ($driver === 'pgsql') {
+            foreach ($subjects as $column) {
+                $column->collation('C');
+            }
+        }
+        $table->jsonb('provenance_json')->nullable();
+        $table->string('kind', 24);
+        $table->jsonb('target_selector');
+        $table->jsonb('payload');
+        $table->string('state', 16)->default('open');
+        $table->timestampTz('decided_at')->nullable();
+        $table->uuid('receipt_id')->nullable();
+        $checks = $this->suggestionChecks($driver);
+        if ($driver === 'sqlite') {
+            $table->rawColumn('version', 'INTEGER NOT NULL DEFAULT 1 CHECK ('.implode(') CHECK (', $checks).')');
+        } else {
+            $table->integer('version')->default(1);
+        }
+        $table->timestampTz('created_at')->useCurrent();
+        $table->timestampTz('updated_at')->useCurrent();
+        $table->index(['document_id', 'generation'], $name.'_doc_fk_idx');
+        if ($driver === 'mysql') {
+            $table->index(['document_id', 'generation', 'state', 'group_id'], $name.'_doc_open');
+            $table->index('proposal_id', $name.'_proposal');
+        }
+        $table->foreign('document_id', $name.'_document_fk')
+            ->references('id')
+            ->on($this->helpers->table('documents'))
+            ->cascadeOnDelete();
+    }
+
+    /** @return list<string> */
+    private function suggestionChecks(string $driver): array
+    {
+        $checks = [];
+        foreach (['generation', 'base_position', 'schema_version', 'version'] as $column) {
+            $integer = $driver === 'sqlite' ? "typeof({$column}) = 'integer' AND " : '';
+            $range = in_array($column, ['generation', 'base_position'], true) ? 'BETWEEN 0 AND '.self::MAX_JS_INT : '> 0';
+            $checks[] = $integer.$column.' '.$range;
+        }
+        foreach (['author_subject', 'target_block_id', 'decided_by_subject'] as $column) {
+            $bytes = $driver === 'sqlite' ? "length(CAST({$column} AS BLOB))" : "octet_length({$column})";
+            $checks[] = "{$bytes} BETWEEN 1 AND 255";
+        }
+        foreach (['provenance_json', 'target_selector', 'payload'] as $column) {
+            $checks[] = match ($driver) {
+                'pgsql' => "jsonb_typeof({$column}) = 'object'",
+                'sqlite' => "json_type({$column}) = 'object'",
+                default => "json_type({$column}) = 'OBJECT'",
+            };
+        }
+        $checks[] = "kind IN ('insert', 'delete', 'replace', 'mark_change', 'attr_change', 'block_split', 'block_join', 'list_change', 'table_change')";
+        $checks[] = "(state = 'open' AND decided_by_subject IS NULL AND decided_at IS NULL AND receipt_id IS NULL)
+            OR (state = 'accepted' AND decided_by_subject IS NOT NULL AND decided_at IS NOT NULL AND receipt_id IS NOT NULL)
+            OR (state IN ('rejected', 'superseded') AND decided_at IS NOT NULL AND receipt_id IS NULL)";
+
+        return $checks;
     }
 
     public function drop(string $entity): void
@@ -214,6 +306,26 @@ final class ReviewSchema implements ModuleSchema
 
     private function afterCreate(string $entity): void
     {
+        if ($entity === 'document_suggestions') {
+            $conn = $this->helpers->dbConnection();
+            $grammar = $conn->getQueryGrammar();
+            $name = $this->helpers->table($entity);
+            $table = $grammar->wrapTable($name);
+            $driver = $this->driver();
+            if ($driver !== 'sqlite') {
+                foreach ($this->suggestionChecks($driver) as $check) {
+                    $conn->statement("ALTER TABLE {$table} ADD CHECK ({$check})");
+                }
+            }
+            if ($driver !== 'mysql') {
+                $open = $grammar->wrap($name.'_doc_open');
+                $proposal = $grammar->wrap($name.'_proposal');
+                $conn->statement("CREATE INDEX {$open} ON {$table} (document_id, generation, group_id) WHERE state = 'open'");
+                $conn->statement("CREATE INDEX {$proposal} ON {$table} (proposal_id) WHERE proposal_id IS NOT NULL");
+            }
+
+            return;
+        }
         if ($this->driver() !== 'pgsql') {
             return;
         }

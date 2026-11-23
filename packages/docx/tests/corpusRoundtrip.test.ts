@@ -365,6 +365,31 @@ describe('DOCX Corpus D1–D4 Roundtrip & Loss Report (10.1-A)', () => {
     expect(origText).not.toContain('added clause')
   })
 
+  it('keeps pending live insertions out of the default projection even under a nested deletion', () => {
+    const document = {
+      type: 'doc' as const,
+      content: [{
+        type: 'paragraph',
+        content: [
+          { type: 'text', text: 'old', marks: [
+            { type: 'reviewSuggestion', attrs: { suggestionId: 'parent', kind: 'delete' } },
+          ] },
+          { type: 'text', text: 'pending-child-deletion', marks: [
+            { type: 'reviewSuggestion', attrs: { suggestionId: 'parent', kind: 'insert' } },
+            { type: 'reviewSuggestion', attrs: { suggestionId: 'child', kind: 'delete', parentId: 'parent' } },
+          ] },
+          { type: 'text', text: 'new', marks: [
+            { type: 'reviewSuggestion', attrs: { suggestionId: 'parent', kind: 'insert' } },
+          ] },
+        ],
+      }],
+    }
+    const original = toIntermediate(document)
+    expect(fromIntermediate(original.model).document.content?.[0].content).toEqual([{ type: 'text', text: 'old' }])
+    const proposed = toIntermediate(document, { profile: 'revisions', projection: 'proposed' })
+    expect(fromIntermediate(proposed.model).document.content?.[0].content).toEqual([{ type: 'text', text: 'new' }])
+  })
+
   it('blocks profile when an unsupported mandatory element or broken 2x2 merge geometry is present', async () => {
     const unsupportedDoc = {
       type: 'doc' as const,

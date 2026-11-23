@@ -61,6 +61,10 @@ export { DiffOverlay } from './extensions/DiffOverlay'
 export type { DiffOverlayOptions } from './extensions/DiffOverlay'
 export { RANGE_ANCHOR_PLUGIN_KEY, RangeAnchorHighlight } from './extensions/RangeAnchorMark'
 export type { ActiveRangeDecoration, RangeAnchorHighlightOptions } from './extensions/RangeAnchorMark'
+export { VaulterTrackedChanges } from './extensions/VaulterTrackedChanges'
+export type { TrackedChangesOptions } from './extensions/VaulterTrackedChanges'
+export { applySuggestionDecision, projectTrackedChanges } from './review/trackedProjection'
+export type { TrackedProjection, TrackedSuggestionSelection, TrackedTextSuggestion } from './review/trackedProjection'
 
 // Composables
 export { isDetachedAnchor, useRangeComments } from './composables/useRangeComments'

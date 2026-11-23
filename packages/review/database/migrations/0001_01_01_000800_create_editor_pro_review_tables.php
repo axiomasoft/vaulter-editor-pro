@@ -8,10 +8,12 @@ use Vaulter\Schema\VaulterMigration;
 
 return new class extends VaulterMigration
 {
+    private const array ENTITIES = ['document_revision_pins', 'document_comment_anchors'];
+
     public function up(): void
     {
         $schema = Container::getInstance()->make(ReviewSchema::class);
-        foreach ($schema->entities() as $entity) {
+        foreach (self::ENTITIES as $entity) {
             $schema->create($entity);
         }
     }
@@ -19,7 +21,7 @@ return new class extends VaulterMigration
     public function down(): void
     {
         $schema = Container::getInstance()->make(ReviewSchema::class);
-        foreach (array_reverse($schema->entities()) as $entity) {
+        foreach (array_reverse(self::ENTITIES) as $entity) {
             $schema->drop($entity);
         }
     }
