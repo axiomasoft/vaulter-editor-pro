@@ -16,11 +16,15 @@ use Vaulter\EditorPro\Review\Enums\SuggestionKind;
 #[Internal]
 final readonly class SuggestionOverlapDetector
 {
-    /** @param list<string> $destroyedBlockIds */
+    /**
+     * @param  list<string>  $destroyedBlockIds
+     * @param  array<string, mixed>|null  $doc
+     */
     public function overlaps(
         TextSuggestion|TextSuggestionInput|StructuralSuggestionInput $a,
         TextSuggestion|TextSuggestionInput|StructuralSuggestionInput $b,
         array $destroyedBlockIds = [],
+        ?array $doc = null,
     ): bool {
         if ($a->id === $b->id) {
             return false;
@@ -44,18 +48,20 @@ final readonly class SuggestionOverlapDetector
             return false;
         }
 
+        if ($a->kind === SuggestionKind::TableChange->value && $b->kind === SuggestionKind::TableChange->value) {
+            return $this->tableChangesOverlap($a, $b, $doc);
+        }
+        if ($a->kind === SuggestionKind::ListChange->value && $b->kind === SuggestionKind::ListChange->value) {
+            $container = $this->container($a, $doc);
+
+            return $a->targetBlockId === $b->targetBlockId
+                || ($container !== null && $container === $this->container($b, $doc));
+        }
+
         $aBlocks = $this->touchedBlocks($a);
         $bBlocks = $this->touchedBlocks($b);
         $sharedBlocks = array_intersect($aBlocks, $bBlocks);
         if ($sharedBlocks === []) {
-            if ($a->kind === SuggestionKind::TableChange->value && $b->kind === SuggestionKind::TableChange->value) {
-                return $this->tableChangesOverlap($a, $b);
-            }
-            if ($a->kind === SuggestionKind::ListChange->value && $b->kind === SuggestionKind::ListChange->value) {
-                return ($a->payload['list_op'] ?? null) === 'toggle_type'
-                    || ($b->payload['list_op'] ?? null) === 'toggle_type';
-            }
-
             return false;
         }
 
@@ -98,14 +104,6 @@ final readonly class SuggestionOverlapDetector
             $other = $split === $a ? $b : $a;
 
             return $this->splitVsOtherOverlap($split, $other);
-        }
-
-        if ($a->kind === SuggestionKind::ListChange->value && $b->kind === SuggestionKind::ListChange->value) {
-            return true;
-        }
-
-        if ($a->kind === SuggestionKind::TableChange->value && $b->kind === SuggestionKind::TableChange->value) {
-            return $this->tableChangesOverlap($a, $b);
         }
 
         if (($a->kind === SuggestionKind::TableChange->value && $this->isDestructiveTableOp($a))
@@ -202,32 +200,94 @@ final readonly class SuggestionOverlapDetector
         return true;
     }
 
+    /** @param array<string, mixed>|null $doc */
     private function tableChangesOverlap(
         TextSuggestion|TextSuggestionInput|StructuralSuggestionInput $a,
         TextSuggestion|TextSuggestionInput|StructuralSuggestionInput $b,
+        ?array $doc,
     ): bool {
         if ($a->targetBlockId === $b->targetBlockId) {
             return true;
         }
+
         $aPayload = $a instanceof TextSuggestionInput ? [] : $a->payload;
         $bPayload = $b instanceof TextSuggestionInput ? [] : $b->payload;
-        $aRow = $aPayload['row_index'] ?? null;
-        $bRow = $bPayload['row_index'] ?? null;
-        $aCol = $aPayload['col_index'] ?? null;
-        $bCol = $bPayload['col_index'] ?? null;
-        if ($this->isDestructiveTableOp($a) || $this->isDestructiveTableOp($b)) {
-            if ($aRow !== null && $bRow !== null && $aRow === $bRow) {
-                return true;
-            }
-            if ($aCol !== null && $bCol !== null && $aCol === $bCol) {
-                return true;
-            }
+        $aOp = $aPayload['table_op'] ?? null;
+        $bOp = $bPayload['table_op'] ?? null;
+        $container = $this->container($a, $doc);
+        if ($container === null || $container !== $this->container($b, $doc)) {
+            return false;
         }
-        if ($aRow !== null && $bRow !== null && $aRow === $bRow && $aCol !== null && $bCol !== null && $aCol === $bCol) {
+
+        // A row or column insertion/deletion changes the meaning of selectors into its table.
+        $indexChanging = ['insert_row', 'insert_column', 'delete_row', 'delete_column'];
+        if (in_array($aOp, $indexChanging, true) || in_array($bOp, $indexChanging, true)) {
             return true;
         }
 
-        return false;
+        $row = $aPayload['row_index'] ?? null;
+
+        return $row !== null && $row === ($bPayload['row_index'] ?? null)
+            && ($aOp === 'toggle_header_row' || $bOp === 'toggle_header_row'
+                || ($aPayload['col_index'] ?? null) === ($bPayload['col_index'] ?? null));
+    }
+
+    /** @param array<string, mixed>|null $doc */
+    public function container(TextSuggestion|TextSuggestionInput|StructuralSuggestionInput $item, ?array $doc): ?string
+    {
+        $types = match ($item->kind) {
+            SuggestionKind::ListChange->value => ['bulletList', 'orderedList'],
+            SuggestionKind::TableChange->value => ['table'],
+            default => [],
+        };
+        if ($types === [] || $item instanceof TextSuggestionInput) {
+            return null;
+        }
+        if ($doc !== null) {
+            return $this->findContainer($doc, $item->targetBlockId, $types);
+        }
+
+        $id = $item instanceof TextSuggestion ? ($item->targetSelector['container_anchor'] ?? null) : null;
+
+        return is_string($id) ? $id : null;
+    }
+
+    /**
+     * @param  array<array-key, mixed>  $node
+     * @param  list<string>  $types
+     */
+    private function findContainer(array $node, string $target, array $types, ?string $container = null): ?string
+    {
+        if (in_array($node['type'] ?? null, $types, true)) {
+            $container = $this->firstBlockId($node);
+        }
+        $attrs = $node['attrs'] ?? null;
+        if (is_array($attrs) && ($attrs['blockId'] ?? null) === $target) {
+            return $container;
+        }
+        foreach (is_array($node['content'] ?? null) ? $node['content'] : [] as $child) {
+            if (is_array($child) && ($found = $this->findContainer($child, $target, $types, $container)) !== null) {
+                return $found;
+            }
+        }
+
+        return null;
+    }
+
+    /** @param array<array-key, mixed> $node */
+    private function firstBlockId(array $node): ?string
+    {
+        $attrs = $node['attrs'] ?? null;
+        if (is_array($attrs) && is_string($attrs['blockId'] ?? null)) {
+            return $attrs['blockId'];
+        }
+        foreach (is_array($node['content'] ?? null) ? $node['content'] : [] as $child) {
+            if (is_array($child) && ($id = $this->firstBlockId($child)) !== null) {
+                return $id;
+            }
+        }
+
+        return null;
     }
 
     private function isDestructiveTableOp(TextSuggestion|TextSuggestionInput|StructuralSuggestionInput $item): bool

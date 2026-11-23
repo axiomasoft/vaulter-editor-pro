@@ -28,8 +28,8 @@ use Vaulter\EditorPro\Review\Data\RevisionPreviewData;
 use Vaulter\EditorPro\Review\Enums\PinReason;
 use Vaulter\EditorPro\Review\Exceptions\InvalidAnchorSelectorException;
 use Vaulter\EditorPro\Review\Exceptions\RevisionPinNotFoundException;
+use Vaulter\EditorPro\Review\Idempotency\ReviewNodeReplayAuthorizer;
 use Vaulter\EditorPro\Review\Idempotency\RevisionPinReceiptCodec;
-use Vaulter\EditorPro\Review\Idempotency\RevisionPinReplayAuthorizer;
 use Vaulter\EditorPro\Review\Repositories\ReviewLookup;
 use Vaulter\EditorPro\Review\Repositories\RevisionPinRepository;
 use Vaulter\EditorPro\Review\Support\ReviewDriveHandle;
@@ -98,7 +98,7 @@ final readonly class RevisionPinOperations implements DriveExtension
 
         $idempotency = new IdempotentWrite(
             codec: new RevisionPinReceiptCodec($nodeId),
-            authorizer: new RevisionPinReplayAuthorizer($this->context, $this->vaulter, $nodeId, $ability),
+            authorizer: new ReviewNodeReplayAuthorizer($this->context, $this->vaulter, $nodeId, $ability),
             fingerprint: [
                 'node' => $nodeId,
                 'revision' => $revisionId,
@@ -167,7 +167,7 @@ final readonly class RevisionPinOperations implements DriveExtension
 
         $idempotency = new IdempotentWrite(
             codec: new RevisionPinReceiptCodec($nodeId),
-            authorizer: new RevisionPinReplayAuthorizer($this->context, $this->vaulter, $nodeId, Ability::Edit),
+            authorizer: new ReviewNodeReplayAuthorizer($this->context, $this->vaulter, $nodeId, Ability::Edit),
             fingerprint: [
                 'node' => $nodeId,
                 'revision' => $revisionId,

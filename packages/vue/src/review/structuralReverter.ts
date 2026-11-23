@@ -1,6 +1,6 @@
 import { Fragment, type Node as ProseMirrorNode, type Schema, Slice } from '@tiptap/pm/model'
 import { liftTarget, ReplaceAroundStep, ReplaceStep, Step, findWrapping } from '@tiptap/pm/transform'
-import type { Transform } from '@tiptap/pm/transform'
+import { Transform } from '@tiptap/pm/transform'
 import type { StructuralSuggestionKind, SuggestionCapabilities } from '../types/review'
 
 export interface TrackedStructuralRecord {
@@ -409,10 +409,6 @@ function revertTableChange(tr: Transform, record: TrackedStructuralRecord, schem
     }
   }
 
-  if ((tableOp === 'toggle_header_row' || tableOp === 'toggle_header_cell') && Array.isArray(record.payload.inverseSteps)) {
-    // Prefer inverse steps anchored to table pos delta
-  }
-
   const rawSteps = record.payload.inverseSteps
   const origTablePos = typeof record.payload.tablePosAfter === 'number' ? record.payload.tablePosAfter : tableHit.pos
   const delta = tableHit.pos - origTablePos
@@ -429,7 +425,7 @@ function revertTableChange(tr: Transform, record: TrackedStructuralRecord, schem
   return false
 }
 
-export function revertStructuralRecord(tr: Transform, record: TrackedStructuralRecord): boolean {
+function tryRevertStructuralRecord(tr: Transform, record: TrackedStructuralRecord): boolean {
   const schema = tr.doc.type.schema
   switch (record.kind) {
     case 'attr_change':
@@ -445,6 +441,19 @@ export function revertStructuralRecord(tr: Transform, record: TrackedStructuralR
     default:
       return false
   }
+}
+
+export function revertStructuralRecord(tr: Transform, record: TrackedStructuralRecord): boolean {
+  const candidate = new Transform(tr.doc)
+  try {
+    if (!tryRevertStructuralRecord(candidate, record)) return false
+    candidate.doc.check()
+  } catch {
+    return false
+  }
+
+  for (const step of candidate.steps) tr.step(step)
+  return true
 }
 
 export function serializeInverseSteps(baseDoc: ProseMirrorNode, steps: readonly Step[]): Record<string, unknown>[] {

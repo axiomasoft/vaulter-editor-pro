@@ -57,10 +57,13 @@ final readonly class ReviewCapabilities
         'link',
     ];
 
+    private const int MAX_NEW_TABLE_CELLS = 1000;
+
     public function build(
         ?string $documentType = null,
         ?string $writeMode = null,
         bool $journalSupported = false,
+        ?int $schemaVersion = null,
     ): ReviewCapabilitiesData {
         $schema = TipTapSchema::richText();
         $allowedAttributes = [];
@@ -74,16 +77,19 @@ final readonly class ReviewCapabilities
             }
         }
 
+        $supported = ($documentType === null || ($schemaVersion !== null && $this->supportsDocument($documentType, $schemaVersion)))
+            && ($writeMode !== 'journal' || $journalSupported);
+
         return new ReviewCapabilitiesData(
-            supportedKinds: SuggestionKind::allValues(),
-            textKinds: SuggestionKind::textValues(),
-            structuralKinds: SuggestionKind::structuralValues(),
+            supportedKinds: $supported ? SuggestionKind::allValues() : [],
+            textKinds: $supported ? SuggestionKind::textValues() : [],
+            structuralKinds: $supported ? SuggestionKind::structuralValues() : [],
             nodeTypeChangeTypes: [],
             tableMode: self::TABLE_MODE,
-            allowedMarks: $schema->markTypes(),
-            allowedAttributes: $allowedAttributes,
-            listOperations: self::LIST_OPERATIONS,
-            tableOperations: self::TABLE_OPERATIONS,
+            allowedMarks: $supported ? $schema->markTypes() : [],
+            allowedAttributes: $supported ? $allowedAttributes : [],
+            listOperations: $supported ? self::LIST_OPERATIONS : [],
+            tableOperations: $supported ? self::TABLE_OPERATIONS : [],
             overlapPolicy: self::OVERLAP_POLICY,
             documentType: $documentType,
             writeMode: $writeMode,
@@ -93,12 +99,17 @@ final readonly class ReviewCapabilities
 
     public function assertDocumentSupported(string $documentType, int $schemaVersion): void
     {
-        if ($documentType !== RichTextDocumentType::KEY || $schemaVersion < 2) {
+        if (! $this->supportsDocument($documentType, $schemaVersion)) {
             throw UnsupportedSuggestionException::because(
                 sprintf('Document type [%s] at schema v%d does not support v1 structural review.', $documentType, $schemaVersion),
                 'unsupported_document_type',
             );
         }
+    }
+
+    private function supportsDocument(string $documentType, int $schemaVersion): bool
+    {
+        return $documentType === RichTextDocumentType::KEY && $schemaVersion >= 2;
     }
 
     public function assertInputSupported(TextSuggestionInput|StructuralSuggestionInput $input): void
@@ -320,6 +331,15 @@ final readonly class ReviewCapabilities
             );
         }
 
+        if ($tableOp === 'insert_table') {
+            $rows = $input->payload['rows'] ?? 2;
+            $cols = $input->payload['cols'] ?? 2;
+            if (! is_int($rows) || ! is_int($cols) || $rows < 1 || $cols < 1
+                || $rows > intdiv(self::MAX_NEW_TABLE_CELLS, $cols)) {
+                throw UnsupportedSuggestionException::because('A new table must have between 1 and 1000 cells.', 'invalid_table_dimensions');
+            }
+        }
+
         if (isset($input->payload['cells_content'])) {
             $this->assertCandidateCellsTextual($input->payload['cells_content'], $schema);
         }
@@ -347,7 +367,7 @@ final readonly class ReviewCapabilities
 
     private function assertCandidateCellsTextual(mixed $cellsContent, TipTapSchema $schema): void
     {
-        if (! is_array($cellsContent)) {
+        if (! is_array($cellsContent) || ! array_is_list($cellsContent)) {
             throw UnsupportedSuggestionException::because('Table cells_content must be an array.', 'non_textual_table');
         }
         foreach ($cellsContent as $cell) {
@@ -357,7 +377,7 @@ final readonly class ReviewCapabilities
             if (! is_array($cell)) {
                 throw UnsupportedSuggestionException::because('Non-textual table cell content is rejected in v1.', 'non_textual_table');
             }
-            $blocks = array_is_list($cell) ? $cell : ($cell['content'] ?? [$cell]);
+            $blocks = self::cellBlocks($cell);
             if (! is_array($blocks)) {
                 throw UnsupportedSuggestionException::because('Non-textual table cell block is rejected in v1.', 'non_textual_table');
             }
@@ -397,6 +417,20 @@ final readonly class ReviewCapabilities
                 }
             }
         }
+    }
+
+    /** @param array<array-key, mixed> $cell */
+    public static function cellBlocks(array $cell): mixed
+    {
+        if (array_is_list($cell)) {
+            return $cell;
+        }
+
+        return match ($cell['type'] ?? null) {
+            'paragraph', 'heading' => [$cell],
+            'tableCell', 'tableHeader', null => $cell['content'] ?? null,
+            default => null,
+        };
     }
 
     /** @param list<string> $urlAttrs */

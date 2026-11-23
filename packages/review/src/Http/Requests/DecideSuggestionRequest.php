@@ -28,9 +28,9 @@ final class DecideSuggestionRequest extends VaulterFormRequest
         return self::intVal($this->input('generation', 0), 0);
     }
 
-    public function expectedVersion(): int
+    public function expectedVersion(): ?int
     {
-        return self::intVal($this->input('expected_version', 1), 1);
+        return $this->has('expected_version') ? self::intVal($this->input('expected_version'), 0) : null;
     }
 
     /** @return array<string, int> */

@@ -14,6 +14,7 @@ import type { SuggestionCapabilities } from '../types/review'
 import {
   extractBlockIdsFromNode,
   findAncestorByType,
+  findBlockPosById,
   isCapabilityAllowed,
   isDangerousAttrValue,
   isSafeLinkHref,
@@ -282,7 +283,6 @@ function applyStepsWithFreshCellIds(
   createId: () => string,
 ): { tr: Transform; insertedCellBlockIds: string[] } | null {
   const tr = new Transform(doc)
-  const existingIds = new Set(extractBlockIdsFromNode(doc))
   const insertedCellBlockIds: string[] = []
 
   for (const step of steps) {
@@ -297,12 +297,11 @@ function applyStepsWithFreshCellIds(
   tr.doc.descendants((node, pos) => {
     if (!ALLOWED_TEXTBLOCK_TYPES.has(node.type.name)) return undefined
     const curId = typeof node.attrs?.blockId === 'string' ? node.attrs.blockId : ''
-    if (!curId || seen.has(curId)) {
+    if ((!curId || seen.has(curId)) && findAncestorByType(tr.doc, pos + 1, ['table'])) {
       const fresh = createId()
-      existingIds.add(fresh)
       seen.add(fresh)
       updates.push({ pos, node, newId: fresh })
-    } else {
+    } else if (curId) {
       seen.add(curId)
     }
     return undefined
@@ -1129,6 +1128,9 @@ function handleTableSteps(
   const firstStep = incoming.steps[0]
   const stepFrom = firstStep instanceof ReplaceStep || firstStep instanceof ReplaceAroundStep ? firstStep.from : 0
   const existingTableBefore = findAncestorByType(state.doc, stepFrom + 1, ['table'])
+  if (existingTableBefore && tableOp === 'insert_table') {
+    return { status: 'unsupported', reason: 'non_textual_table' }
+  }
   if (existingTableBefore && !isTableNodeTextual(existingTableBefore.node, capabilities.allowed_marks)) {
     return { status: 'unsupported', reason: 'non_textual_table' }
   }
@@ -1143,17 +1145,44 @@ function handleTableSteps(
     outgoing.step(s)
   }
 
+  const survivingAnchorId = existingTableBefore
+    ? extractBlockIdsFromNode(existingTableBefore.node).find(id => findBlockPosById(outgoing.doc, id) !== null)
+    : undefined
+  const survivingAnchor = survivingAnchorId ? findBlockPosById(outgoing.doc, survivingAnchorId) : null
   const mappedPos = outgoing.mapping.map(stepFrom + 1, 1)
-  const targetTableHit = findAncestorByType(outgoing.doc, Math.min(mappedPos, outgoing.doc.content.size), ['table'])
-    ?? findFirstTableInRange(outgoing.doc, Math.max(0, stepFrom - 1))
+  const targetTableHit = survivingAnchor
+    ? findAncestorByType(outgoing.doc, survivingAnchor.pos + 1, ['table'])
+    : findAncestorByType(outgoing.doc, Math.min(mappedPos, outgoing.doc.content.size), ['table'])
+      ?? findFirstTableInRange(outgoing.doc, Math.max(0, stepFrom - 1))
 
   if (!targetTableHit || !isTableNodeTextual(targetTableHit.node, capabilities.allowed_marks)) {
     return { status: 'unsupported', reason: 'non_textual_table' }
   }
 
-  const anchorBlockId = existingTableBefore
-    ? firstAddressableBlockId(existingTableBefore.node)
-    : firstAddressableBlockId(targetTableHit.node)
+  let anchorBlockId = survivingAnchorId
+  let insertion: Record<string, unknown> = {}
+  let cellBlockIds = applied.insertedCellBlockIds.filter(id => extractBlockIdsFromNode(targetTableHit.node).includes(id))
+  if (tableOp === 'insert_table') {
+    const $table = outgoing.doc.resolve(targetTableHit.pos)
+    const before = $table.nodeBefore
+    const after = $table.parent.maybeChild($table.index() + 1)
+    const previousId = before?.attrs?.blockId
+    const nextId = after?.attrs?.blockId
+    const previous = typeof previousId === 'string' && findBlockPosById(state.doc, previousId)
+    const following = typeof nextId === 'string' && findBlockPosById(state.doc, nextId)
+    anchorBlockId = previous ? previousId : following ? nextId : undefined
+
+    const rows = Array.from({ length: targetTableHit.node.childCount }, (_, index) => targetTableHit.node.child(index))
+    const cells = rows.flatMap(row => Array.from({ length: row.childCount }, (_, index) => row.child(index)))
+    cellBlockIds = cells.map(cell => firstAddressableBlockId(cell)).filter((id): id is string => id !== null)
+    insertion = {
+      rows: rows.length,
+      cols: rows[0]?.childCount ?? 0,
+      withHeaderRow: rows[0]?.firstChild?.type.name === 'tableHeader',
+      insertBefore: !previous,
+      cellsContent: cells.map(cell => cell.toJSON().content ?? []),
+    }
+  }
   if (!anchorBlockId) {
     return { status: 'unsupported', reason: 'missing_table_block_id' }
   }
@@ -1181,7 +1210,8 @@ function handleTableSteps(
   const groupId = createId()
   const payload: Record<string, unknown> = {
     tableOp,
-    cellBlockIds: applied.insertedCellBlockIds,
+    cellBlockIds,
+    ...insertion,
     tablePosAfter: targetTableHit.pos,
     inverseSteps: serializeInverseSteps(state.doc, incoming.steps),
     ...(rowIndex !== undefined ? { rowIndex } : {}),

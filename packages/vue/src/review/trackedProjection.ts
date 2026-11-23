@@ -266,8 +266,8 @@ export function applySuggestionDecision(
   if (decision === 'reject') {
     for (let i = structural.length - 1; i >= 0; i--) {
       const rec = structural[i]
-      if (ids.has(rec.suggestionId) && rec.kind !== 'mark_change') {
-        revertStructuralRecord(transaction, rec)
+      if (ids.has(rec.suggestionId) && rec.kind !== 'mark_change' && !revertStructuralRecord(transaction, rec)) {
+        return false
       }
     }
   }

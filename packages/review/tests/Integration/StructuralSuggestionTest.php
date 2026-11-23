@@ -3,6 +3,8 @@
 declare(strict_types=1);
 
 use Illuminate\Support\Str;
+use Vaulter\Configuration\DatabaseOptions;
+use Vaulter\Database\VaulterDatabase;
 use Vaulter\Documents\Content\TipTap\BlockIdentity;
 use Vaulter\Documents\Content\TipTap\TipTapContent;
 use Vaulter\Documents\Content\TipTap\TipTapSchema;
@@ -11,6 +13,8 @@ use Vaulter\Drive\Access\Roles\RoleRegistry;
 use Vaulter\Drive\Testing\Access\AccessTestHelpers;
 use Vaulter\Drive\Vaulter;
 use Vaulter\EditorPro\Review\Data\StructuralSuggestionInput;
+use Vaulter\EditorPro\Review\Data\TextSuggestionInput;
+use Vaulter\EditorPro\Review\Exceptions\SuggestionConflictException;
 use Vaulter\EditorPro\Review\Exceptions\UnsupportedSuggestionException;
 use Vaulter\EditorPro\Review\ReviewManager;
 
@@ -101,6 +105,173 @@ function docArray($docs, $node): array
 
     return $array;
 }
+
+it('keeps indexed edits to one table in conflict and treats independent lists separately', function (): void {
+    $storage = AccessTestHelpers::storage();
+    $user = AccessTestHelpers::user(1);
+    AccessTestHelpers::grant($storage->rootNode, RoleRegistry::OWNER, subjectId: 1);
+    $drive = app(Vaulter::class)->drive($storage)->actingAs($user);
+    $docs = app(DocumentsManager::class)->in($drive);
+    $content = makeStructuralRichDoc();
+    $otherList = $content['content'][3];
+    $otherList['content'][0]['content'][0]['attrs']['blockId'] = 'l_2';
+    $content['content'][] = $otherList;
+    foreach (['B', 'C'] as $label) {
+        $row = $content['content'][4]['content'][0];
+        foreach ($row['content'] as $index => &$cell) {
+            $cell['content'][0]['attrs']['blockId'] = 'row_'.$label.$index;
+            $cell['content'][0]['content'][0]['text'] = $label;
+        }
+        unset($cell);
+        $content['content'][4]['content'][] = $row;
+    }
+    $node = $docs->create('table-and-list-overlap', 'vaulter/rich-text', $content);
+    $review = app(ReviewManager::class)->suggestions($drive);
+    $delete = static fn (string $block, int $row): StructuralSuggestionInput => StructuralSuggestionInput::tableChange(
+        (string) Str::uuid7(), (string) Str::uuid7(), 0, 1, 2, $block, 'delete_row', ['row_index' => $row],
+    );
+    $toggle = static fn (string $block): StructuralSuggestionInput => StructuralSuggestionInput::listChange(
+        (string) Str::uuid7(), (string) Str::uuid7(), 0, 1, 2, $block, 'toggle_type',
+    );
+    $first = $review->save($node->id, $delete('c_1', 0));
+    $second = $review->save($node->id, $delete('row_B0', 1));
+    expect($second->conflictWithId)->toBe($first->id)
+        ->and($review->save($node->id, $toggle('l_1'))->conflicted)->toBeFalse()
+        ->and($review->save($node->id, $toggle('l_2'))->conflicted)->toBeFalse();
+    $review->accept($node->id, $first->id, 0, $first->version);
+    $fresh = $review->find($node->id, $second->id);
+    expect($fresh->conflicted)->toBeTrue()
+        ->and(fn () => $review->accept($node->id, $fresh->id, 0, $fresh->version))->toThrow(SuggestionConflictException::class)
+        ->and(docArray($docs, $node)['content'][4]['content'][1]['content'][0]['content'][0]['attrs']['blockId'])->toBe('row_C0');
+});
+
+it('rebases mark ranges in UTF-16 and refreshes dependent conflicts when a blocker moves', function (): void {
+    $storage = AccessTestHelpers::storage();
+    $owner = AccessTestHelpers::user(1);
+    $writer = AccessTestHelpers::user(2);
+    AccessTestHelpers::grant($storage->rootNode, RoleRegistry::OWNER, subjectId: 1);
+    AccessTestHelpers::grant($storage->rootNode, RoleRegistry::WRITER, subjectId: 2);
+    $ownerDrive = app(Vaulter::class)->drive($storage)->actingAs($owner);
+    $writerDrive = app(Vaulter::class)->drive($storage)->actingAs($writer);
+    $docs = app(DocumentsManager::class)->in($ownerDrive);
+    $review = app(ReviewManager::class)->suggestions($ownerDrive);
+    $writerReview = app(ReviewManager::class)->suggestions($writerDrive);
+    $node = $docs->create('retarget-mark', 'vaulter/rich-text', makeStructuralRichDoc());
+    $blocker = $review->save($node->id, StructuralSuggestionInput::markChange(
+        (string) Str::uuid7(), (string) Str::uuid7(), 0, 1, 2, 'p_1', 6, 10, 'italic', 'added',
+    ));
+    $dependent = $writerReview->save($node->id, StructuralSuggestionInput::markChange(
+        (string) Str::uuid7(), (string) Str::uuid7(), 0, 1, 2, 'p_1', 6, 10, 'bold', 'added',
+    ));
+    expect($dependent->conflictWithId)->toBe($blocker->id);
+    $amended = $review->save($node->id, StructuralSuggestionInput::markChange(
+        $blocker->id, $blocker->groupId, 0, 1, 2, 'p_2', 0, 5, 'italic', 'added',
+    ), $blocker->version);
+    expect($amended->conflicted)->toBeFalse();
+    $fresh = $writerReview->find($node->id, $dependent->id);
+    expect($fresh->conflicted)->toBeFalse()
+        ->and($fresh->version)->toBe($dependent->version + 1)
+        ->and($fresh->authorSubject)->toBe($dependent->authorSubject);
+    $insert = $review->save($node->id, new TextSuggestionInput(
+        (string) Str::uuid7(), (string) Str::uuid7(), 0, 1, 2, 'p_1', 0, 0, '', '🦊 ',
+    ));
+    $review->accept($node->id, $insert->id, 0, $insert->version);
+    $fresh = $writerReview->find($node->id, $dependent->id);
+    expect([$fresh->from, $fresh->to])->toBe([9, 13]);
+    $writerReview->accept($node->id, $fresh->id, 0, $fresh->version);
+    $inline = docArray($docs, $node)['content'][1]['content'];
+    expect($inline[0]['text'])->toBe('🦊 Alpha ')
+        ->and($inline[1])->toBe(['type' => 'text', 'text' => 'Beta', 'marks' => [['type' => 'bold']]]);
+});
+
+it('preserves textual cell markup and applies link attributes only to the requested range', function (): void {
+    $storage = AccessTestHelpers::storage();
+    $user = AccessTestHelpers::user(1);
+    AccessTestHelpers::grant($storage->rootNode, RoleRegistry::OWNER, subjectId: 1);
+    $drive = app(Vaulter::class)->drive($storage)->actingAs($user);
+    $docs = app(DocumentsManager::class)->in($drive);
+    $content = makeStructuralRichDoc();
+    $content['content'][2]['content'] = [[
+        'type' => 'text', 'text' => 'abcdef', 'marks' => [['type' => 'link', 'attrs' => ['href' => 'https://old.example']]],
+    ]];
+    $node = $docs->create('textual-structure', 'vaulter/rich-text', $content);
+    $review = app(ReviewManager::class)->suggestions($drive);
+    $change = $review->save($node->id, new StructuralSuggestionInput(
+        (string) Str::uuid7(), (string) Str::uuid7(), 0, 1, 2, 'attr_change', 'p_2',
+        selector: ['from_utf16' => 2, 'to_utf16' => 4],
+        payload: ['node_type' => 'link', 'attr' => 'href', 'old_value' => 'https://old.example', 'new_value' => 'https://new.example'],
+    ));
+    $review->accept($node->id, $change->id, 0, $change->version);
+    $fragments = docArray($docs, $node)['content'][2]['content'];
+    expect(array_column($fragments, 'text'))->toBe(['ab', 'cd', 'ef'])
+        ->and(array_map(static fn (array $run): string => $run['marks'][0]['attrs']['href'], $fragments))
+        ->toBe(['https://old.example', 'https://new.example', 'https://old.example']);
+
+    $text = ['type' => 'text', 'text' => 'kept', 'marks' => [['type' => 'bold']]];
+    $paragraph = ['type' => 'paragraph', 'content' => [$text]];
+    $tableEdit = static fn (int $position, string $block, string $operation, array $options): StructuralSuggestionInput => StructuralSuggestionInput::tableChange((string) Str::uuid7(), (string) Str::uuid7(), 0, $position, 2, $block, $operation, $options);
+    foreach ([
+        $tableEdit(2, 'c_1', 'insert_table', ['rows' => 1, 'cols' => 1]),
+        $tableEdit(2, 'p_1', 'insert_table', ['rows' => PHP_INT_MAX, 'cols' => PHP_INT_MAX]),
+    ] as $unsupported) {
+        expect(fn () => $review->save($node->id, $unsupported))->toThrow(UnsupportedSuggestionException::class);
+    }
+    expect($docs->content($node)->stateVersion)->toBe(2);
+
+    foreach ([
+        $tableEdit(2, 'p_1', 'insert_table', ['rows' => 1, 'cols' => 1, 'cells_content' => [$paragraph], 'cell_block_ids' => ['new_cell']]),
+        $tableEdit(3, 'new_cell', 'insert_row', ['cells_content' => [[$paragraph]], 'cell_block_ids' => ['new_row']]),
+        $tableEdit(4, 'new_cell', 'insert_column', ['cells_content' => [['type' => 'tableCell', 'content' => [$paragraph]]], 'cell_block_ids' => ['new_column']]),
+    ] as $input) {
+        $saved = $review->save($node->id, $input);
+        $review->accept($node->id, $saved->id, 0, $saved->version);
+    }
+    $table = docArray($docs, $node)['content'][2];
+    expect($table['content'][0]['content'][0]['content'][0]['content'])->toBe([$text])
+        ->and($table['content'][1]['content'][0]['content'][0]['content'])->toBe([$text])
+        ->and($table['content'][0]['content'][1]['content'][0]['content'])->toBe([$text]);
+});
+
+it('honors strong suggestion validators and replays snapshot HTTP receipts by key', function (): void {
+    $storage = AccessTestHelpers::storage();
+    $user = AccessTestHelpers::user(1);
+    AccessTestHelpers::grant($storage->rootNode, RoleRegistry::OWNER, subjectId: 1);
+    $drive = app(Vaulter::class)->drive($storage)->actingAs($user);
+    $docs = app(DocumentsManager::class)->in($drive);
+    $node = $docs->create('http-suggestion-receipts', 'vaulter/rich-text', makeStructuralRichDoc());
+    $this->actingAs($user);
+    $url = 'api/vaulter/v1/review/documents/'.$node->id.'/suggestions';
+    $payload = [
+        'id' => (string) Str::uuid7(), 'group_id' => (string) Str::uuid7(), 'generation' => 0,
+        'base_position' => 1, 'schema_version' => 2, 'kind' => 'attr_change', 'target_block_id' => 'h_1',
+        'expected_version' => 0, 'payload' => ['node_type' => 'heading', 'attr' => 'level', 'old_value' => 1, 'new_value' => 2],
+    ];
+    $createKey = ['Idempotency-Key' => 'create-structure'];
+    $created = $this->postJson($url, $payload, $createKey)->assertCreated();
+    $this->postJson($url, $payload, $createKey)->assertCreated()->assertHeader('Idempotent-Replayed', 'true')
+        ->assertExactJson($created->json());
+    $this->postJson($url, array_replace($payload, ['target_block_id' => 'p_1']), $createKey)
+        ->assertStatus(422)->assertJsonPath('code', 'idempotency_key_reused');
+
+    $decision = $url.'/'.$payload['id'].'/accept';
+    $body = ['generation' => 0];
+    $tag = $created->headers->get('ETag');
+    $this->postJson($decision, $body)->assertStatus(428);
+    $this->postJson($decision, $body, ['If-Match' => '"stale"'])->assertStatus(412);
+    $this->postJson($decision, $body, ['If-Match' => 'W/'.$tag])->assertStatus(412);
+    $this->postJson($decision, $body + ['expected_version' => 2], ['If-Match' => $tag])->assertStatus(412);
+    $headers = ['If-Match' => $tag, 'Idempotency-Key' => 'accept-structure'];
+    $accepted = $this->postJson($decision, $body, $headers)->assertOk();
+    $this->postJson($decision, $body, $headers)->assertOk()->assertHeader('Idempotent-Replayed', 'true')
+        ->assertExactJson($accepted->json());
+    $this->postJson($decision, $body, ['If-Match' => $tag])->assertStatus(412);
+    expect($docs->content($node)->stateVersion)->toBe(2);
+
+    $db = app(VaulterDatabase::class);
+    $db->transaction(fn () => $db->connection()->table(app(DatabaseOptions::class)->table('documents'))
+        ->where('node_id', $node->id)->update(['schema_version' => 1]));
+    $this->getJson($url.'/capabilities')->assertOk()->assertJsonPath('data.structural_kinds', []);
+});
 
 it('applies and rejects all 6 structural review profiles in snapshot mode while preserving tree integrity', function (): void {
     $storage = AccessTestHelpers::storage();

@@ -7,6 +7,7 @@ import { Plugin, PluginKey } from '@tiptap/pm/state'
 import { Mapping } from '@tiptap/pm/transform'
 import { Decoration, DecorationSet } from '@tiptap/pm/view'
 import { ySyncPluginKey, yUndoPluginKey } from '@tiptap/y-tiptap'
+import type { Map as YMap, Transaction as YTransaction } from 'yjs'
 import { trackStructure } from '../review/trackStructure'
 import { trackText } from '../review/trackText'
 import type { TextRun } from '../review/trackText'
@@ -63,7 +64,61 @@ interface TrackedChangesStorage {
 }
 
 const dispatchMeta = 'vaulter:compositionSuggestions'
+const sharedStructureMeta = 'vaulter:sharedReviewStructure'
 const passthrough = [ySyncPluginKey, yUndoPluginKey, 'y-undo', 'history', UNTRACKED_TRANSACTION] as const
+
+interface SharedStructuralRecord {
+  order: number
+  record: TrackedStructuralRecord
+}
+
+function sharedRecords(state: EditorState): YMap<SharedStructuralRecord> | undefined {
+  const sync = ySyncPluginKey.getState(state)
+  if (!sync) return undefined
+  const field = [...sync.doc.share].find(([, type]) => Object.is(type, sync.type))?.[0]
+  return field === undefined ? undefined : sync.doc.getMap(`vaulter:reviewStructure:${field}`)
+}
+
+function readSharedRecords(records: YMap<SharedStructuralRecord>): TrackedStructuralRecord[] {
+  return [...records.entries()]
+    .filter(([id, item]) => Number.isSafeInteger(item?.order) && item.record?.suggestionId === id
+      && typeof item.record.blockId === 'string' && typeof item.record.kind === 'string'
+      && item.record.payload !== null && typeof item.record.payload === 'object')
+    .sort(([aId, a], [bId, b]) => a.order - b.order || (aId < bId ? -1 : aId > bId ? 1 : 0))
+    .map(([, item]) => item.record)
+}
+
+function dispatchWithSharedRecords(
+  editor: Editor,
+  transaction: Transaction,
+  next: (transaction: Transaction) => void,
+): void {
+  const records = sharedRecords(editor.state)
+  if (!records?.doc) {
+    next(transaction)
+    return
+  }
+  const before = REVIEW_TRACKED_PLUGIN_KEY.getState(editor.state)?.structural ?? []
+  records.doc.transact(yTransaction => {
+    yTransaction.meta.set('addToHistory', transaction.getMeta('addToHistory') !== false)
+    next(transaction)
+    const after = REVIEW_TRACKED_PLUGIN_KEY.getState(editor.state)?.structural ?? []
+    const byId = new Map(after.map(record => [record.suggestionId, record]))
+    for (const record of before) {
+      if (!byId.has(record.suggestionId)) records.delete(record.suggestionId)
+    }
+    let order = 0
+    for (const item of records.values()) {
+      if (Number.isSafeInteger(item?.order)) order = Math.max(order, item.order)
+    }
+    for (const record of after) {
+      const existing = records.get(record.suggestionId)
+      if (existing?.record !== record) {
+        records.set(record.suggestionId, { order: existing?.order ?? ++order, record })
+      }
+    }
+  }, ySyncPluginKey)
+}
 
 const SuggestionMark = Mark.create({
   name: REVIEW_SUGGESTION_MARK,
@@ -249,12 +304,14 @@ export const VaulterTrackedChanges = Extension.create<TrackedChangesOptions, Tra
         clearComposition(this.storage)
       }
       if (composing && !transaction.docChanged) locally(this.editor, () => next(transaction))
-      else next(transaction)
+      else if (transaction.getMeta(REVIEW_DECISION_META)) {
+        dispatchWithSharedRecords(this.editor, transaction, next)
+      } else next(transaction)
 
       const updatedPluginState = REVIEW_TRACKED_PLUGIN_KEY.getState(this.editor.state)
       if (updatedPluginState) {
         registerDocSnapshot(this.editor.state.doc, updatedPluginState)
-        if (transaction.getMeta(REVIEW_DECISION_META) || transaction.docChanged) {
+        if (transaction.getMeta(REVIEW_DECISION_META) || transaction.getMeta(sharedStructureMeta) || transaction.docChanged) {
           this.options.onStateChange?.(updatedPluginState)
         }
       }
@@ -300,7 +357,7 @@ export const VaulterTrackedChanges = Extension.create<TrackedChangesOptions, Tra
         updatedRecords: res.updatedRecords,
         removedIds: res.removedIds,
       })
-      next(res.transaction)
+      dispatchWithSharedRecords(this.editor, res.transaction, next)
 
       const nextState = REVIEW_TRACKED_PLUGIN_KEY.getState(this.editor.state)
       if (nextState) {
@@ -376,7 +433,7 @@ export const VaulterTrackedChanges = Extension.create<TrackedChangesOptions, Tra
           registerDocSnapshot(instance.doc, initial)
           return initial
         },
-        apply: (tr, prev) => {
+        apply: (tr, prev, oldState) => {
           const decisionMeta = tr.getMeta(REVIEW_DECISION_META) as {
             structural: readonly TrackedStructuralRecord[]
             textMeta: Readonly<Record<string, TextSuggestionMetadata>>
@@ -397,7 +454,10 @@ export const VaulterTrackedChanges = Extension.create<TrackedChangesOptions, Tra
             textMeta?: Readonly<Record<string, TextSuggestionMetadata>>
           } | undefined
 
-          let structural = [...prev.structural]
+          const records = sharedRecords(oldState)
+          let structural = records && (tr.getMeta(ySyncPluginKey) || tr.getMeta(sharedStructureMeta))
+            ? readSharedRecords(records)
+            : [...prev.structural]
           let textMeta = prev.textMeta
 
           if (structureMeta) {
@@ -492,7 +552,32 @@ export const VaulterTrackedChanges = Extension.create<TrackedChangesOptions, Tra
           },
         },
       },
-      view: () => ({ destroy: () => clearComposition(this.storage) }),
+      view: view => {
+        const records = sharedRecords(view.state)
+        const ydoc = records?.doc
+        if (records) yUndoPluginKey.getState(view.state)?.undoManager.addToScope(records)
+        const refresh = () => {
+          if (!records || view.isDestroyed) return
+          const next = readSharedRecords(records)
+          const previous = REVIEW_TRACKED_PLUGIN_KEY.getState(view.state)?.structural ?? []
+          if (next.length === previous.length && next.every((item, index) => item === previous[index])) return
+          view.dispatch(view.state.tr
+            .setMeta(sharedStructureMeta, true)
+            .setMeta(UNTRACKED_TRANSACTION, true)
+            .setMeta('addToHistory', false))
+        }
+        const afterTransaction = (transaction: YTransaction) => {
+          if (records && [...transaction.changed.keys()].some(type => Object.is(type, records))) refresh()
+        }
+        ydoc?.on('afterTransaction', afterTransaction)
+        queueMicrotask(refresh)
+        return {
+          destroy: () => {
+            ydoc?.off('afterTransaction', afterTransaction)
+            clearComposition(this.storage)
+          },
+        }
+      },
     })]
   },
 })

@@ -15,9 +15,9 @@ use Vaulter\EditorPro\Review\Support\ReviewDriveHandle;
 use Vaulter\Idempotency\ReplayAuthorizer;
 use Vaulter\Idempotency\ResourceRef;
 
-/** Re-authorizes idempotent replay for revision pin/unpin operations. */
+/** Re-authorizes idempotent replay against a required node ability. */
 #[Internal]
-final readonly class RevisionPinReplayAuthorizer implements ReplayAuthorizer
+final readonly class ReviewNodeReplayAuthorizer implements ReplayAuthorizer
 {
     public function __construct(
         private DriveContext $context,

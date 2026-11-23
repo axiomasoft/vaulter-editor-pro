@@ -10,9 +10,11 @@ use Throwable;
 use Vaulter\Collaboration\Configuration\CollaborationOptions;
 use Vaulter\Collaboration\Persistence\CommandActor;
 use Vaulter\Collaboration\Persistence\CommandJournal;
+use Vaulter\Collaboration\Persistence\CompactionLeases;
 use Vaulter\Collaboration\Persistence\LogSnapshot;
 use Vaulter\Collaboration\Persistence\RoomWriteConflict;
 use Vaulter\Collaboration\Persistence\UpdateLog;
+use Vaulter\Documents\State\PendingMarker;
 use Vaulter\Drive\Operations\DriveContext;
 use Vaulter\EditorPro\Review\Exceptions\SuggestionConflictException;
 use Vaulter\Support\Identity;
@@ -52,7 +54,7 @@ final readonly class SuggestionJournalBridge
         if (! class_exists(UpdateLog::class)) {
             return null;
         }
-        if (! $this->container->bound(UpdateLog::class)) {
+        if (! $this->container->bound(UpdateLog::class) && ! $this->container->bound(CollaborationOptions::class)) {
             return null;
         }
 
@@ -71,6 +73,11 @@ final readonly class SuggestionJournalBridge
         }
 
         return $log->snapshot((string) $nodeId, $generation);
+    }
+
+    public function requestProjection(PendingMarker $marker): void
+    {
+        $this->container->make(CompactionLeases::class)->requestDrain($marker);
     }
 
     public function actor(DriveContext $context, int|string $nodeId, string $subject): CommandActor

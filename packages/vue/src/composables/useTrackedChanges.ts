@@ -95,6 +95,8 @@ export function useTrackedChanges(
   const loading = ref(false)
   const error = ref<unknown>(null)
 
+  let listedProposalId: string | null | undefined
+
   const openSuggestions = computed(() => suggestions.value.filter(s => s.state === 'open'))
   const conflictedSuggestions = computed(() => openSuggestions.value.filter(s => s.conflicted))
   const structuralSuggestions = computed(() => suggestions.value.filter(s => STRUCTURAL_KINDS.has(s.kind)))
@@ -125,11 +127,11 @@ export function useTrackedChanges(
   }
 
   function canAccept(suggestion: DocumentSuggestion): boolean {
-    return suggestion.state === 'open' && !suggestion.conflicted && !suggestion.pending_commit
+    return !loading.value && suggestion.state === 'open' && !suggestion.conflicted && !suggestion.pending_commit
   }
 
   function canReject(suggestion: DocumentSuggestion): boolean {
-    return suggestion.state === 'open' && !suggestion.pending_commit
+    return !loading.value && suggestion.state === 'open' && !suggestion.pending_commit
   }
 
   function requireSuggestionsApi() {
@@ -171,6 +173,7 @@ export function useTrackedChanges(
       const api = requireSuggestionsApi()
       const loaded = await api.list(nodeId, proposalId ? { proposal_id: proposalId } : undefined)
       suggestions.value = loaded
+      listedProposalId = proposalId
       return loaded
     } catch (caught) {
       error.value = caught
@@ -254,16 +257,12 @@ export function useTrackedChanges(
         },
         idempotencyKey,
       )
-      suggestions.value = suggestions.value.map(s => {
-        if (s.id === suggestionId) return updated
-        if (s.conflict_with_id === suggestionId && !updated.pending_commit) {
-          return { ...s, conflicted: false, conflict_reason: null, conflict_with_id: null }
-        }
-        return s
-      })
+      const needsRefresh = !updated.pending_commit && suggestions.value.some(s => s.conflict_with_id === suggestionId)
+      suggestions.value = suggestions.value.map(s => s.id === suggestionId ? updated : s)
       if (options.editor && !updated.pending_commit) {
         applySuggestionDecision(options.editor, 'reject', { ids: [suggestionId] })
       }
+      if (needsRefresh) await list(listedProposalId)
       return updated
     } catch (caught) {
       error.value = caught
@@ -332,14 +331,9 @@ export function useTrackedChanges(
         idempotencyKey,
       )
       const byId = new Map(updatedList.map(s => [s.id, s]))
-      suggestions.value = suggestions.value.map(s => {
-        const direct = byId.get(s.id)
-        if (direct) return direct
-        if (s.conflict_with_id && byId.has(s.conflict_with_id) && updatedList.every(u => !u.pending_commit)) {
-          return { ...s, conflicted: false, conflict_reason: null, conflict_with_id: null }
-        }
-        return s
-      })
+      const needsRefresh = updatedList.every(s => !s.pending_commit)
+        && suggestions.value.some(s => s.conflict_with_id && byId.has(s.conflict_with_id))
+      suggestions.value = suggestions.value.map(s => byId.get(s.id) ?? s)
       if (options.editor && updatedList.every(s => !s.pending_commit)) {
         applySuggestionDecision(options.editor, 'reject', {
           ids: [],
@@ -347,6 +341,7 @@ export function useTrackedChanges(
           suggestions: groupMembers.map(m => ({ suggestionId: m.id, groupId: m.group_id })),
         })
       }
+      if (needsRefresh) await list(listedProposalId)
       return updatedList
     } catch (caught) {
       error.value = caught

@@ -71,6 +71,7 @@ final readonly class SnapshotStructuralEdit
 
         $this->capabilities->assertInputSupported($input);
 
+        $this->assertDocCandidateTextualIfTableTargeted($doc, $input);
         $destroyed = [];
         $updated = match ($input->kind) {
             SuggestionKind::MarkChange->value => $this->applyMarkChange($doc, $input),
@@ -371,53 +372,46 @@ final readonly class SnapshotStructuralEdit
         mixed $newValue,
     ): array {
         $applied = false;
-        $updated = $this->walkReplaceNode($doc, static function (array $node) use ($input, $attr, $oldValue, $newValue, &$applied): ?array {
+        $updated = $this->walkReplaceNode($doc, function (array $node) use ($input, $attr, $oldValue, $newValue, &$applied): ?array {
             $attrs = $node['attrs'] ?? null;
             if (! is_array($attrs) || ($attrs['blockId'] ?? null) !== $input->targetBlockId) {
                 return null;
             }
-            $content = $node['content'] ?? [];
-            if (! is_array($content)) {
-                throw new SuggestionConflictException('Invalid target block.');
+            $content = is_array($node['content'] ?? null) ? self::nodeList($node['content']) : [];
+            if ($input->from >= $input->to || $input->to > $this->inlineUtf16Length($content)) {
+                throw new SuggestionConflictException('Invalid target link range.');
             }
-            $pos = 0;
+            [$prefix, $rest] = $this->splitInlinesAtUtf16($content, $input->from);
+            [$selected, $suffix] = $this->splitInlinesAtUtf16($rest, $input->to - $input->from);
             $changed = false;
-            foreach ($content as $i => $rawInline) {
-                if (! is_array($rawInline)) {
+            foreach ($selected as $i => $inline) {
+                $marks = $inline['marks'] ?? null;
+                if (! is_array($marks)) {
                     continue;
                 }
-                $inline = self::stringMapOrEmpty($rawInline);
-                $text = ($inline['type'] ?? null) === 'text' && is_string($inline['text'] ?? null) ? $inline['text'] : null;
-                $end = $pos + ($text === null ? 1 : SnapshotAnchorResolver::utf16Length($text));
-                if ($end > $input->from && $pos < $input->to && is_array($inline['marks'] ?? null)) {
-                    $marks = $inline['marks'];
-                    foreach ($marks as $mIdx => $rawMark) {
-                        if (! is_array($rawMark) || ($rawMark['type'] ?? null) !== 'link') {
-                            continue;
-                        }
-                        $mark = self::stringMapOrEmpty($rawMark);
-                        $mAttrs = is_array($mark['attrs'] ?? null) ? $mark['attrs'] : [];
-                        if (($mAttrs[$attr] ?? null) !== $oldValue) {
-                            throw new SuggestionConflictException('The target link attribute has changed.');
-                        }
-                        if ($newValue === null) {
-                            unset($mAttrs[$attr]);
-                        } else {
-                            $mAttrs[$attr] = $newValue;
-                        }
-                        $mark['attrs'] = $mAttrs;
-                        $marks[$mIdx] = $mark;
-                        $changed = true;
+                foreach ($marks as $index => $mark) {
+                    if (! is_array($mark) || ($mark['type'] ?? null) !== 'link') {
+                        continue;
                     }
-                    $inline['marks'] = $marks;
-                    $content[$i] = $inline;
+                    $mAttrs = self::stringMapOrEmpty($mark['attrs'] ?? null);
+                    if (($mAttrs[$attr] ?? null) !== $oldValue) {
+                        throw new SuggestionConflictException('The target link attribute has changed.');
+                    }
+                    if ($newValue === null) {
+                        unset($mAttrs[$attr]);
+                    } else {
+                        $mAttrs[$attr] = $newValue;
+                    }
+                    $mark['attrs'] = $mAttrs;
+                    $marks[$index] = $mark;
+                    $changed = true;
                 }
-                $pos = $end;
+                $selected[$i]['marks'] = $marks;
             }
             if (! $changed) {
                 throw new SuggestionConflictException('The target link mark was not found in the block range.');
             }
-            $node['content'] = $content;
+            $node['content'] = $this->mergeAdjacentTextRuns([...$prefix, ...$selected, ...$suffix]);
             $applied = true;
 
             return $node;
@@ -966,11 +960,11 @@ final readonly class SnapshotStructuralEdit
      */
     private function applyInsertTable(array $doc, StructuralSuggestionInput $input): array
     {
-        $rows = max(1, self::intVal($input->payload['rows'] ?? 2, 2));
-        $cols = max(1, self::intVal($input->payload['cols'] ?? 2, 2));
+        $rows = self::intVal($input->payload['rows'] ?? 2, 2);
+        $cols = self::intVal($input->payload['cols'] ?? 2, 2);
         $withHeader = (bool) ($input->payload['with_header_row'] ?? true);
         $providedIds = self::stringList($input->payload['cell_block_ids'] ?? null);
-        $providedTexts = is_array($input->payload['cells_content'] ?? null) ? array_values($input->payload['cells_content']) : [];
+        $providedCells = is_array($input->payload['cells_content'] ?? null) ? array_values($input->payload['cells_content']) : [];
         $existingIds = array_flip(BlockIdentity::extractIds($doc));
 
         $tableRows = [];
@@ -980,15 +974,10 @@ final readonly class SnapshotStructuralEdit
             $cellType = $withHeader && $r === 0 ? 'tableHeader' : 'tableCell';
             for ($c = 0; $c < $cols; $c++) {
                 $blockId = $this->nextTableBlockId($providedIds, $cellCursor, $existingIds);
-                $text = is_string($providedTexts[$cellCursor] ?? null) ? $providedTexts[$cellCursor] : '';
-                $paragraph = ['type' => 'paragraph', 'attrs' => ['blockId' => $blockId]];
-                if ($text !== '') {
-                    $paragraph['content'] = [['type' => 'text', 'text' => $text]];
-                }
                 $cells[] = [
                     'type' => $cellType,
                     'attrs' => ['colspan' => 1, 'rowspan' => 1, 'colwidth' => null],
-                    'content' => [$paragraph],
+                    'content' => $this->tableCellContent($providedCells[$cellCursor] ?? '', $blockId, $existingIds),
                 ];
                 $cellCursor++;
             }
@@ -1005,7 +994,8 @@ final readonly class SnapshotStructuralEdit
                 $child = self::stringMapOrEmpty($rawChild);
                 $attrs = is_array($child['attrs'] ?? null) ? $child['attrs'] : [];
                 if (($attrs['blockId'] ?? null) === $input->targetBlockId) {
-                    array_splice($children, $idx + 1, 0, [$tableNode]);
+                    $insertBefore = ($input->payload['insert_before'] ?? false) === true;
+                    array_splice($children, $insertBefore ? $idx : $idx + 1, 0, [$tableNode]);
                     $applied = true;
 
                     return $children;
@@ -1045,7 +1035,7 @@ final readonly class SnapshotStructuralEdit
         $colCount = $this->tableColCount($rows[0]);
         $existingIds = array_flip(BlockIdentity::extractIds($doc));
         $providedIds = self::stringList($input->payload['cell_block_ids'] ?? null);
-        $providedTexts = is_array($input->payload['cells_content'] ?? null) ? array_values($input->payload['cells_content']) : [];
+        $providedCells = is_array($input->payload['cells_content'] ?? null) ? array_values($input->payload['cells_content']) : [];
 
         if ($tableOp === 'insert_row') {
             $rowIdx = is_int($input->payload['row_index'] ?? null) ? $input->payload['row_index'] : $rowCount;
@@ -1056,15 +1046,10 @@ final readonly class SnapshotStructuralEdit
             $newCells = [];
             for ($c = 0; $c < $colCount; $c++) {
                 $bid = $this->nextTableBlockId($providedIds, $c, $existingIds);
-                $text = is_string($providedTexts[$c] ?? null) ? $providedTexts[$c] : '';
-                $p = ['type' => 'paragraph', 'attrs' => ['blockId' => $bid]];
-                if ($text !== '') {
-                    $p['content'] = [['type' => 'text', 'text' => $text]];
-                }
                 $newCells[] = [
                     'type' => $isHeader ? 'tableHeader' : 'tableCell',
                     'attrs' => ['colspan' => 1, 'rowspan' => 1, 'colwidth' => null],
-                    'content' => [$p],
+                    'content' => $this->tableCellContent($providedCells[$c] ?? '', $bid, $existingIds),
                 ];
             }
             array_splice($rows, $rowIdx, 0, [['type' => 'tableRow', 'content' => $newCells]]);
@@ -1099,15 +1084,10 @@ final readonly class SnapshotStructuralEdit
                 $firstCell = $cells[0] ?? [];
                 $rowIsHeader = $isHeaderCol || ($firstCell['type'] ?? null) === 'tableHeader';
                 $bid = $this->nextTableBlockId($providedIds, $rIdx, $existingIds);
-                $text = is_string($providedTexts[$rIdx] ?? null) ? $providedTexts[$rIdx] : '';
-                $p = ['type' => 'paragraph', 'attrs' => ['blockId' => $bid]];
-                if ($text !== '') {
-                    $p['content'] = [['type' => 'text', 'text' => $text]];
-                }
                 $newCell = [
                     'type' => $rowIsHeader ? 'tableHeader' : 'tableCell',
                     'attrs' => ['colspan' => 1, 'rowspan' => 1, 'colwidth' => null],
-                    'content' => [$p],
+                    'content' => $this->tableCellContent($providedCells[$rIdx] ?? '', $bid, $existingIds),
                 ];
                 array_splice($cells, $colIdx, 0, [$newCell]);
                 $rows[$rIdx]['content'] = $cells;
@@ -1254,19 +1234,46 @@ final readonly class SnapshotStructuralEdit
         }
     }
 
+    /**
+     * @param  array<string, int>  $existingIds
+     * @return list<array<string, mixed>>
+     */
+    private function tableCellContent(mixed $cell, string $blockId, array &$existingIds): array
+    {
+        $candidate = is_array($cell) ? ReviewCapabilities::cellBlocks($cell) : null;
+        $blocks = is_array($candidate) ? self::nodeList($candidate) : [];
+        if ($blocks === []) {
+            $paragraph = ['type' => 'paragraph', 'attrs' => ['blockId' => $blockId]];
+            if (is_string($cell) && $cell !== '') {
+                $paragraph['content'] = [['type' => 'text', 'text' => $cell]];
+            }
+
+            return [$paragraph];
+        }
+
+        foreach ($blocks as $index => $block) {
+            $attrs = self::stringMapOrEmpty($block['attrs'] ?? null);
+            $id = $index === 0 ? $blockId : $this->nextTableBlockId([], 0, $existingIds);
+            $blocks[$index]['attrs'] = array_replace($attrs, ['blockId' => $id]);
+        }
+
+        return $blocks;
+    }
+
     /** @param array<string, mixed> $doc */
-    public function assertDocCandidateTextualIfTableTargeted(array $doc, StructuralSuggestionInput $input): void
+    private function assertDocCandidateTextualIfTableTargeted(array $doc, StructuralSuggestionInput $input): void
     {
         if ($input->kind !== SuggestionKind::TableChange->value) {
             return;
         }
-        if (($input->payload['table_op'] ?? null) === 'insert_table') {
+        $found = $this->findTableContainingBlock($doc, $input->targetBlockId);
+        if ($found === null) {
             return;
         }
-        $found = $this->findTableContainingBlock($doc, $input->targetBlockId);
-        if ($found !== null) {
-            $this->assertTableIsTextual($found);
+        if (($input->payload['table_op'] ?? null) === 'insert_table') {
+            throw UnsupportedSuggestionException::because('A table cannot be inserted inside another table.', 'non_textual_table');
         }
+        $this->assertTableIsTextual($found);
     }
 
     /**

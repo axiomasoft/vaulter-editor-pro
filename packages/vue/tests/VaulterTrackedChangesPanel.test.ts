@@ -62,7 +62,7 @@ function makeMockClient(initial: DocumentSuggestion[], capabilities: SuggestionC
         store = store.map(s => {
           if (s.id === id) return updated
           if (s.conflict_with_id === id) {
-            return { ...s, conflicted: false, conflict_reason: null, conflict_with_id: null }
+            return { ...s, version: s.version + 1, conflicted: false, conflict_reason: null, conflict_with_id: null }
           }
           return s
         })
@@ -120,10 +120,28 @@ describe('VaulterTrackedChangesPanel', () => {
 
     expect(wrapper.find('[data-suggestion-id="s2"]').attributes('data-conflicted')).toBe('false')
     expect((wrapper.find('[data-suggestion-id="s2"] .vaulter-tracked-changes__accept').element as HTMLButtonElement).disabled).toBe(false)
+    expect(client.suggestions?.list).toHaveBeenCalledTimes(2)
+    expect(client.suggestions?.reject).toHaveBeenCalledWith('doc_1', 's1', { generation: 0, expected_version: 1, command_id: null }, undefined)
+    await wrapper.find('[data-suggestion-id="s2"] .vaulter-tracked-changes__accept').trigger('click')
+    await flushPromises()
+    expect(client.suggestions?.accept).toHaveBeenCalledWith('doc_1', 's2', { generation: 0, expected_version: 2, command_id: null }, undefined)
 
     // Switching projection emits projectionChange
     await wrapper.find('[data-projection="original"]').trigger('click')
     expect(wrapper.emitted('projectionChange')?.[0]).toEqual(['original'])
+  })
+
+  it('retains generation zero for both group decisions', async () => {
+    const item = makeSuggestion()
+    const client = makeMockClient([item])
+    const wrapper = mount(VaulterTrackedChangesPanel, {
+      props: { nodeId: 'doc_1', autoLoad: false, initialSuggestions: [item], clientOptions: { client } },
+    })
+    await wrapper.find('[data-group-id="g_1"] .vaulter-tracked-changes__group-accept').trigger('click')
+    await wrapper.find('[data-group-id="g_1"] .vaulter-tracked-changes__group-reject').trigger('click')
+    const payload = { generation: 0, expected_versions: { s_1: 1 }, command_id: null }
+    expect(client.suggestions?.acceptGroup).toHaveBeenCalledWith('doc_1', 'g_1', payload, undefined)
+    expect(client.suggestions?.rejectGroup).toHaveBeenCalledWith('doc_1', 'g_1', payload, undefined)
   })
 
   it('hides table capability chip when capabilities disallow table_change and shows pending_commit state', async () => {

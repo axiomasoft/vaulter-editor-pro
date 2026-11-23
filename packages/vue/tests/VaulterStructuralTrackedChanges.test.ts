@@ -318,6 +318,88 @@ it('rejects unsupported edits before mutating Yjs doc (0 Yjs updates emitted)', 
   expect(onStructuralSuggestions).not.toHaveBeenCalled()
 })
 
+it('shares structural records with peers and restores them when the document is reopened', async () => {
+  const aliceDoc = new Y.Doc()
+  const bobDoc = new Y.Doc()
+  const reopenedDoc = new Y.Doc()
+  documents.push(aliceDoc, bobDoc, reopenedDoc)
+  const { editor: alice, onStructuralSuggestions } = openStructuralEditor({ author: () => 'alice', ydoc: aliceDoc })
+  alice.view.dispatch(alice.state.tr
+    .setMeta('vaulter:untracked', true)
+    .replaceWith(0, alice.state.doc.content.size, alice.schema.node('heading', {
+      blockId: 'title', level: 1,
+    }, alice.schema.text('Shared title'))))
+  Y.applyUpdate(bobDoc, Y.encodeStateAsUpdate(aliceDoc))
+  const { editor: bob } = openStructuralEditor({ author: () => 'bob', ydoc: bobDoc })
+  aliceDoc.on('update', bytes => Y.applyUpdate(bobDoc, bytes))
+  bobDoc.on('update', bytes => Y.applyUpdate(aliceDoc, bytes))
+
+  const updates = vi.fn()
+  aliceDoc.on('update', updates)
+  alice.commands.setTextSelection(2)
+  alice.commands.setHeading({ level: 2 })
+  const registered = onStructuralSuggestions.mock.calls[0]?.[0][0]
+  expect(registered).toMatchObject({ kind: 'attr_change', blockId: 'title', author: 'alice' })
+  expect(updates).toHaveBeenCalledTimes(1)
+  expect(bob.state.doc.firstChild?.attrs.level).toBe(2)
+  expect(projectTrackedChanges(bob.state.doc, 'original').firstChild?.attrs.level).toBe(1)
+
+  Y.applyUpdate(reopenedDoc, Y.encodeStateAsUpdate(aliceDoc))
+  const { editor: reopened } = openStructuralEditor({ author: () => 'carol', ydoc: reopenedDoc })
+  await Promise.resolve()
+  expect(projectTrackedChanges(reopened.state.doc, 'original').firstChild?.attrs.level).toBe(1)
+  expect(REVIEW_TRACKED_PLUGIN_KEY.getState(reopened.state)?.structural[0]).toMatchObject({ author: 'alice' })
+
+  expect(applySuggestionDecision(bob, 'reject', { ids: [registered!.suggestionId] })).toBe(true)
+  expect(alice.state.doc.firstChild?.attrs.level).toBe(1)
+  expect(REVIEW_TRACKED_PLUGIN_KEY.getState(alice.state)?.structural).toEqual([])
+})
+
+it('anchors inserted tables to an original block and restores a deleted first row', () => {
+  const { editor, onStructuralSuggestions } = openStructuralEditor({
+    author: () => 'alice',
+    content: '<p data-block-id="anchor">Above</p>',
+  })
+  editor.commands.setTextSelection(6)
+  editor.commands.insertTable({ rows: 2, cols: 1, withHeaderRow: true })
+  const inserted = onStructuralSuggestions.mock.lastCall?.[0][0]
+  expect(inserted).toMatchObject({
+    kind: 'table_change', blockId: 'anchor', payload: { tableOp: 'insert_table', rows: 2, cols: 1, withHeaderRow: true },
+  })
+  expect(inserted?.payload.cellBlockIds).not.toContain('anchor')
+  expect(applySuggestionDecision(editor, 'reject', { ids: [inserted!.suggestionId] })).toBe(true)
+
+  const { editor: tableEditor, onStructuralSuggestions: onTable } = openStructuralEditor({
+    author: () => 'alice',
+    content: '<p data-block-id="before">Above</p><table><tbody>'
+      + '<tr><td><p data-block-id="first">First</p></td></tr>'
+      + '<tr><td><p data-block-id="second">Second</p></td></tr>'
+      + '</tbody></table><p data-block-id="after"></p>',
+  })
+  const original = tableEditor.state.doc.toJSON()
+  tableEditor.state.doc.descendants((node, pos) => {
+    if (node.attrs.blockId === 'first') tableEditor.commands.setTextSelection(pos + 1)
+  })
+  tableEditor.commands.deleteRow()
+  const deleted = onTable.mock.lastCall?.[0][0]
+  expect(deleted).toMatchObject({ blockId: 'second', payload: { tableOp: 'delete_row', rowIndex: 0 } })
+  expect(tableEditor.state.doc.textContent).toBe('AboveSecond')
+  expect(projectTrackedChanges(tableEditor.state.doc, 'original').toJSON()).toEqual(original)
+  expect(applySuggestionDecision(tableEditor, 'reject', { ids: [deleted!.suggestionId] })).toBe(true)
+  expect(tableEditor.state.doc.toJSON()).toEqual(original)
+
+  tableEditor.commands.deleteRow()
+  const unrecoverable = onTable.mock.lastCall?.[0][0]
+  const survivingBlock = tableEditor.state.doc.firstChild!.nodeSize + 3
+  tableEditor.view.dispatch(tableEditor.state.tr
+    .setMeta('vaulter:untracked', true)
+    .setNodeAttribute(survivingBlock, 'blockId', 'changed'))
+  const beforeRefusal = tableEditor.state.doc
+  expect(applySuggestionDecision(tableEditor, 'reject', { ids: [unrecoverable!.suggestionId] })).toBe(false)
+  expect(tableEditor.state.doc).toBe(beforeRefusal)
+  expect(REVIEW_TRACKED_PLUGIN_KEY.getState(tableEditor.state)?.structural).toHaveLength(1)
+})
+
 it('enforces overlap conflict policy v1 keeping 2nd suggestion open with conflict and original author', () => {
   let currentAuthor = 'alice'
   const { editor, onSuggestions, onStructuralSuggestions, onConflict } = openStructuralEditor({

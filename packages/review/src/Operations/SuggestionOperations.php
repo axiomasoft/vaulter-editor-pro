@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Vaulter\EditorPro\Review\Operations;
 
+use Closure;
 use Illuminate\Contracts\Container\Container;
 use Illuminate\Database\Connection;
 use Illuminate\Database\Query\Builder;
@@ -12,10 +13,10 @@ use Packman\Attributes\Api;
 use Packman\Attributes\Internal;
 use Vaulter\Database\VaulterDatabase;
 use Vaulter\Documents\Content\TipTap\TipTapContent;
-use Vaulter\Documents\Contracts\AtomicDocumentMutation;
 use Vaulter\Documents\Contracts\LockedDocumentMutation;
 use Vaulter\Documents\Data\Documents\DocumentMutationState;
 use Vaulter\Documents\DocumentsManager;
+use Vaulter\Documents\State\CollaborativeState;
 use Vaulter\Documents\Types\DocumentTypeRegistry;
 use Vaulter\Drive\Contracts\DriveExtension;
 use Vaulter\Drive\Contracts\DriveHandle;
@@ -31,7 +32,10 @@ use Vaulter\EditorPro\Review\Data\StructuralSuggestionInput;
 use Vaulter\EditorPro\Review\Data\TextSuggestion;
 use Vaulter\EditorPro\Review\Data\TextSuggestionInput;
 use Vaulter\EditorPro\Review\Enums\SuggestionKind;
+use Vaulter\EditorPro\Review\Exceptions\JournalProjectionPending;
 use Vaulter\EditorPro\Review\Exceptions\SuggestionConflictException;
+use Vaulter\EditorPro\Review\Idempotency\ReviewNodeReplayAuthorizer;
+use Vaulter\EditorPro\Review\Idempotency\SuggestionReceiptCodec;
 use Vaulter\EditorPro\Review\Repositories\ReviewLookup;
 use Vaulter\EditorPro\Review\Repositories\SuggestionRepository;
 use Vaulter\EditorPro\Review\Suggestions\ReviewCapabilities;
@@ -41,6 +45,9 @@ use Vaulter\EditorPro\Review\Suggestions\SuggestionJournalBridge;
 use Vaulter\EditorPro\Review\Suggestions\SuggestionOverlapDetector;
 use Vaulter\EditorPro\Review\Support\ReviewDriveHandle;
 use Vaulter\Exceptions\Access\MissingActorException;
+use Vaulter\Exceptions\Concurrency\StaleWriteException;
+use Vaulter\Exceptions\Http\PreconditionRequiredException;
+use Vaulter\Idempotency\IdempotentWrite;
 use Vaulter\Modules\ModuleId;
 use Vaulter\Operations\OperationRunner;
 use Vaulter\Operations\OperationSpec;
@@ -63,11 +70,11 @@ final readonly class SuggestionOperations implements DriveExtension
     #[Internal]
     public function __construct(
         private DriveContext $context,
-        private AtomicDocumentMutation $atomic,
         private SuggestionRepository $suggestions,
         private ReviewLookup $lookup,
         private Vaulter $vaulter,
         private DocumentsManager $documents,
+        private CollaborativeState $collaboration,
         private DocumentTypeRegistry $types,
         private VaulterDatabase $database,
         private OperationRunner $runner,
@@ -91,11 +98,12 @@ final readonly class SuggestionOperations implements DriveExtension
         if (($abilities[Ability::View->value] ?? false) !== true) {
             throw PermissionDeniedException::forAbility(Ability::View->value);
         }
-        $docMeta = $this->lookup->documentForNode($nodeSnap->id);
+        $docMeta = $this->documents->in($drive)->metadata($nodeSnap);
 
         return $this->capabilitiesResolver->build(
-            documentType: $docMeta['type'],
-            writeMode: $docMeta['write_mode'],
+            documentType: $docMeta->type,
+            writeMode: $docMeta->writeMode,
+            schemaVersion: $docMeta->schemaVersion,
             journalSupported: $this->journalBridge->isAvailable(),
         );
     }
@@ -109,11 +117,11 @@ final readonly class SuggestionOperations implements DriveExtension
         if (($abilities[Ability::View->value] ?? false) !== true) {
             throw PermissionDeniedException::forAbility(Ability::View->value);
         }
-        $docMeta = $this->lookup->documentForNode($nodeSnap->id);
-        $documentId = (string) $docMeta['id'];
-        $generation = $docMeta['collab_epoch'];
+        $docMeta = $this->documents->in($drive)->metadata($nodeSnap);
+        $documentId = $docMeta->documentId;
+        $generation = $docMeta->generation;
 
-        if ($docMeta['write_mode'] === 'journal' && $this->journalBridge->isAvailable()) {
+        if ($docMeta->writeMode === 'journal' && $this->journalBridge->isAvailable()) {
             $this->syncPendingJournalState($nodeSnap->id, $documentId, $generation);
         }
 
@@ -138,8 +146,12 @@ final readonly class SuggestionOperations implements DriveExtension
         throw SuggestionConflictException::because('The requested suggestion was not found.', 'suggestion_not_found');
     }
 
-    /** Create with version 0, or amend/retarget an open suggestion as its original author. */
-    public function save(int|string $nodeId, TextSuggestionInput|StructuralSuggestionInput $input, int $expectedVersion = 0): TextSuggestion
+    /**
+     * Create with version 0, or amend/retarget an open suggestion as its original author.
+     *
+     * @param  list<string>|null  $ifMatch
+     */
+    public function save(int|string $nodeId, TextSuggestionInput|StructuralSuggestionInput $input, ?int $expectedVersion = 0, ?array $ifMatch = null): TextSuggestion
     {
         $drive = ReviewDriveHandle::fromContext($this->vaulter, $this->context);
         if ($drive->snapshot()->status !== DriveStatus::Active) {
@@ -151,15 +163,13 @@ final readonly class SuggestionOperations implements DriveExtension
         if (($abilities[Ability::Edit->value] ?? false) !== true) {
             throw PermissionDeniedException::forAbility(Ability::Edit->value);
         }
-        $docMeta = $this->lookup->documentForNode($nodeSnap->id);
-        $this->capabilitiesResolver->assertDocumentSupported($docMeta['type'], $docMeta['schema_version']);
-        $this->capabilitiesResolver->assertInputSupported($input);
+        $docMeta = $this->documents->in($drive)->metadata($nodeSnap);
 
-        if ($docMeta['write_mode'] === 'journal') {
-            return $this->saveViaJournal($nodeSnap->id, $input, $expectedVersion);
+        if ($docMeta->writeMode === 'journal') {
+            return $this->saveViaJournal($nodeSnap->id, $input, $expectedVersion, $ifMatch);
         }
 
-        return $this->atomic->run($this->context, $nodeSnap->id, function (LockedDocumentMutation $locked) use ($input, $expectedVersion): TextSuggestion {
+        return $this->writeSnapshot($this->saveSpec(), $nodeSnap->id, $this->saveFingerprint($input, $expectedVersion, $ifMatch), function (LockedDocumentMutation $locked) use ($input, $expectedVersion, $ifMatch): TextSuggestion {
             $state = $locked->snapshot();
             $this->assertSnapshot($state);
             $this->capabilitiesResolver->assertDocumentSupported($state->type, $state->schemaVersion);
@@ -171,58 +181,63 @@ final readonly class SuggestionOperations implements DriveExtension
 
             $author = $this->subject();
             $conn = $locked->connection();
-            $query = $this->suggestions->forDocument($conn, $state->documentId, $state->generation);
+            $query = $this->suggestions->forDocument($conn, $state->documentId, $state->generation)->lockForUpdate();
             $rows = array_column($this->suggestions->read($query), null, 'id');
             $current = $rows[$input->id] ?? null;
-            $this->assertSaveAmendable($current, $input, $expectedVersion, $author);
+            $this->assertSaveAmendable($current, $input, $this->saveVersion($current, $expectedVersion, $ifMatch), $author);
 
-            $this->validateDraft($input, $state->content->toArray(), $rows);
+            $doc = $state->content->toArray();
+            $this->validateDraft($input, $doc, $rows);
 
-            return $this->persistDraft($conn, $query, $state->documentId, $state->generation, $state->position, $state->schemaVersion, $author, $input, $current, $rows);
+            return $this->persistDraft($conn, $query, $state->documentId, $state->generation, $state->position, $state->schemaVersion, $author, $input, $current, $rows, $doc);
         });
     }
 
-    public function accept(int|string $nodeId, string $id, int $generation, int $expectedVersion, ?string $commandId = null): TextSuggestion
+    /** @param list<string>|null $ifMatch */
+    public function accept(int|string $nodeId, string $id, int $generation, ?int $expectedVersion, ?string $commandId = null, ?array $ifMatch = null): TextSuggestion
     {
-        return $this->decide($nodeId, $generation, [$id => $expectedVersion], 'accepted', commandId: $commandId)[0];
+        return $this->decide($nodeId, $generation, [$id => $expectedVersion ?? 0], 'accepted', commandId: $commandId, ifMatch: $ifMatch)[0];
     }
 
-    public function reject(int|string $nodeId, string $id, int $generation, int $expectedVersion, ?string $commandId = null): TextSuggestion
+    /** @param list<string>|null $ifMatch */
+    public function reject(int|string $nodeId, string $id, int $generation, ?int $expectedVersion, ?string $commandId = null, ?array $ifMatch = null): TextSuggestion
     {
-        return $this->decide($nodeId, $generation, [$id => $expectedVersion], 'rejected', commandId: $commandId)[0];
-    }
-
-    /**
-     * @param  array<string, int>  $expectedVersions
-     * @return list<TextSuggestion>
-     */
-    public function acceptGroup(int|string $nodeId, string $groupId, int $generation, array $expectedVersions, ?string $commandId = null): array
-    {
-        return $this->decide($nodeId, $generation, $expectedVersions, 'accepted', $groupId, $commandId);
+        return $this->decide($nodeId, $generation, [$id => $expectedVersion ?? 0], 'rejected', commandId: $commandId, ifMatch: $ifMatch)[0];
     }
 
     /**
      * @param  array<string, int>  $expectedVersions
+     * @param  list<string>|null  $ifMatch
      * @return list<TextSuggestion>
      */
-    public function rejectGroup(int|string $nodeId, string $groupId, int $generation, array $expectedVersions, ?string $commandId = null): array
+    public function acceptGroup(int|string $nodeId, string $groupId, int $generation, array $expectedVersions, ?string $commandId = null, ?array $ifMatch = null): array
     {
-        return $this->decide($nodeId, $generation, $expectedVersions, 'rejected', $groupId, $commandId);
+        return $this->decide($nodeId, $generation, $expectedVersions, 'accepted', $groupId, $commandId, $ifMatch);
     }
 
+    /**
+     * @param  array<string, int>  $expectedVersions
+     * @param  list<string>|null  $ifMatch
+     * @return list<TextSuggestion>
+     */
+    public function rejectGroup(int|string $nodeId, string $groupId, int $generation, array $expectedVersions, ?string $commandId = null, ?array $ifMatch = null): array
+    {
+        return $this->decide($nodeId, $generation, $expectedVersions, 'rejected', $groupId, $commandId, $ifMatch);
+    }
+
+    /** @param list<string>|null $ifMatch */
     private function saveViaJournal(
         string $nodeId,
         TextSuggestionInput|StructuralSuggestionInput $input,
-        int $expectedVersion,
+        ?int $expectedVersion,
+        ?array $ifMatch,
     ): TextSuggestion {
         $author = $this->subject();
-        $this->capabilitiesResolver->assertInputSupported($input);
 
         /** @var TextSuggestion $saved */
-        $saved = $this->runner->write(
-            new OperationSpec('review.suggestions.save', new ModuleId('review')),
-            $this->context->operation,
-            function () use ($nodeId, $input, $expectedVersion, $author): TextSuggestion {
+        $saved = $this->journalWrite(
+            $this->saveSpec(),
+            function () use ($nodeId, $input, $expectedVersion, $author, $ifMatch): TextSuggestion {
                 $drive = $this->driveWithoutIdempotency();
                 $nodeSnap = $drive->nodes()->find($nodeId);
                 $abilities = $drive->nodes()->abilities($nodeSnap)->flags;
@@ -231,23 +246,24 @@ final readonly class SuggestionOperations implements DriveExtension
                 }
 
                 $this->documents->in($drive)->lockForRelatedWrite($nodeId);
-                $docMeta = $this->lookup->documentForNode($nodeId);
-                if ($docMeta['write_mode'] !== 'journal') {
+                $docMeta = $this->collaboration->lock($nodeId);
+                if ($docMeta->writeMode !== 'journal') {
                     throw SuggestionConflictException::because('Document write mode changed from journal.', 'write_mode_changed');
                 }
-                $this->capabilitiesResolver->assertDocumentSupported($docMeta['type'], $docMeta['schema_version']);
+                $this->capabilitiesResolver->assertDocumentSupported($docMeta->type, $docMeta->schemaVersion);
+                $this->capabilitiesResolver->assertInputSupported($input);
 
-                if ($input->generation !== $docMeta['collab_epoch'] || $input->schemaVersion !== $docMeta['schema_version']) {
+                if ($input->generation !== $docMeta->generation || $input->schemaVersion !== $docMeta->schemaVersion) {
                     throw new SuggestionConflictException('The suggestion generation or schema version is stale.');
                 }
 
-                $documentId = (string) $docMeta['id'];
+                $documentId = $docMeta->documentId;
                 $logSnapshot = $this->journalBridge->snapshot($nodeId, $input->generation);
                 $headSeq = $logSnapshot !== null ? $logSnapshot->headSeq : 0;
 
                 // Validate basePosition against journal head (or unseeded initial version when headSeq === 0).
                 if ($headSeq === 0) {
-                    if ($input->basePosition !== 0 && $input->basePosition !== $docMeta['state_version']) {
+                    if ($input->basePosition !== 0 && $input->basePosition !== $docMeta->stateVersion) {
                         throw new SuggestionConflictException('The journal suggestion base position is stale.');
                     }
                 } elseif ($input->basePosition !== $headSeq) {
@@ -257,18 +273,20 @@ final readonly class SuggestionOperations implements DriveExtension
                 $conn = $this->lookup->connection();
                 $this->syncPendingJournalLocked($conn, $nodeId, $documentId, $input->generation);
 
-                $query = $this->suggestions->forDocument($conn, $documentId, $input->generation);
+                $query = $this->suggestions->forDocument($conn, $documentId, $input->generation)->lockForUpdate();
                 $rows = array_column($this->suggestions->read($query), null, 'id');
                 $current = $rows[$input->id] ?? null;
-                $this->assertSaveAmendable($current, $input, $expectedVersion, $author);
+                $this->assertSaveAmendable($current, $input, $this->saveVersion($current, $expectedVersion, $ifMatch), $author);
 
-                $settledDoc = ($logSnapshot !== null && $logSnapshot->tail === [] && is_array($logSnapshot->content))
-                    ? $logSnapshot->content
-                    : null;
+                $settledDoc = $logSnapshot?->tail === [] ? $logSnapshot->content : null;
+                if ($input instanceof StructuralSuggestionInput && $settledDoc === null) {
+                    throw new JournalProjectionPending($docMeta->pending);
+                }
                 $this->validateDraft($input, $settledDoc, $rows);
 
-                return $this->persistDraft($conn, $query, $documentId, $input->generation, $input->basePosition, $docMeta['schema_version'], $author, $input, $current, $rows);
+                return $this->persistDraft($conn, $query, $documentId, $input->generation, $input->basePosition, $docMeta->schemaVersion, $author, $input, $current, $rows, $settledDoc);
             },
+            $this->receipt($nodeId, $this->saveFingerprint($input, $expectedVersion, $ifMatch)),
         );
 
         return $saved;
@@ -276,6 +294,7 @@ final readonly class SuggestionOperations implements DriveExtension
 
     /**
      * @param  array<string, int>  $versions
+     * @param  list<string>|null  $ifMatch
      * @return list<TextSuggestion>
      */
     private function decide(
@@ -285,14 +304,15 @@ final readonly class SuggestionOperations implements DriveExtension
         string $decision,
         ?string $groupId = null,
         ?string $commandId = null,
+        ?array $ifMatch = null,
     ): array {
-        if ($versions === []) {
-            throw new SuggestionConflictException('Choose at least one suggestion.');
+        if ($versions === [] && $ifMatch === null) {
+            throw PreconditionRequiredException::missing('If-Match');
         }
         foreach ($versions as $id => $version) {
             $this->assertUuid($id);
-            if ($version < 1) {
-                throw new SuggestionConflictException('A decision requires the current suggestion version.');
+            if ($version < 1 && $ifMatch === null) {
+                throw PreconditionRequiredException::missing('If-Match');
             }
         }
         if ($groupId !== null) {
@@ -301,25 +321,24 @@ final readonly class SuggestionOperations implements DriveExtension
 
         $drive = ReviewDriveHandle::fromContext($this->vaulter, $this->context);
         $nodeSnap = $drive->nodes()->find($nodeId);
-        $docMeta = $this->lookup->documentForNode($nodeSnap->id);
+        $docMeta = $this->documents->in($drive)->metadata($nodeSnap);
 
-        if ($docMeta['write_mode'] === 'journal') {
-            return $this->decideViaJournal($nodeSnap->id, $generation, $versions, $decision, $groupId, $commandId);
+        if ($docMeta->writeMode === 'journal') {
+            return $this->decideViaJournal($nodeSnap->id, $generation, $versions, $decision, $groupId, $commandId, $ifMatch);
         }
 
-        return $this->atomic->run($this->context, $nodeSnap->id, function (LockedDocumentMutation $locked) use ($generation, $versions, $groupId, $decision): array {
+        $verb = $this->decisionVerb($decision, $groupId);
+        $fingerprint = $this->decisionFingerprint($generation, $versions, $groupId, $commandId, $ifMatch);
+
+        return $this->writeSnapshot($this->decisionSpec($verb), $nodeSnap->id, $fingerprint, function (LockedDocumentMutation $locked) use ($generation, $versions, $groupId, $decision, $ifMatch): array {
             $state = $locked->snapshot();
             if ($state->generation !== $generation) {
                 throw new SuggestionConflictException('The suggestion generation is stale.');
             }
             $subject = $this->subject();
-            $query = $this->suggestions->forDocument($locked->connection(), $state->documentId, $generation);
+            $query = $this->suggestions->forDocument($locked->connection(), $state->documentId, $generation)->lockForUpdate();
             $all = array_column($this->suggestions->read($query), null, 'id');
-            $selected = array_intersect_key($all, $versions);
-            if (count($selected) !== count($versions)
-                || ($groupId !== null && array_keys(array_filter($all, static fn (TextSuggestion $row): bool => $row->groupId === $groupId)) !== array_keys($selected))) {
-                throw new SuggestionConflictException('The selected suggestions or group membership have changed.');
-            }
+            [$selected, $versions] = $this->decisionSelection($all, $versions, $groupId, $ifMatch);
             if ($this->isReplay($selected, $versions, $decision, $subject)) {
                 return array_values($selected);
             }
@@ -327,7 +346,7 @@ final readonly class SuggestionOperations implements DriveExtension
             $this->assertSnapshot($state);
             $this->capabilitiesResolver->assertDocumentSupported($state->type, $state->schemaVersion);
             foreach ($selected as $id => $row) {
-                if ($row->state !== 'open' || $row->version !== $versions[$id] || $row->proposalId !== null) {
+                if ($row->state !== 'open' || $row->isPendingJournal() || $row->version !== $versions[$id] || $row->proposalId !== null) {
                     throw new SuggestionConflictException('The selection is stale or requires a proposal decision.');
                 }
             }
@@ -337,7 +356,7 @@ final readonly class SuggestionOperations implements DriveExtension
                 $this->acceptSnapshot($locked, $state, $query, $selected, $others);
             } else {
                 $supersededIds = $this->rejectDescendants($query, $selected, $others, $subject);
-                $this->clearResolvedConflicts($query, $all, array_values(array_unique([...array_keys($selected), ...$supersededIds])));
+                $this->clearResolvedConflicts($query, $all, array_values(array_unique([...array_keys($selected), ...$supersededIds])), doc: $state->content->toArray());
             }
             foreach ($selected as $row) {
                 $this->recordDecision($query, $row, $decision, $subject, $receipt);
@@ -349,6 +368,7 @@ final readonly class SuggestionOperations implements DriveExtension
 
     /**
      * @param  array<string, int>  $versions
+     * @param  list<string>|null  $ifMatch
      * @return list<TextSuggestion>
      */
     private function decideViaJournal(
@@ -358,22 +378,16 @@ final readonly class SuggestionOperations implements DriveExtension
         string $decision,
         ?string $groupId,
         ?string $commandId,
+        ?array $ifMatch,
     ): array {
-        $spec = match ([$decision, $groupId !== null]) {
-            ['accepted', false] => new OperationSpec('review.suggestions.accept', new ModuleId('review')),
-            ['rejected', false] => new OperationSpec('review.suggestions.reject', new ModuleId('review')),
-            ['accepted', true] => new OperationSpec('review.suggestions.accept_group', new ModuleId('review')),
-            default => new OperationSpec('review.suggestions.reject_group', new ModuleId('review')),
-        };
-
+        $verb = $this->decisionVerb($decision, $groupId);
         $subject = $this->subject();
-        $resolvedCommandId = $this->resolveCommandId($commandId, $decision, $generation, $versions, $groupId);
+        $fingerprint = $this->decisionFingerprint($generation, $versions, $groupId, $commandId, $ifMatch);
 
         /** @var list<TextSuggestion> $outcome */
-        $outcome = $this->runner->write(
-            $spec,
-            $this->context->operation,
-            function () use ($nodeId, $generation, $versions, $decision, $groupId, $subject, $resolvedCommandId): array {
+        $outcome = $this->journalWrite(
+            $this->decisionSpec($verb),
+            function () use ($nodeId, $generation, $versions, $decision, $groupId, $subject, $commandId, $ifMatch, $verb): array {
                 $drive = $this->driveWithoutIdempotency();
                 $nodeSnap = $drive->nodes()->find($nodeId);
                 $abilities = $drive->nodes()->abilities($nodeSnap)->flags;
@@ -382,44 +396,33 @@ final readonly class SuggestionOperations implements DriveExtension
                 }
 
                 $this->documents->in($drive)->lockForRelatedWrite($nodeId);
-                $meta = $this->lookup->documentForNode($nodeId);
-                if ($meta['write_mode'] !== 'journal') {
+                $meta = $this->collaboration->lock($nodeId);
+                if ($meta->writeMode !== 'journal') {
                     throw SuggestionConflictException::because('Document write mode changed from journal.', 'write_mode_changed');
                 }
-                if ($meta['collab_epoch'] !== $generation) {
+                if ($meta->generation !== $generation) {
                     throw new SuggestionConflictException('The suggestion generation is stale.');
                 }
-                $this->capabilitiesResolver->assertDocumentSupported($meta['type'], $meta['schema_version']);
+                $this->capabilitiesResolver->assertDocumentSupported($meta->type, $meta->schemaVersion);
 
                 $conn = $this->lookup->connection();
-                $documentId = (string) $meta['id'];
+                $documentId = $meta->documentId;
                 $this->syncPendingJournalLocked($conn, $nodeId, $documentId, $generation);
 
-                $query = $this->suggestions->forDocument($conn, $documentId, $generation);
+                $query = $this->suggestions->forDocument($conn, $documentId, $generation)->lockForUpdate();
                 $all = array_column($this->suggestions->read($query), null, 'id');
-                $selected = array_intersect_key($all, $versions);
-                if (count($selected) !== count($versions)
-                    || ($groupId !== null && array_keys(array_filter($all, static fn (TextSuggestion $row): bool => $row->groupId === $groupId)) !== array_keys($selected))) {
-                    throw new SuggestionConflictException('The selected suggestions or group membership have changed.');
-                }
+                [$selected, $versions] = $this->decisionSelection($all, $versions, $groupId, $ifMatch);
 
-                if ($this->isReplay($selected, $versions, $decision, $subject)) {
+                $resolvedCommandId = $this->resolveCommandId($commandId, $decision, $generation, $versions, $groupId);
+                $requestDigest = SuggestionJournalBridge::canonicalDigest([$verb, $this->decisionFingerprint($generation, $versions, $groupId, $resolvedCommandId)]);
+
+                if ($this->isJournalReplay($conn, $selected, $versions, $decision, $subject, $resolvedCommandId, $requestDigest)) {
                     return array_values($selected);
                 }
 
-                // Check if caller is replaying an already-registered running journal command.
                 $actor = $this->journalBridge->actor($this->context, $nodeId, $subject);
-                $firstSelected = reset($selected);
-                $pendingCmd = $firstSelected !== false ? $firstSelected->journalCommandId : null;
-                if ($pendingCmd !== null && $pendingCmd === $resolvedCommandId) {
-                    $status = $this->journalBridge->status($actor, $pendingCmd);
-                    if (is_array($status) && ($status['state'] ?? null) === 'running') {
-                        return array_values($selected);
-                    }
-                }
-
                 foreach ($selected as $id => $row) {
-                    if ($row->state !== 'open' || $row->version !== $versions[$id] || $row->proposalId !== null) {
+                    if ($row->state !== 'open' || $row->isPendingJournal() || $row->version !== $versions[$id] || $row->proposalId !== null) {
                         throw new SuggestionConflictException('The selection is stale or requires a proposal decision.');
                     }
                 }
@@ -427,16 +430,27 @@ final readonly class SuggestionOperations implements DriveExtension
                 $logSnapshot = $this->journalBridge->snapshot($nodeId, $generation);
                 $headSeq = $logSnapshot !== null ? $logSnapshot->headSeq : 0;
 
+                $settledDoc = $logSnapshot?->tail === [] ? $logSnapshot->content : null;
+                $effects = [];
+                $destroyed = [];
+                $readPosition = $headSeq;
                 if ($decision === 'accepted') {
-                    $this->assertSelectionAcceptableBeforeWrite($selected, $meta['schema_version'], $logSnapshot?->tail === [] ? $logSnapshot->content : null);
-                }
-
-                $baseSeqs = array_map(static fn (TextSuggestion $row): int => $row->basePosition, array_values($selected));
-                $maxBase = $baseSeqs !== [] ? max($baseSeqs) : 0;
-                $readPosition = $headSeq === 0 && $maxBase === $meta['state_version'] ? 0 : $maxBase;
-
-                if ($headSeq > 0 && $maxBase > $headSeq) {
-                    throw new SuggestionConflictException('The suggestion base position exceeds the collaboration head.');
+                    $structural = array_any($selected, static fn (TextSuggestion $row): bool => $row->isStructural());
+                    if ($structural && $settledDoc === null) {
+                        throw new JournalProjectionPending($meta->pending);
+                    }
+                    foreach ($selected as $row) {
+                        if ($row->basePosition !== $headSeq && ! ($headSeq === 0 && $row->basePosition === $meta->stateVersion)) {
+                            throw new SuggestionConflictException('The journal suggestion base position is stale.');
+                        }
+                    }
+                    $applied = $this->prepareSelection($selected, $meta->schemaVersion, $settledDoc);
+                    if ($structural && $applied !== null) {
+                        $destroyed = $applied['destroyedBlockIds'];
+                        $effects[] = ['effect' => 'replace_review_document', 'expected' => $settledDoc, 'replacement' => $applied['doc']];
+                    } else {
+                        $effects = $this->buildAtomicEffects($selected);
+                    }
                 }
 
                 $proposalUuid = $groupId ?? SuggestionJournalBridge::deterministicUuid('suggestion-proposal:'.$resolvedCommandId);
@@ -458,7 +472,7 @@ final readonly class SuggestionOperations implements DriveExtension
                     'generation' => $generation,
                     'group_id' => $groupId,
                     'suggestions' => $suggestionSnapshots,
-                    'atomic_effects' => $decision === 'accepted' ? $this->buildAtomicEffects($selected) : [],
+                    'atomic_effects' => $effects,
                 ];
                 $digestHex = SuggestionJournalBridge::canonicalDigest($intent);
 
@@ -468,7 +482,7 @@ final readonly class SuggestionOperations implements DriveExtension
                     proposalUuid: $proposalUuid,
                     digestHex: $digestHex,
                     generation: $generation,
-                    schemaVersion: $meta['schema_version'],
+                    schemaVersion: $meta->schemaVersion,
                     readPosition: $readPosition,
                     intent: $intent,
                 );
@@ -483,9 +497,9 @@ final readonly class SuggestionOperations implements DriveExtension
 
                 if ($journalState === 'committed' && is_string($record['receipt_id'] ?? null)) {
                     $toSeq = is_int($record['to_seq'] ?? null) ? $record['to_seq'] : null;
-                    $this->finalizeJournalOutcome($conn, $query, $all, array_keys($selected), $decision, $subject, $resolvedCommandId, $record['receipt_id'], $toSeq);
+                    $this->finalizeJournalOutcome($conn, $query, $all, array_keys($selected), $decision, $subject, $resolvedCommandId, $record['receipt_id'], $toSeq, $readPosition, $requestDigest, $versions, $destroyed);
 
-                    return $this->suggestions->read($this->suggestions->forDocument($conn, $documentId, $generation)->whereIn('id', array_keys($selected)));
+                    return $this->suggestions->read((clone $query)->whereIn('id', array_keys($selected)));
                 }
 
                 // Store pending_journal metadata while keeping state = 'open' per SQL receipt_id invariant.
@@ -497,6 +511,9 @@ final readonly class SuggestionOperations implements DriveExtension
                     'decision' => $decision,
                     'decided_by_subject' => $subject,
                     'read_position' => $readPosition,
+                    'request_digest' => $requestDigest,
+                    'versions' => $versions,
+                    'destroyed_block_ids' => $destroyed,
                 ];
                 foreach ($selected as $row) {
                     $prov = $this->suggestions->readProvenance($conn, $row->id) ?? [];
@@ -508,8 +525,9 @@ final readonly class SuggestionOperations implements DriveExtension
                     ]);
                 }
 
-                return $this->suggestions->read($this->suggestions->forDocument($conn, $documentId, $generation)->whereIn('id', array_keys($selected)));
+                return $this->suggestions->read((clone $query)->whereIn('id', array_keys($selected)));
             },
+            $this->receipt($nodeId, $fingerprint),
         );
 
         return $outcome;
@@ -518,52 +536,39 @@ final readonly class SuggestionOperations implements DriveExtension
     /**
      * @param  array<string, TextSuggestion>  $selected
      * @param  array<string, mixed>|null  $settledDoc
+     * @return ($settledDoc is null ? null : array{doc: array<string, mixed>, destroyedBlockIds: list<string>})
      */
-    private function assertSelectionAcceptableBeforeWrite(array $selected, int $schemaVersion, ?array $settledDoc): void
+    private function prepareSelection(array $selected, int $schemaVersion, ?array $settledDoc): ?array
     {
         $sorted = array_values($selected);
         foreach ($sorted as $row) {
             if ($row->conflicted || $row->parentId !== null || $row->schemaVersion !== $schemaVersion) {
                 throw new SuggestionConflictException('Refresh the target or resolve its conflict or parent before accepting.');
             }
-            if ($row->isStructural()) {
-                $input = new StructuralSuggestionInput(
-                    id: $row->id,
-                    groupId: $row->groupId,
-                    generation: $row->generation,
-                    basePosition: $row->basePosition,
-                    schemaVersion: $row->schemaVersion,
-                    kind: $row->kind,
-                    targetBlockId: $row->targetBlockId,
-                    selector: $row->targetSelector,
-                    payload: $row->payload,
-                    proposalId: $row->proposalId,
-                    parentId: $row->parentId,
-                );
-                $this->capabilitiesResolver->assertInputSupported($input);
-            }
         }
 
         $count = count($sorted);
         for ($i = 0; $i < $count; $i++) {
             for ($j = $i + 1; $j < $count; $j++) {
-                if ($this->overlapDetector->overlaps($sorted[$i], $sorted[$j])) {
+                if ($this->overlapDetector->overlaps($sorted[$i], $sorted[$j], doc: $settledDoc)) {
                     throw new SuggestionConflictException('A decision cannot accept overlapping edits together.');
                 }
             }
         }
 
-        if ($settledDoc !== null) {
-            $doc = $settledDoc;
-            usort($sorted, static function (TextSuggestion $a, TextSuggestion $b): int {
-                $blockOrder = $a->targetBlockId <=> $b->targetBlockId;
-
-                return $blockOrder !== 0 ? $blockOrder : ([$b->from, $b->to] <=> [$a->from, $a->to]);
-            });
-            foreach ($sorted as $row) {
-                $doc = $this->structuralEditor->apply($doc, $row)['doc'];
-            }
+        if ($settledDoc === null) {
+            return null;
         }
+
+        $doc = $settledDoc;
+        $destroyed = [];
+        foreach ($this->orderedSelection($selected) as $row) {
+            $applied = $this->structuralEditor->apply($doc, $row);
+            $doc = $applied['doc'];
+            $destroyed = [...$destroyed, ...$applied['destroyedBlockIds']];
+        }
+
+        return ['doc' => $doc, 'destroyedBlockIds' => array_values(array_unique($destroyed))];
     }
 
     private function syncPendingJournalState(string $nodeId, string $documentId, int $generation): void
@@ -578,13 +583,18 @@ final readonly class SuggestionOperations implements DriveExtension
         }
 
         $this->database->transaction(function () use ($nodeId, $documentId, $generation): void {
+            $meta = $this->collaboration->lock($nodeId);
+            if ($meta->generation !== $generation || $meta->documentId !== $documentId || $meta->trashed
+                || $meta->driveId !== (string) $this->context->driveId()) {
+                return;
+            }
             $this->syncPendingJournalLocked($this->lookup->connection(), $nodeId, $documentId, $generation);
         });
     }
 
     private function syncPendingJournalLocked(Connection $conn, string $nodeId, string $documentId, int $generation): void
     {
-        $query = $this->suggestions->forDocument($conn, $documentId, $generation);
+        $query = $this->suggestions->forDocument($conn, $documentId, $generation)->lockForUpdate();
         $all = array_column($this->suggestions->read($query), null, 'id');
 
         /** @var array<string, list<string>> $groupsByCommand */
@@ -602,27 +612,47 @@ final readonly class SuggestionOperations implements DriveExtension
             if ($cmdId === null) {
                 continue;
             }
-            $groupsByCommand[$cmdId][] = $row->id;
-            $metaByCommand[$cmdId] ??= $pending;
+            $subject = $pending['decided_by_subject'] ?? null;
+            if (! is_string($subject)) {
+                continue;
+            }
+            $groupKey = json_encode([$subject, $cmdId], JSON_THROW_ON_ERROR);
+            $groupsByCommand[$groupKey][] = $row->id;
+            $metaByCommand[$groupKey] ??= $pending;
         }
 
-        foreach ($groupsByCommand as $cmdId => $rowIds) {
-            $pendingMeta = $metaByCommand[$cmdId];
-            $decidedBy = is_string($pendingMeta['decided_by_subject'] ?? null) ? $pendingMeta['decided_by_subject'] : $this->subject();
+        $settled = [];
+        foreach ($groupsByCommand as $groupKey => $rowIds) {
+            $pendingMeta = $metaByCommand[$groupKey];
+            $cmdId = $pendingMeta['command_id'] ?? null;
+            $decidedBy = $pendingMeta['decided_by_subject'] ?? null;
+            if (! is_string($cmdId) || ! is_string($decidedBy)) {
+                continue;
+            }
             $decision = ($pendingMeta['decision'] ?? null) === 'rejected' ? 'rejected' : 'accepted';
 
             $actor = $this->journalBridge->actor($this->context, $nodeId, $decidedBy);
             $record = $this->journalBridge->status($actor, $cmdId);
-            if (! is_array($record)) {
+            if ($record === null || ($record['id'] ?? null) !== ($pendingMeta['command_row_id'] ?? null)
+                || ($record['fingerprint'] ?? null) !== ($pendingMeta['fingerprint'] ?? null)) {
                 continue;
             }
+            if (($record['state'] ?? null) !== 'running') {
+                $settled[] = [$record, $rowIds, $pendingMeta, $decision, $decidedBy, $cmdId];
+            }
+        }
+        usort($settled, static fn (array $a, array $b): int => [
+            $a[0]['base_seq'] ?? 0, $a[0]['id'],
+        ] <=> [$b[0]['base_seq'] ?? 0, $b[0]['id']]);
+
+        foreach ($settled as [$record, $rowIds, $pendingMeta, $decision, $decidedBy, $cmdId]) {
             $state = $record['state'] ?? null;
             if ($state === 'committed' && is_string($record['receipt_id'] ?? null)) {
                 $toSeq = is_int($record['to_seq'] ?? null) ? $record['to_seq'] : null;
-                $freshAll = array_column($this->suggestions->read($this->suggestions->forDocument($conn, $documentId, $generation)), null, 'id');
+                $freshAll = array_column($this->suggestions->read(clone $query), null, 'id');
                 $this->finalizeJournalOutcome(
                     $conn,
-                    $this->suggestions->forDocument($conn, $documentId, $generation),
+                    $query,
                     $freshAll,
                     $rowIds,
                     $decision,
@@ -630,11 +660,16 @@ final readonly class SuggestionOperations implements DriveExtension
                     $cmdId,
                     $record['receipt_id'],
                     $toSeq,
+                    is_int($record['base_seq'] ?? null) ? $record['base_seq'] : null,
+                    is_string($pendingMeta['request_digest'] ?? null) ? $pendingMeta['request_digest'] : null,
+                    $this->submittedVersions($pendingMeta['versions'] ?? null),
+                    $this->stringList($pendingMeta['destroyed_block_ids'] ?? null),
                 );
             } elseif ($state === 'rejected') {
                 $rejCode = is_string($record['rejection_code'] ?? null) ? $record['rejection_code'] : 'journal_rejected';
+                $fresh = array_column($this->suggestions->read((clone $query)->whereIn('id', $rowIds)), null, 'id');
                 foreach ($rowIds as $rid) {
-                    $row = $all[$rid] ?? null;
+                    $row = $fresh[$rid] ?? null;
                     if ($row === null || $row->state !== 'open') {
                         continue;
                     }
@@ -652,6 +687,8 @@ final readonly class SuggestionOperations implements DriveExtension
     /**
      * @param  array<string, TextSuggestion>  $all
      * @param  list<string>  $selectedIds
+     * @param  array<string, int>  $versions
+     * @param  list<string>  $destroyed
      */
     private function finalizeJournalOutcome(
         Connection $conn,
@@ -663,6 +700,10 @@ final readonly class SuggestionOperations implements DriveExtension
         string $commandId,
         string $receiptId,
         ?int $toSeq,
+        ?int $baseSeq,
+        ?string $requestDigest,
+        array $versions,
+        array $destroyed,
     ): void {
         $selected = [];
         foreach ($selectedIds as $sid) {
@@ -676,18 +717,14 @@ final readonly class SuggestionOperations implements DriveExtension
         $others = array_diff_key($all, $selected);
 
         if ($decision === 'accepted') {
-            $destroyed = [];
-            foreach ($selected as $row) {
-                if ($row->kind === SuggestionKind::BlockJoin->value && is_string($row->payload['second_block_id'] ?? null)) {
-                    $destroyed[] = $row->payload['second_block_id'];
-                }
-            }
             foreach ($selected as $row) {
                 $prov = $this->suggestions->readProvenance($conn, $row->id) ?? [];
                 unset($prov['pending_journal']);
                 $prov['schema'] = 1;
                 $prov['journal_command_id'] = $commandId;
                 $prov['journal_state'] = 'committed';
+                $prov['journal_request_digest'] = $requestDigest;
+                $prov['journal_expected_version'] = $versions[$row->id] ?? $row->version - 1;
                 if ($toSeq !== null) {
                     $prov['committed_position'] = $toSeq;
                 }
@@ -700,9 +737,12 @@ final readonly class SuggestionOperations implements DriveExtension
                 ]);
             }
             $newPosition = $toSeq ?? max(array_map(static fn (TextSuggestion $r): int => $r->basePosition, $selected));
+            $submittedBase = reset($selected)->basePosition;
+            $ordered = $this->orderedSelection($selected);
             foreach ($others as $other) {
-                if ($other->state === 'open') {
-                    $this->rebaseAfterAccept($query, $other, array_values($selected), $newPosition, $destroyed);
+                if ($other->state === 'open' && ($other->basePosition === $baseSeq
+                    || ($baseSeq === 0 && $other->basePosition === $submittedBase))) {
+                    $this->rebaseAfterAccept($query, $other, $ordered, $newPosition, $destroyed);
                 }
             }
 
@@ -719,6 +759,8 @@ final readonly class SuggestionOperations implements DriveExtension
             $prov['journal_command_id'] = $commandId;
             $prov['journal_state'] = 'committed';
             $prov['journal_receipt_id'] = $receiptId;
+            $prov['journal_request_digest'] = $requestDigest;
+            $prov['journal_expected_version'] = $versions[$row->id] ?? $row->version - 1;
             if ($toSeq !== null) {
                 $prov['committed_position'] = $toSeq;
             }
@@ -732,6 +774,52 @@ final readonly class SuggestionOperations implements DriveExtension
         }
     }
 
+    /**
+     * @param  array<string, TextSuggestion>  $all
+     * @param  array<string, int>  $versions
+     * @param  list<string>|null  $ifMatch
+     * @return array{array<string, TextSuggestion>, array<string, int>}
+     */
+    private function decisionSelection(array $all, array $versions, ?string $groupId, ?array $ifMatch): array
+    {
+        $group = $groupId === null ? [] : array_filter($all, static fn (TextSuggestion $row): bool => $row->groupId === $groupId);
+        $selected = $versions === [] ? $group : array_intersect_key($all, $versions);
+        if ($selected === [] || ($versions !== [] && count($selected) !== count($versions))
+            || ($groupId !== null && array_keys($group) !== array_keys($selected))) {
+            throw new SuggestionConflictException('The selected suggestions or group membership have changed.');
+        }
+
+        if ($ifMatch !== null) {
+            foreach ($selected as $id => $row) {
+                $provided = $versions[$id] ?? 0;
+                if (! in_array($row->etag(), $ifMatch, true) || ($provided !== 0 && $provided !== $row->version)) {
+                    throw StaleWriteException::of('review.suggestion', $id);
+                }
+                $versions[$id] = $row->version;
+            }
+        }
+
+        return [$selected, $versions];
+    }
+
+    /** @param list<string>|null $ifMatch */
+    private function saveVersion(?TextSuggestion $current, ?int $version, ?array $ifMatch): int
+    {
+        if ($ifMatch === null) {
+            if ($version === null && $current !== null) {
+                throw PreconditionRequiredException::missing('If-Match');
+            }
+
+            return $version ?? 0;
+        }
+        if ($current === null || ! in_array($current->etag(), $ifMatch, true)
+            || ($version !== null && $version !== $current->version)) {
+            throw StaleWriteException::of('review.suggestion', $current === null ? 'missing' : $current->id);
+        }
+
+        return $current->version;
+    }
+
     private function assertSaveAmendable(
         ?TextSuggestion $current,
         TextSuggestionInput|StructuralSuggestionInput $input,
@@ -741,6 +829,7 @@ final readonly class SuggestionOperations implements DriveExtension
         $isStructuralInput = $input instanceof StructuralSuggestionInput;
         if (($current->version ?? 0) !== $expectedVersion || ($current !== null && (
             $current->state !== 'open'
+            || $current->isPendingJournal()
             || $current->authorSubject !== $author
             || $current->groupId !== $input->groupId
             || $current->proposalId !== $input->proposalId
@@ -764,7 +853,7 @@ final readonly class SuggestionOperations implements DriveExtension
         $author = $this->subject();
         foreach ($rows as $row) {
             if ($row->id !== $input->id && $row->groupId === $input->groupId && (
-                $row->state !== 'open' || $row->authorSubject !== $author || $row->proposalId !== $input->proposalId
+                $row->state !== 'open' || $row->isPendingJournal() || $row->authorSubject !== $author || $row->proposalId !== $input->proposalId
             )) {
                 throw new SuggestionConflictException('This group cannot be extended.');
             }
@@ -779,7 +868,7 @@ final readonly class SuggestionOperations implements DriveExtension
                 throw new SuggestionConflictException('Structural suggestions cannot nest inside another draft insertion.');
             }
             $parent = $rows[$input->parentId] ?? null;
-            if ($parent === null || $parent->state !== 'open' || $parent->proposalId !== null || $parent->targetBlockId !== $input->targetBlockId
+            if ($parent === null || $parent->state !== 'open' || $parent->isPendingJournal() || $parent->proposalId !== null || $parent->targetBlockId !== $input->targetBlockId
                 || $parent->conflicted || $parent->basePosition !== $input->basePosition || $parent->schemaVersion !== $input->schemaVersion
                 || $parent->after === '' || SnapshotTextEdit::slice($parent->after, $input->from, $input->to) !== $input->before) {
                 throw new SuggestionConflictException('The parent insertion is unavailable at the supplied text range.');
@@ -789,15 +878,13 @@ final readonly class SuggestionOperations implements DriveExtension
         }
 
         if ($doc !== null) {
-            if ($input instanceof StructuralSuggestionInput) {
-                $this->structuralEditor->assertDocCandidateTextualIfTableTargeted($doc, $input);
-            }
             $this->structuralEditor->apply($doc, $input);
         }
     }
 
     /**
      * @param  array<string, TextSuggestion>  $rows
+     * @param  array<string, mixed>|null  $doc
      */
     private function persistDraft(
         Connection $conn,
@@ -810,6 +897,7 @@ final readonly class SuggestionOperations implements DriveExtension
         TextSuggestionInput|StructuralSuggestionInput $input,
         ?TextSuggestion $current,
         array $rows,
+        ?array $doc,
     ): TextSuggestion {
         $conflicted = false;
         $conflictReason = null;
@@ -818,14 +906,14 @@ final readonly class SuggestionOperations implements DriveExtension
         // Overlap conflict policy v1: an open overlapping suggestion where either side is structural
         // keeps the new suggestion in `open` with an explicit conflict while preserving original author.
         foreach ($rows as $existing) {
-            if ($existing->id === $input->id || $existing->state !== 'open') {
+            if ($existing->id === $input->id || $existing->state !== 'open' || $existing->conflictWithId === $input->id) {
                 continue;
             }
             $eitherStructural = $input instanceof StructuralSuggestionInput || $existing->isStructural();
             if (! $eitherStructural) {
                 continue;
             }
-            if ($this->overlapDetector->overlaps($input, $existing)) {
+            if ($this->overlapDetector->overlaps($input, $existing, doc: $doc)) {
                 $conflicted = true;
                 $conflictReason = 'overlap_conflict';
                 $conflictWithId = $existing->id;
@@ -834,6 +922,11 @@ final readonly class SuggestionOperations implements DriveExtension
         }
 
         $extraSelector = $input instanceof StructuralSuggestionInput ? $input->selector : [];
+        unset($extraSelector['container_anchor']);
+        $container = $this->overlapDetector->container($input, $doc);
+        if ($container !== null) {
+            $extraSelector['container_anchor'] = $container;
+        }
         $payloadArray = $input instanceof StructuralSuggestionInput
             ? $input->payload
             : ['before' => $input->before, 'after' => $input->after];
@@ -867,9 +960,11 @@ final readonly class SuggestionOperations implements DriveExtension
             ]);
         } else {
             $this->suggestions->update($query, $current, $values + ['schema_version' => $schemaVersion]);
+            $fresh = array_column($this->suggestions->read(clone $query), null, 'id');
+            $this->clearResolvedConflicts($query, $fresh, [$current->id], $fresh[$current->id], $doc);
         }
 
-        return $this->suggestions->read($this->suggestions->forDocument($conn, $documentId, $generation)->where('id', $input->id))[0];
+        return $this->suggestions->read((clone $query)->where('id', $input->id))[0];
     }
 
     /**
@@ -896,58 +991,21 @@ final readonly class SuggestionOperations implements DriveExtension
     private function acceptSnapshot(LockedDocumentMutation $locked, DocumentMutationState $state, Builder $query, array $selected, array $others): void
     {
         foreach ($selected as $row) {
-            if ($row->conflicted || $row->parentId !== null || $row->basePosition !== $state->position || $row->schemaVersion !== $state->schemaVersion) {
-                throw new SuggestionConflictException('Refresh the target or resolve its parent or conflict before accepting.');
-            }
-            if ($row->isStructural()) {
-                $input = new StructuralSuggestionInput(
-                    id: $row->id,
-                    groupId: $row->groupId,
-                    generation: $row->generation,
-                    basePosition: $row->basePosition,
-                    schemaVersion: $row->schemaVersion,
-                    kind: $row->kind,
-                    targetBlockId: $row->targetBlockId,
-                    selector: $row->targetSelector,
-                    payload: $row->payload,
-                    proposalId: $row->proposalId,
-                    parentId: $row->parentId,
-                );
-                $this->capabilitiesResolver->assertInputSupported($input);
+            if ($row->basePosition !== $state->position) {
+                throw new SuggestionConflictException('The suggestion base position is stale.');
             }
         }
 
-        $ordered = array_values($selected);
-        $count = count($ordered);
-        for ($i = 0; $i < $count; $i++) {
-            for ($j = $i + 1; $j < $count; $j++) {
-                if ($this->overlapDetector->overlaps($ordered[$i], $ordered[$j])) {
-                    throw new SuggestionConflictException('A decision cannot accept overlapping edits together.');
-                }
-            }
-        }
-
-        usort($ordered, static function (TextSuggestion $a, TextSuggestion $b): int {
-            $blockOrder = $a->targetBlockId <=> $b->targetBlockId;
-
-            return $blockOrder !== 0 ? $blockOrder : ([$b->from, $b->to] <=> [$a->from, $a->to]);
-        });
-
-        $doc = $state->content->toArray();
-        $destroyedBlockIds = [];
-        foreach ($ordered as $row) {
-            $applied = $this->structuralEditor->apply($doc, $row);
-            $doc = $applied['doc'];
-            $destroyedBlockIds = [...$destroyedBlockIds, ...$applied['destroyedBlockIds']];
-        }
-
+        $baseDoc = $state->content->toArray();
+        $applied = $this->prepareSelection($selected, $state->schemaVersion, $baseDoc);
         $codec = $this->types->get($state->type)->codec();
-        $result = $locked->replace($codec->decode($doc, $state->schemaVersion), $state->position);
-        $destroyedBlockIds = array_values(array_unique($destroyedBlockIds));
+        $result = $locked->replace($codec->decode($applied['doc'], $state->schemaVersion), $state->position);
+        $ordered = $this->orderedSelection($selected);
+        $destroyedBlockIds = $applied['destroyedBlockIds'];
 
         foreach ($others as $row) {
             if ($row->state === 'open' && $row->basePosition === $state->position && $row->schemaVersion === $state->schemaVersion) {
-                $this->rebaseAfterAccept($query, $row, $ordered, $result->position, $destroyedBlockIds);
+                $this->rebaseAfterAccept($query, $row, $ordered, $result->position, $destroyedBlockIds, $baseDoc);
             }
         }
     }
@@ -955,8 +1013,9 @@ final readonly class SuggestionOperations implements DriveExtension
     /**
      * @param  list<TextSuggestion>  $selected
      * @param  list<string>  $destroyedBlockIds
+     * @param  array<string, mixed>|null  $doc
      */
-    private function rebaseAfterAccept(Builder $query, TextSuggestion $row, array $selected, int $position, array $destroyedBlockIds): void
+    private function rebaseAfterAccept(Builder $query, TextSuggestion $row, array $selected, int $position, array $destroyedBlockIds, ?array $doc = null): void
     {
         $from = $row->from;
         $to = $row->to;
@@ -974,12 +1033,12 @@ final readonly class SuggestionOperations implements DriveExtension
                 continue;
             }
             if ($parent === null && ! $conflicted) {
-                if ($this->overlapDetector->overlaps($row, $edit, $destroyedBlockIds)) {
+                if ($this->overlapDetector->overlaps($row, $edit, $destroyedBlockIds, $doc)) {
                     $conflicted = true;
                     $conflictReason = 'overlap_conflict';
                     $conflictWithId = $edit->id;
-                } elseif (! $row->isStructural() && ! $edit->isStructural()
-                    && $edit->targetBlockId === $row->targetBlockId && $edit->to <= $from) {
+                } elseif ($this->hasTextRange($row) && ! $edit->isStructural()
+                    && $edit->targetBlockId === $row->targetBlockId && $edit->to <= $row->from) {
                     $shift = SnapshotAnchorResolver::utf16Length($edit->after) - ($edit->to - $edit->from);
                     $from += $shift;
                     $to += $shift;
@@ -1005,8 +1064,9 @@ final readonly class SuggestionOperations implements DriveExtension
     /**
      * @param  array<string, TextSuggestion>  $all
      * @param  list<string>  $rejectedIds
+     * @param  array<string, mixed>|null  $doc
      */
-    private function clearResolvedConflicts(Builder $query, array $all, array $rejectedIds): void
+    private function clearResolvedConflicts(Builder $query, array $all, array $rejectedIds, ?TextSuggestion $amended = null, ?array $doc = null): void
     {
         $rejectedLookup = array_flip($rejectedIds);
         $remainingOpen = array_filter(
@@ -1019,11 +1079,14 @@ final readonly class SuggestionOperations implements DriveExtension
                 continue;
             }
 
+            if ($amended !== null && $this->overlapDetector->overlaps($open, $amended, doc: $doc)) {
+                continue;
+            }
             $nextConflictWith = null;
             foreach ($remainingOpen as $other) {
-                if ($other->id !== $open->id
+                if ($other->id !== $open->id && $other->conflictWithId !== $open->id
                     && ($open->isStructural() || $other->isStructural())
-                    && $this->overlapDetector->overlaps($open, $other)) {
+                    && $this->overlapDetector->overlaps($open, $other, doc: $doc)) {
                     $nextConflictWith = $other->id;
                     break;
                 }
@@ -1088,27 +1151,185 @@ final readonly class SuggestionOperations implements DriveExtension
     private function buildAtomicEffects(array $selected): array
     {
         $effects = [];
-        foreach ($selected as $row) {
-            if (! $row->isStructural()) {
-                $effects[] = [
-                    'effect' => 'replace_exact',
-                    'block_id' => $row->targetBlockId,
-                    'expected' => $row->before,
-                    'replacement' => $row->after,
-                    'from_utf16' => $row->from,
-                    'to_utf16' => $row->to,
-                ];
-            } else {
-                $effects[] = [
-                    'effect' => $row->kind,
-                    'block_id' => $row->targetBlockId,
-                    'selector' => $row->targetSelector,
-                    'payload' => $row->payload,
-                ];
-            }
+        foreach ($this->orderedSelection($selected) as $row) {
+            $effects[] = [
+                'effect' => 'replace_exact',
+                'block_id' => $row->targetBlockId,
+                'expected' => $row->before,
+                'replacement' => $row->after,
+                'from_utf16' => $row->from,
+                'to_utf16' => $row->to,
+            ];
         }
 
         return $effects;
+    }
+
+    /**
+     * @param  array<string, TextSuggestion>  $selected
+     * @return list<TextSuggestion>
+     */
+    private function orderedSelection(array $selected): array
+    {
+        $ordered = array_values($selected);
+        usort($ordered, static function (TextSuggestion $a, TextSuggestion $b): int {
+            $blockOrder = $a->targetBlockId <=> $b->targetBlockId;
+
+            return $blockOrder !== 0 ? $blockOrder : ([$b->from, $b->to] <=> [$a->from, $a->to]);
+        });
+
+        return $ordered;
+    }
+
+    /**
+     * @template T
+     *
+     * @param  Closure(): T  $attempt
+     * @return T
+     */
+    private function journalWrite(OperationSpec $spec, Closure $attempt, IdempotentWrite $receipt): mixed
+    {
+        if (! $this->journalBridge->isAvailable()) {
+            throw SuggestionConflictException::because('Collaboration CommandJournal is unavailable.', 'journal_unavailable');
+        }
+
+        try {
+            return $this->runner->write($spec, $this->context->operation, $attempt, $receipt);
+        } catch (JournalProjectionPending $pending) {
+            if ($pending->marker !== null) {
+                $this->journalBridge->requestProjection($pending->marker);
+            }
+
+            throw SuggestionConflictException::because('Retry after the journal head has been projected.', 'projection_behind');
+        }
+    }
+
+    private function hasTextRange(TextSuggestion $row): bool
+    {
+        return ! $row->isStructural()
+            || $row->kind === SuggestionKind::MarkChange->value
+            || ($row->kind === SuggestionKind::AttrChange->value && ($row->payload['node_type'] ?? null) === 'link');
+    }
+
+    /**
+     * @param  array<string, TextSuggestion>  $selected
+     * @param  array<string, int>  $versions
+     */
+    private function isJournalReplay(Connection $conn, array $selected, array $versions, string $decision, string $subject, string $commandId, string $digest): bool
+    {
+        foreach ($selected as $id => $row) {
+            if ($row->journalCommandId !== $commandId) {
+                return false;
+            }
+            $provenance = $this->suggestions->readProvenance($conn, $id) ?? [];
+            $pending = $provenance['pending_journal'] ?? null;
+            if ($row->isPendingJournal() && is_array($pending)) {
+                if (($pending['decided_by_subject'] ?? null) !== $subject || ($pending['request_digest'] ?? null) !== $digest) {
+                    return false;
+                }
+            } elseif ($row->state !== $decision || $row->decidedBySubject !== $subject
+                || ($provenance['journal_request_digest'] ?? null) !== $digest
+                || ($provenance['journal_expected_version'] ?? null) !== $versions[$id]) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /** @return array<string, int> */
+    private function submittedVersions(mixed $value): array
+    {
+        $versions = [];
+        foreach (is_array($value) ? $value : [] as $id => $version) {
+            if (is_string($id) && is_int($version)) {
+                $versions[$id] = $version;
+            }
+        }
+
+        return $versions;
+    }
+
+    /** @return list<string> */
+    private function stringList(mixed $value): array
+    {
+        return is_array($value) ? array_values(array_filter($value, is_string(...))) : [];
+    }
+
+    private function saveSpec(): OperationSpec
+    {
+        return new OperationSpec('review.suggestions.save', new ModuleId('review'));
+    }
+
+    /** @param 'accept'|'reject'|'accept_group'|'reject_group' $verb */
+    private function decisionSpec(string $verb): OperationSpec
+    {
+        $module = new ModuleId('review');
+
+        return match ($verb) {
+            'accept' => new OperationSpec('review.suggestions.accept', $module),
+            'reject' => new OperationSpec('review.suggestions.reject', $module),
+            'accept_group' => new OperationSpec('review.suggestions.accept_group', $module),
+            'reject_group' => new OperationSpec('review.suggestions.reject_group', $module),
+        };
+    }
+
+    /** @return 'accept'|'reject'|'accept_group'|'reject_group' */
+    private function decisionVerb(string $decision, ?string $groupId): string
+    {
+        if ($groupId === null) {
+            return $decision === 'accepted' ? 'accept' : 'reject';
+        }
+
+        return $decision === 'accepted' ? 'accept_group' : 'reject_group';
+    }
+
+    /**
+     * @param  array<string, int>  $versions
+     * @param  list<string>|null  $ifMatch
+     * @return array<string, mixed>
+     */
+    private function decisionFingerprint(int $generation, array $versions, ?string $groupId, ?string $commandId, ?array $ifMatch = null): array
+    {
+        ksort($versions, SORT_STRING);
+
+        return ['generation' => $generation, 'versions' => $versions, 'group' => $groupId, 'command' => $commandId, 'if_match' => $ifMatch];
+    }
+
+    /**
+     * @param  list<string>|null  $ifMatch
+     * @return array<string, mixed>
+     */
+    private function saveFingerprint(TextSuggestionInput|StructuralSuggestionInput $input, ?int $expectedVersion, ?array $ifMatch): array
+    {
+        return ['suggestion' => get_object_vars($input), 'expected_version' => $expectedVersion, 'if_match' => $ifMatch];
+    }
+
+    /**
+     * @template T
+     *
+     * @param  array<string, mixed>  $fingerprint
+     * @param  Closure(LockedDocumentMutation): T  $attempt
+     * @return T
+     */
+    private function writeSnapshot(OperationSpec $spec, string $nodeId, array $fingerprint, Closure $attempt): mixed
+    {
+        return $this->runner->write(
+            $spec,
+            $this->context->operation,
+            fn (): mixed => $this->documents->in($this->driveWithoutIdempotency())->mutateForRelatedWrite($nodeId, $attempt),
+            $this->receipt($nodeId, $fingerprint),
+        );
+    }
+
+    /** @param array<string, mixed> $fingerprint */
+    private function receipt(string $nodeId, array $fingerprint): IdempotentWrite
+    {
+        return new IdempotentWrite(
+            new SuggestionReceiptCodec($nodeId),
+            new ReviewNodeReplayAuthorizer($this->context, $this->vaulter, $nodeId, Ability::Edit),
+            ['node' => $nodeId] + $fingerprint,
+        );
     }
 
     /** @param array<string, int> $versions */

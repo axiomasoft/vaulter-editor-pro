@@ -42,7 +42,7 @@ final readonly class SuggestionRepository
     /** @return array<string, mixed>|null */
     public function readProvenance(Connection $connection, string $id): ?array
     {
-        $raw = $this->query($connection)->where('id', $id)->value('provenance_json');
+        $raw = $this->query($connection)->where('id', $id)->lockForUpdate()->value('provenance_json');
         if (! is_string($raw) || $raw === '') {
             return null;
         }

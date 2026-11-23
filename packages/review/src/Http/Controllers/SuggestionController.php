@@ -14,6 +14,7 @@ use Vaulter\EditorPro\Review\Http\Requests\DecideSuggestionRequest;
 use Vaulter\EditorPro\Review\Http\Requests\SaveSuggestionRequest;
 use Vaulter\EditorPro\Review\Http\Resources\ReviewCapabilitiesResource;
 use Vaulter\EditorPro\Review\Http\Resources\SuggestionResource;
+use Vaulter\EditorPro\Review\Http\Support\SuggestionPreconditions;
 use Vaulter\EditorPro\Review\ReviewManager;
 use Vaulter\EditorPro\Review\Support\ReviewDriveHandle;
 
@@ -54,26 +55,26 @@ final readonly class SuggestionController
 
     public function store(SaveSuggestionRequest $request, string $node): JsonResponse
     {
-        // Pass withIdempotency: false so AtomicDocumentMutation runs cleanly on snapshot writes
-        // without nested OperationRunner idempotency conflicts.
-        $drive = ReviewDriveHandle::fromContext($this->vaulter, $this->contexts->resolve($request, $node), withIdempotency: false);
-        $saved = $this->review->suggestions($drive)->save($node, $request->toData(), $request->expectedVersion());
+        $drive = ReviewDriveHandle::fromContext($this->vaulter, $this->contexts->resolve($request, $node), withIdempotency: true);
+        $tags = SuggestionPreconditions::tags($request);
+        $saved = $this->review->suggestions($drive)->save($node, $request->toData(), $request->expectedVersion(), $tags);
 
         return (new SuggestionResource($saved))
             ->response()
-            ->setStatusCode($request->expectedVersion() === 0 ? 201 : 200)
+            ->setStatusCode($saved->version === 1 ? 201 : 200)
             ->setEtag($saved->etag());
     }
 
     public function accept(DecideSuggestionRequest $request, string $node, string $suggestion): JsonResponse
     {
-        $drive = ReviewDriveHandle::fromContext($this->vaulter, $this->contexts->resolve($request, $node), withIdempotency: false);
+        $drive = ReviewDriveHandle::fromContext($this->vaulter, $this->contexts->resolve($request, $node), withIdempotency: true);
         $resolved = $this->review->suggestions($drive)->accept(
             $node,
             $suggestion,
             $request->generation(),
             $request->expectedVersion(),
             $request->commandId(),
+            SuggestionPreconditions::tags($request),
         );
 
         return (new SuggestionResource($resolved))
@@ -84,13 +85,14 @@ final readonly class SuggestionController
 
     public function reject(DecideSuggestionRequest $request, string $node, string $suggestion): JsonResponse
     {
-        $drive = ReviewDriveHandle::fromContext($this->vaulter, $this->contexts->resolve($request, $node), withIdempotency: false);
+        $drive = ReviewDriveHandle::fromContext($this->vaulter, $this->contexts->resolve($request, $node), withIdempotency: true);
         $resolved = $this->review->suggestions($drive)->reject(
             $node,
             $suggestion,
             $request->generation(),
             $request->expectedVersion(),
             $request->commandId(),
+            SuggestionPreconditions::tags($request),
         );
 
         return (new SuggestionResource($resolved))
@@ -101,13 +103,14 @@ final readonly class SuggestionController
 
     public function acceptGroup(DecideSuggestionRequest $request, string $node, string $group): JsonResponse
     {
-        $drive = ReviewDriveHandle::fromContext($this->vaulter, $this->contexts->resolve($request, $node), withIdempotency: false);
+        $drive = ReviewDriveHandle::fromContext($this->vaulter, $this->contexts->resolve($request, $node), withIdempotency: true);
         $items = $this->review->suggestions($drive)->acceptGroup(
             $node,
             $group,
             $request->generation(),
             $request->expectedVersions(),
             $request->commandId(),
+            SuggestionPreconditions::tags($request),
         );
 
         $pending = $items !== [] && $items[0]->isPendingJournal();
@@ -122,13 +125,14 @@ final readonly class SuggestionController
 
     public function rejectGroup(DecideSuggestionRequest $request, string $node, string $group): JsonResponse
     {
-        $drive = ReviewDriveHandle::fromContext($this->vaulter, $this->contexts->resolve($request, $node), withIdempotency: false);
+        $drive = ReviewDriveHandle::fromContext($this->vaulter, $this->contexts->resolve($request, $node), withIdempotency: true);
         $items = $this->review->suggestions($drive)->rejectGroup(
             $node,
             $group,
             $request->generation(),
             $request->expectedVersions(),
             $request->commandId(),
+            SuggestionPreconditions::tags($request),
         );
 
         $pending = $items !== [] && $items[0]->isPendingJournal();

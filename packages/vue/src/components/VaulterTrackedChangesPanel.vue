@@ -89,7 +89,7 @@ function switchProjection(mode: TrackedProjection): void {
 async function handleAccept(item: DocumentSuggestion): Promise<void> {
   if (!canAccept(item)) return
   try {
-    const updated = await accept(item.id, item.generation || props.generation, item.version)
+    const updated = await accept(item.id, item.generation ?? props.generation, item.version)
     emit('accepted', updated)
   } catch {
     // Error ref is populated by useTrackedChanges for alert rendering.
@@ -99,7 +99,7 @@ async function handleAccept(item: DocumentSuggestion): Promise<void> {
 async function handleReject(item: DocumentSuggestion): Promise<void> {
   if (!canReject(item)) return
   try {
-    const updated = await reject(item.id, item.generation || props.generation, item.version)
+    const updated = await reject(item.id, item.generation ?? props.generation, item.version)
     emit('rejected', updated)
   } catch {
     // Error ref is populated by useTrackedChanges for alert rendering.
@@ -108,7 +108,7 @@ async function handleReject(item: DocumentSuggestion): Promise<void> {
 
 async function handleAcceptGroup(groupId: string, items: DocumentSuggestion[]): Promise<void> {
   if (items.some(i => !canAccept(i))) return
-  const gen = items[0]?.generation || props.generation
+  const gen = items[0]?.generation ?? props.generation
   const versions = Object.fromEntries(items.map(i => [i.id, i.version]))
   try {
     const updated = await acceptGroup(groupId, gen, versions)
@@ -120,7 +120,7 @@ async function handleAcceptGroup(groupId: string, items: DocumentSuggestion[]): 
 
 async function handleRejectGroup(groupId: string, items: DocumentSuggestion[]): Promise<void> {
   if (items.some(i => !canReject(i))) return
-  const gen = items[0]?.generation || props.generation
+  const gen = items[0]?.generation ?? props.generation
   const versions = Object.fromEntries(items.map(i => [i.id, i.version]))
   try {
     const updated = await rejectGroup(groupId, gen, versions)

@@ -38,9 +38,9 @@ final class SaveSuggestionRequest extends VaulterFormRequest
         ];
     }
 
-    public function expectedVersion(): int
+    public function expectedVersion(): ?int
     {
-        return self::intVal($this->input('expected_version', 0));
+        return $this->has('expected_version') ? self::intVal($this->input('expected_version')) : null;
     }
 
     public function toData(): TextSuggestionInput|StructuralSuggestionInput

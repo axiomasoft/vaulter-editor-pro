@@ -38,10 +38,10 @@ final readonly class ReviewLookup
     }
 
     /**
-     * Resolve the owning document row (`id`, `tenant_id`, `type`, `write_mode`, `collab_epoch`, `state_version`, `schema_version`)
+     * Resolve the owning document row (`id`, `tenant_id`, `collab_epoch`, `state_version`, `schema_version`)
      * for a node key.
      *
-     * @return array{id: int|string, tenant_id: int|string, type: string, write_mode: string, collab_epoch: int, state_version: int, schema_version: int}
+     * @return array{id: int|string, tenant_id: int|string, collab_epoch: int, state_version: int, schema_version: int}
      */
     public function documentForNode(int|string $nodeId): array
     {
@@ -52,7 +52,7 @@ final readonly class ReviewLookup
         $row = $this->connection()
             ->table($this->table('documents'))
             ->where('node_id', $nodeId)
-            ->first(['id', 'tenant_id', 'type', 'write_mode', 'collab_epoch', 'state_version', 'schema_version']);
+            ->first(['id', 'tenant_id', 'collab_epoch', 'state_version', 'schema_version']);
 
         if (! $row instanceof stdClass) {
             throw InvalidCommentStateException::targetIsNotDocument();
@@ -70,8 +70,6 @@ final readonly class ReviewLookup
         return [
             'id' => $rawDocId,
             'tenant_id' => $this->normalizeTenantId($rawTenantId),
-            'type' => is_string($row->type ?? null) ? $row->type : '',
-            'write_mode' => is_string($row->write_mode ?? null) ? $row->write_mode : 'snapshot',
             'collab_epoch' => is_numeric($row->collab_epoch ?? null) ? (int) $row->collab_epoch : 0,
             'state_version' => is_numeric($row->state_version ?? null) ? (int) $row->state_version : 0,
             'schema_version' => is_numeric($row->schema_version ?? null) ? (int) $row->schema_version : 1,
