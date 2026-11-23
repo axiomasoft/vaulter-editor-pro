@@ -1,14 +1,59 @@
-# Root scaffold. Package trees arrive in later waves; until then there is no PHP under this root.
-# Vendor extensions are intentionally not included: nothing is installed yet.
+includes:
+    - vendor/larastan/larastan/extension.neon
+    - vendor/phpstan/phpstan-strict-rules/rules.neon
+    - vendor/spaze/phpstan-disallowed-calls/extension.neon
+
+rules:
+    - Vaulter\EditorPro\Ci\EditorProSqlStopRail
 
 parameters:
     level: max
     tmpDir: build/phpstan
     paths:
-        - .
+        - packages/review/src
+        - packages/review/database
+        - scripts/ci
     excludePaths:
         - vendor/*
         - node_modules/*
         - .github/*
         - release/*
+        - build/*
     inferPrivatePropertyTypeFromConstructor: true
+
+    ignoreErrors:
+        # Larastan marks forwarded Eloquent magic methods as static, colliding with phpstan-strict-rules.
+        -
+            identifier: staticMethod.dynamicCall
+            message: '#^Dynamic call to static method Illuminate\\Database\\Eloquent\\(Builder|Model)#'
+
+    disallowedStaticCalls:
+        -
+            method: 'Illuminate\Support\Facades\DB::transaction()'
+            message: 'Use VaulterDatabase::transaction().'
+
+    disallowedMethodCalls:
+        -
+            method: 'Illuminate\Database\Connection::transaction()'
+            message: 'Use VaulterDatabase::transaction().'
+        -
+            method: 'Illuminate\Database\ConnectionInterface::transaction()'
+            message: 'Use VaulterDatabase::transaction().'
+        -
+            method: 'ZipArchive::extractTo()'
+            message: 'Inspect a bounded ZIP directory before reading entries.'
+
+    disallowedFunctionCalls:
+        -
+            function: 'parse_url()'
+            message: 'Use Uri\WhatWg\Url or purpose-specific validation.'
+        -
+            function: 'env()'
+            message: 'Read environment variables from configuration files.'
+            allowIn:
+                - '*/config/*.php'
+
+    disallowedConstants:
+        -
+            constant: CURLOPT_RESOLVE
+            message: 'Pin connections explicitly without CURLOPT_RESOLVE.'

@@ -1,0 +1,197 @@
+import { inject, provide, type InjectionKey } from 'vue'
+import type {
+  AnchoredComment,
+  CommentAnchorInput,
+  CommentFilterStatus,
+  CursorPage,
+  PinReason,
+  RevisionCompare,
+  RevisionPin,
+  RevisionPreview,
+} from '../types/review'
+
+export interface ReviewClientOptions {
+  /** Base URL of the Vaulter REST API v1 prefix (default: `/api/vaulter/v1`). */
+  baseUrl?: string
+  /** Extra request headers or header factory. */
+  headers?: Record<string, string> | (() => Record<string, string>)
+  /** Optional CSRF token sent as `X-CSRF-TOKEN`. */
+  csrfToken?: string
+  /** Custom `fetch` implementation. */
+  fetch?: typeof fetch
+}
+
+export class ReviewApiError extends Error {
+  readonly status: number
+  readonly code: string
+  readonly title: string
+  readonly detail?: string
+
+  constructor(init: { status: number; code: string; title: string; detail?: string }) {
+    super(init.detail || init.title || `HTTP ${init.status}`)
+    this.name = 'ReviewApiError'
+    this.status = init.status
+    this.code = init.code
+    this.title = init.title
+    this.detail = init.detail
+  }
+}
+
+export interface AddAnchoredCommentPayload {
+  body: string
+  parent_id?: string | null
+  anchor?: CommentAnchorInput | null
+}
+
+export interface ReviewClient {
+  pins: {
+    list(nodeId: string, includeExpired?: boolean): Promise<RevisionPin[]>
+    pin(nodeId: string, revisionId: string, input?: { pin_reason?: PinReason; expires_at?: string | null }): Promise<RevisionPin>
+    unpin(nodeId: string, revisionId: string, releaseRetention?: boolean): Promise<void>
+    preview(nodeId: string, revisionId: string): Promise<RevisionPreview>
+    compare(nodeId: string, fromRevisionId: string, toRevisionId?: string | null): Promise<RevisionCompare>
+  }
+  comments: {
+    list(nodeId: string, query?: { status?: CommentFilterStatus; cursor?: string | null; per_page?: number }): Promise<CursorPage<AnchoredComment>>
+    add(nodeId: string, input: AddAnchoredCommentPayload, idempotencyKey?: string): Promise<AnchoredComment>
+    resolve(nodeId: string, commentId: string, etag: string, idempotencyKey?: string): Promise<AnchoredComment>
+    reopen(nodeId: string, commentId: string, etag: string, idempotencyKey?: string): Promise<AnchoredComment>
+    reanchor(nodeId: string, commentId: string, anchor: CommentAnchorInput, anchorEtag: string, idempotencyKey?: string): Promise<AnchoredComment>
+    remove(nodeId: string, commentId: string, etag: string): Promise<void>
+  }
+}
+
+function buildQueryString(query?: Record<string, string | number | boolean | null | undefined>): string {
+  if (!query) {
+    return ''
+  }
+  const params = new URLSearchParams()
+  for (const [k, v] of Object.entries(query)) {
+    if (v !== undefined && v !== null) {
+      params.append(k, String(v))
+    }
+  }
+  const s = params.toString()
+  return s ? `?${s}` : ''
+}
+
+export function createReviewClient(options: ReviewClientOptions = {}): ReviewClient {
+  const baseUrl = (options.baseUrl ?? '/api/vaulter/v1').replace(/\/+$/, '')
+  const fetchImpl = options.fetch ?? globalThis.fetch.bind(globalThis)
+
+  async function request<T>(
+    method: string,
+    path: string,
+    init?: {
+      query?: Record<string, string | number | boolean | null | undefined>
+      json?: unknown
+      etag?: string
+      idempotencyKey?: string
+    },
+  ): Promise<T> {
+    const provided = typeof options.headers === 'function' ? options.headers() : options.headers ?? {}
+    const headers: Record<string, string> = {
+      Accept: 'application/json',
+      ...provided,
+      ...(options.csrfToken ? { 'X-CSRF-TOKEN': options.csrfToken } : {}),
+      ...(init?.json !== undefined ? { 'Content-Type': 'application/json' } : {}),
+      ...(init?.etag ? { 'If-Match': init.etag } : {}),
+      ...(init?.idempotencyKey ? { 'Idempotency-Key': init.idempotencyKey } : {}),
+    }
+
+    const res = await fetchImpl(`${baseUrl}${path}${buildQueryString(init?.query)}`, {
+      method,
+      credentials: 'same-origin',
+      headers,
+      body: init?.json !== undefined ? JSON.stringify(init.json) : undefined,
+    })
+
+    if (!res.ok) {
+      let body: Record<string, unknown> = {}
+      try {
+        body = (await res.json()) as Record<string, unknown>
+      } catch {
+        // non-JSON problem response
+      }
+      throw new ReviewApiError({
+        status: res.status,
+        code: typeof body.code === 'string' ? body.code : `http_${res.status}`,
+        title: typeof body.title === 'string' ? body.title : res.statusText || 'Request failed',
+        detail: typeof body.detail === 'string' ? body.detail : undefined,
+      })
+    }
+
+    if (res.status === 204) {
+      return undefined as T
+    }
+
+    return (await res.json()) as T
+  }
+
+  return {
+    pins: {
+      list: async (nodeId, includeExpired) =>
+        (await request<{ data: RevisionPin[] }>('GET', `/review/documents/${nodeId}/pins`, {
+          query: includeExpired ? { include_expired: true } : undefined,
+        })).data,
+      pin: async (nodeId, revisionId, input) =>
+        (await request<{ data: RevisionPin }>('POST', `/review/documents/${nodeId}/revisions/${revisionId}/pin`, {
+          json: input ?? {},
+        })).data,
+      unpin: (nodeId, revisionId, releaseRetention) =>
+        request<void>('DELETE', `/review/documents/${nodeId}/revisions/${revisionId}/pin`, {
+          query: releaseRetention ? { release_retention: true } : undefined,
+        }),
+      preview: async (nodeId, revisionId) =>
+        (await request<{ data: RevisionPreview }>('GET', `/review/documents/${nodeId}/revisions/${revisionId}/preview`)).data,
+      compare: async (nodeId, fromRevisionId, toRevisionId) =>
+        (await request<{ data: RevisionCompare }>('GET', `/review/documents/${nodeId}/compare`, {
+          query: { from: fromRevisionId, ...(toRevisionId ? { to: toRevisionId } : {}) },
+        })).data,
+    },
+    comments: {
+      list: (nodeId, query) =>
+        request<CursorPage<AnchoredComment>>('GET', `/review/nodes/${nodeId}/comments`, {
+          query: query ? { status: query.status, cursor: query.cursor, per_page: query.per_page } : undefined,
+        }),
+      add: async (nodeId, input, idempotencyKey) =>
+        (await request<{ data: AnchoredComment }>('POST', `/review/nodes/${nodeId}/comments`, {
+          json: input,
+          idempotencyKey,
+        })).data,
+      resolve: async (nodeId, commentId, etag, idempotencyKey) =>
+        (await request<{ data: AnchoredComment }>('POST', `/review/nodes/${nodeId}/comments/${commentId}/resolve`, {
+          etag,
+          idempotencyKey,
+        })).data,
+      reopen: async (nodeId, commentId, etag, idempotencyKey) =>
+        (await request<{ data: AnchoredComment }>('POST', `/review/nodes/${nodeId}/comments/${commentId}/reopen`, {
+          etag,
+          idempotencyKey,
+        })).data,
+      reanchor: async (nodeId, commentId, anchor, anchorEtag, idempotencyKey) =>
+        (await request<{ data: AnchoredComment }>('POST', `/review/nodes/${nodeId}/comments/${commentId}/reanchor`, {
+          json: anchor,
+          etag: anchorEtag,
+          idempotencyKey,
+        })).data,
+      remove: (nodeId, commentId, etag) =>
+        request<void>('DELETE', `/review/nodes/${nodeId}/comments/${commentId}`, { etag }),
+    },
+  }
+}
+
+export const vaulterReviewClientKey: InjectionKey<ReviewClient> = Symbol('vaulter.review.client')
+
+export function provideReviewClient(clientOrOptions?: ReviewClient | ReviewClientOptions): ReviewClient {
+  const client = clientOrOptions && 'comments' in clientOrOptions
+    ? clientOrOptions
+    : createReviewClient(clientOrOptions)
+  provide(vaulterReviewClientKey, client)
+  return client
+}
+
+export function useReviewClient(): ReviewClient {
+  const injected = inject(vaulterReviewClientKey, null)
+  return injected ?? createReviewClient()
+}

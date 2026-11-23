@@ -1,0 +1,48 @@
+<?php
+
+declare(strict_types=1);
+
+namespace Vaulter\EditorPro\Review\Idempotency;
+
+use Packman\Attributes\Internal;
+use Vaulter\Drive\Enums\Access\Ability;
+use Vaulter\Drive\Enums\DriveStatus;
+use Vaulter\Drive\Exceptions\Access\PermissionDeniedException;
+use Vaulter\Drive\Exceptions\DriveArchivedException;
+use Vaulter\Drive\Operations\DriveContext;
+use Vaulter\Drive\Vaulter;
+use Vaulter\EditorPro\Review\Support\ReviewDriveHandle;
+use Vaulter\Idempotency\ReplayAuthorizer;
+use Vaulter\Idempotency\ResourceRef;
+
+/** Re-authorizes idempotent replay for revision pin/unpin operations. */
+#[Internal]
+final readonly class RevisionPinReplayAuthorizer implements ReplayAuthorizer
+{
+    public function __construct(
+        private DriveContext $context,
+        private Vaulter $vaulter,
+        private string $nodeId,
+        private Ability $requiredAbility,
+    ) {}
+
+    public function scope(mixed $result): ResourceRef
+    {
+        return new ResourceRef('node', $this->nodeId);
+    }
+
+    public function authorize(?ResourceRef $resource, ?ResourceRef $scope): void
+    {
+        $targetNodeId = $resource?->kind === 'node' ? $resource->id : ($scope?->kind === 'node' ? $scope->id : $this->nodeId);
+        $drive = ReviewDriveHandle::fromContext($this->vaulter, $this->context);
+        if ($drive->snapshot()->status !== DriveStatus::Active) {
+            throw DriveArchivedException::forDrive($drive->snapshot()->id);
+        }
+
+        $drive->nodes()->find($targetNodeId);
+        $abilities = $drive->nodes()->abilities($targetNodeId)->flags;
+        if (! ($abilities[$this->requiredAbility->value] ?? false)) {
+            throw PermissionDeniedException::forAbility($this->requiredAbility->value);
+        }
+    }
+}

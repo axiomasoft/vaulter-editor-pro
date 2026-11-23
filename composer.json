@@ -25,18 +25,86 @@
                     "axiomasoft/vaulter-editor-pro-exchange": "1.0.x-dev"
                 }
             }
+        },
+        {
+            "type": "path",
+            "url": "../vaulter/packages/*",
+            "options": {
+                "symlink": true,
+                "versions": {
+                    "axiomasoft/vaulter-collaboration": "1.0.x-dev",
+                    "axiomasoft/vaulter-core": "1.0.x-dev",
+                    "axiomasoft/vaulter-documents": "1.0.x-dev",
+                    "axiomasoft/vaulter-drive": "1.0.x-dev",
+                    "axiomasoft/vaulter-media": "1.0.x-dev"
+                }
+            }
+        },
+        {
+            "type": "path",
+            "url": "../packman/packages/*",
+            "options": {
+                "symlink": true,
+                "versions": {
+                    "axiomasoft/packman": "0.1.2",
+                    "axiomasoft/packman-devtools": "0.1.2",
+                    "axiomasoft/packman-plugins": "0.1.2",
+                    "axiomasoft/packman-schema": "0.1.2",
+                    "axiomasoft/packman-testkit": "0.1.2"
+                }
+            }
         }
     ],
     "require": {
-        "php": ">=8.4 <8.6"
+        "php": ">=8.4 <8.6",
+        "axiomasoft/vaulter-editor-pro-review": "^1.0"
+    },
+    "require-dev": {
+        "axiomasoft/packman-testkit": "^0.1",
+        "axiomasoft/vaulter-collaboration": "^1.0",
+        "axiomasoft/vaulter-drive": "^1.0",
+        "axiomasoft/vaulter-media": "^1.0",
+        "larastan/larastan": "^3.15",
+        "laravel/pint": "^1.32",
+        "orchestra/testbench": "^11.3",
+        "pestphp/pest": "^5.2",
+        "phpstan/phpstan": "^2.2.16 <2.3.6",
+        "phpstan/phpstan-strict-rules": "^2.0.12",
+        "spaze/phpstan-disallowed-calls": "^4.15.1"
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "Vaulter\\EditorPro\\Ci\\": "scripts/ci/",
+            "Vaulter\\EditorPro\\Review\\Tests\\": "packages/review/tests/"
+        }
+    },
+    "extra": {
+        "phpstan/extension-installer": {
+            "ignore": [
+                "larastan/larastan",
+                "nesbot/carbon",
+                "pestphp/pest",
+                "phpstan/phpstan-strict-rules",
+                "spaze/phpstan-disallowed-calls"
+            ]
+        }
     },
     "minimum-stability": "dev",
     "prefer-stable": true,
     "config": {
-        "sort-packages": true
+        "process-timeout": 1800,
+        "sort-packages": true,
+        "allow-plugins": {
+            "pestphp/pest-plugin": true,
+            "php-http/discovery": false,
+            "phpstan/extension-installer": true,
+            "tbachert/spi": false
+        }
     },
     "scripts": {
-        "test": "@php vendor/bin/phpunit -c phpunit.xml.dist",
-        "phpstan": "@php vendor/bin/phpstan analyse -c phpstan.neon.dist --no-progress"
+        "lint": "@php vendor/bin/pint",
+        "lint:check": "@php vendor/bin/pint --test",
+        "test": "@php vendor/bin/pest -c phpunit.xml.dist --test-directory=packages/review/tests",
+        "phpstan": "@php vendor/bin/phpstan analyse -c phpstan.neon.dist --memory-limit=1G --no-progress"
     }
 }
