@@ -1,0 +1,294 @@
+{
+  "id": "D1",
+  "title": "Body and Table 2x2 Merge",
+  "sourceMarker": {
+    "nodeId": "corpus-d1",
+    "generation": 1,
+    "position": 10,
+    "schemaVersion": 2,
+    "contentHash": "corpus-d1-v1"
+  },
+  "document": {
+    "type": "doc",
+    "content": [
+      {
+        "type": "heading",
+        "attrs": {
+          "blockId": "d1_h1",
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "D1 Contract Schedule"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "attrs": {
+          "blockId": "d1_p1",
+          "textAlign": "center",
+          "indent": 24,
+          "spacingBefore": 12,
+          "spacingAfter": 6
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Plain clause "
+          },
+          {
+            "type": "text",
+            "text": "Bold clause",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "text": " and "
+          },
+          {
+            "type": "text",
+            "text": "External ref",
+            "marks": [
+              {
+                "type": "link",
+                "attrs": {
+                  "href": "https://example.test/d1-spec"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "attrs": {
+                  "blockId": "d1_b1"
+                },
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Bullet item one"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "attrs": {
+                  "blockId": "d1_b2"
+                },
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Bullet item two"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "orderedList",
+        "attrs": {
+          "start": 3
+        },
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "attrs": {
+                  "blockId": "d1_o1"
+                },
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Ordered start three"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "attrs": {
+                  "blockId": "d1_o2"
+                },
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Ordered four"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "table",
+        "attrs": {
+          "blockId": "d1_tbl",
+          "width": 360,
+          "gridColsDxa": [
+            1800,
+            1800,
+            1800
+          ]
+        },
+        "content": [
+          {
+            "type": "tableRow",
+            "attrs": {
+              "isHeader": true,
+              "height": 24,
+              "heightRule": "atLeast"
+            },
+            "content": [
+              {
+                "type": "tableHeader",
+                "attrs": {
+                  "colspan": 2,
+                  "rowspan": 2,
+                  "colwidth": [
+                    120,
+                    120
+                  ],
+                  "background": "#ddeeff",
+                  "verticalAlign": "middle"
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "attrs": {
+                      "blockId": "d1_merged"
+                    },
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Bold merged cell ",
+                        "marks": [
+                          {
+                            "type": "bold"
+                          }
+                        ]
+                      },
+                      {
+                        "type": "text",
+                        "text": "Clause link",
+                        "marks": [
+                          {
+                            "type": "bold"
+                          },
+                          {
+                            "type": "link",
+                            "attrs": {
+                              "href": "https://example.test/merged-cell"
+                            }
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": [
+                    120
+                  ]
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "attrs": {
+                      "blockId": "d1_r1c3"
+                    },
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Row 1 side cell"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": [
+                    120
+                  ]
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "attrs": {
+                      "blockId": "d1_r2c3"
+                    },
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Row 2 side cell"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "attrs": {
+          "blockId": "d1_p2"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Line one"
+          },
+          {
+            "type": "hardBreak"
+          },
+          {
+            "type": "text",
+            "text": "Line two"
+          }
+        ]
+      }
+    ]
+  }
+}

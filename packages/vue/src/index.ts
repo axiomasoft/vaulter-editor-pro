@@ -67,7 +67,17 @@ export { isDetachedAnchor, useRangeComments } from './composables/useRangeCommen
 export type { CommentThreadItem, UseRangeCommentsOptions, UseRangeCommentsReturn } from './composables/useRangeComments'
 export { useRevisionCompare } from './composables/useRevisionCompare'
 export type { UseRevisionCompareOptions, UseRevisionCompareReturn } from './composables/useRevisionCompare'
+export { DOCX_MIME_TYPE, LocalDocxExportError, useLocalDocxExport } from './composables/useLocalDocxExport'
+export type {
+  LocalDocxExportErrorCode,
+  LocalDocxExportOutput,
+  LocalDocxSource,
+  UseLocalDocxExportOptions,
+  UseLocalDocxExportReturn,
+} from './composables/useLocalDocxExport'
+export { attachDocxWorkerListener } from './docx/localExportWorker'
 
 // Components
 export { default as VaulterHistoryCompare } from './components/VaulterHistoryCompare.vue'
 export { default as VaulterRangeComments } from './components/VaulterRangeComments.vue'
+export { default as VaulterLocalDocxExport } from './components/VaulterLocalDocxExport.vue'

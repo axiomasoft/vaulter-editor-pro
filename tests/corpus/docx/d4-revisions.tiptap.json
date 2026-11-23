@@ -1,0 +1,147 @@
+{
+  "id": "D4",
+  "title": "Tracked Revisions Replacement Group and Formatting Loss Report",
+  "sourceMarker": {
+    "nodeId": "corpus-d4",
+    "generation": 3,
+    "position": 42,
+    "schemaVersion": 2,
+    "contentHash": "corpus-d4-v1"
+  },
+  "document": {
+    "type": "doc",
+    "content": [
+      {
+        "type": "paragraph",
+        "attrs": {
+          "blockId": "d4_p42"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Payment term "
+          },
+          {
+            "type": "text",
+            "text": "15",
+            "marks": [
+              {
+                "type": "suggestion",
+                "attrs": {
+                  "id": "rev-del-15",
+                  "type": "replaceDeletion",
+                  "groupId": "grp-term-42",
+                  "userId": "reviewer-1",
+                  "createdAt": "2026-11-21T10:00:00Z",
+                  "userMetadata": {
+                    "name": "Synthetic Reviewer"
+                  }
+                }
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "text": "30",
+            "marks": [
+              {
+                "type": "suggestion",
+                "attrs": {
+                  "id": "rev-ins-30",
+                  "type": "replaceInsertion",
+                  "groupId": "grp-term-42",
+                  "userId": "reviewer-1",
+                  "createdAt": "2026-11-21T10:00:00Z",
+                  "userMetadata": {
+                    "name": "Synthetic Reviewer"
+                  }
+                }
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "text": " days "
+          },
+          {
+            "type": "text",
+            "text": " only ",
+            "marks": [
+              {
+                "type": "suggestion",
+                "attrs": {
+                  "id": "rev-del-spaces",
+                  "type": "delete",
+                  "userId": "reviewer-1",
+                  "createdAt": "2026-11-21T10:01:00Z",
+                  "userMetadata": {
+                    "name": "Synthetic Reviewer"
+                  }
+                }
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "text": "added clause",
+            "marks": [
+              {
+                "type": "suggestion",
+                "attrs": {
+                  "id": "rev-ins-clause",
+                  "type": "add",
+                  "userId": "editor-2",
+                  "createdAt": "2026-11-21T10:02:00Z",
+                  "userMetadata": {
+                    "name": "Synthetic Editor"
+                  }
+                }
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "attrs": {
+          "blockId": "d4_p43",
+          "blockJoinDeletion": {
+            "id": "rev-join-1",
+            "author": "Synthetic Reviewer",
+            "date": "2026-11-21T10:03:00Z"
+          }
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Bold formatting proposal",
+            "marks": [
+              {
+                "type": "bold"
+              },
+              {
+                "type": "suggestion",
+                "attrs": {
+                  "id": "rev-fmt-bold",
+                  "type": "markChange",
+                  "userId": "editor-2",
+                  "createdAt": "2026-11-21T10:04:00Z",
+                  "userMetadata": {
+                    "name": "Synthetic Editor"
+                  },
+                  "markChanges": [
+                    {
+                      "operation": "added",
+                      "markName": "bold",
+                      "markAttrs": {}
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

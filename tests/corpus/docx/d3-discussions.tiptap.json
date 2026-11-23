@@ -1,0 +1,146 @@
+{
+  "id": "D3",
+  "title": "Threaded Range Comments and Detached Discussion",
+  "sourceMarker": {
+    "nodeId": "corpus-d3",
+    "generation": 2,
+    "position": 30,
+    "schemaVersion": 2,
+    "contentHash": "corpus-d3-v1"
+  },
+  "document": {
+    "type": "doc",
+    "content": [
+      {
+        "type": "paragraph",
+        "attrs": {
+          "blockId": "d3_p1"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Clause prefix "
+          },
+          {
+            "type": "text",
+            "text": "Annotated clause",
+            "marks": [
+              {
+                "type": "inlineThread",
+                "attrs": {
+                  "data-thread-id": "thread-resolved"
+                }
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "text": " suffix."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "attrs": {
+          "blockId": "d3_p2"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Active range ",
+            "marks": []
+          },
+          {
+            "type": "text",
+            "text": "review target",
+            "marks": [
+              {
+                "type": "inlineThread",
+                "attrs": {
+                  "data-thread-id": "thread-open"
+                }
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "text": "."
+          }
+        ]
+      }
+    ]
+  },
+  "discussions": [
+    {
+      "id": "thread-resolved",
+      "anchorState": "attached",
+      "quoteText": "Annotated clause",
+      "blockId": "d3_p1",
+      "sourcePosition": 14,
+      "generation": 2,
+      "resolved": true,
+      "comments": [
+        {
+          "id": "c-root-1",
+          "author": "Reviewer One",
+          "initials": "RO",
+          "createdAt": "2026-11-21T09:00:00Z",
+          "body": "Root comment on clause",
+          "originalWId": 7,
+          "originalDurableId": "000000AF"
+        },
+        {
+          "id": "c-reply-1",
+          "parentId": "c-root-1",
+          "author": "Editor Two",
+          "initials": "ET",
+          "createdAt": "2026-11-21T09:05:00Z",
+          "body": "Reply confirming resolution",
+          "originalWId": 8,
+          "originalDurableId": "000000BF"
+        }
+      ]
+    },
+    {
+      "id": "thread-open",
+      "anchorState": "attached",
+      "quoteText": "review target",
+      "blockId": "d3_p2",
+      "sourcePosition": 13,
+      "generation": 2,
+      "resolved": false,
+      "comments": [
+        {
+          "id": "c-root-2",
+          "author": "Reviewer One",
+          "createdAt": "2026-11-21T09:10:00Z",
+          "body": "Open thread awaiting edit"
+        }
+      ]
+    },
+    {
+      "id": "thread-detached",
+      "anchorState": "detached",
+      "quoteText": "Removed target phrase",
+      "blockId": "d3_deleted_blk",
+      "sourcePosition": 4,
+      "generation": 1,
+      "resolved": false,
+      "comments": [
+        {
+          "id": "c-detached-root",
+          "author": "Reviewer One",
+          "createdAt": "2026-11-21T08:30:00Z",
+          "body": "Detached discussion preserved after deletion"
+        },
+        {
+          "id": "c-detached-reply",
+          "parentId": "c-detached-root",
+          "author": "Editor Two",
+          "createdAt": "2026-11-21T08:35:00Z",
+          "body": "Reply preserved on detached thread"
+        }
+      ]
+    }
+  ]
+}

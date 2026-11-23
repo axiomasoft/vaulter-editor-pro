@@ -1,0 +1,85 @@
+{
+  "id": "D2",
+  "title": "Multi-Section Headers Footers Inheritance and Page Break",
+  "sourceMarker": {
+    "nodeId": "corpus-d2",
+    "generation": 1,
+    "position": 20,
+    "schemaVersion": 2,
+    "contentHash": "corpus-d2-v1"
+  },
+  "document": {
+    "type": "doc",
+    "content": [
+      {
+        "type": "paragraph",
+        "attrs": {
+          "blockId": "d2_s1_p1"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Section one body paragraph"
+          }
+        ]
+      },
+      {
+        "type": "sectionBreak",
+        "attrs": {
+          "id": "sec_1"
+        }
+      },
+      {
+        "type": "paragraph",
+        "attrs": {
+          "blockId": "d2_s2_p1"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Section two opening paragraph"
+          }
+        ]
+      },
+      {
+        "type": "pageBreak"
+      },
+      {
+        "type": "paragraph",
+        "attrs": {
+          "blockId": "d2_s2_p2"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Section two after explicit page break"
+          }
+        ]
+      }
+    ]
+  },
+  "sections": [
+    {
+      "id": "sec_1",
+      "type": "nextPage",
+      "titlePg": false,
+      "headers": {
+        "default": "Section 1 default header",
+        "even": "Section 1 even header"
+      },
+      "footers": {
+        "default": "Shared default footer"
+      }
+    },
+    {
+      "id": "sec_2",
+      "type": "nextPage",
+      "titlePg": true,
+      "headers": {
+        "default": "Section 2 default header",
+        "first": "Section 2 first header"
+      },
+      "footers": {}
+    }
+  ]
+}
