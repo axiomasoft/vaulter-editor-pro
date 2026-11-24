@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto'
+import { lstat, readFile, writeFile } from 'node:fs/promises'
 import { exportDocx, importDocx, nodeZipReader, setDefaultZipReader } from './node'
 import { DocxProfileBlockedError, LossReportBuilder } from './model/lossReport'
 import { DOCX_PROFILE_IDS } from './model/profiles'
@@ -25,6 +26,8 @@ export interface DocxCliRequest {
   profile_id?: string
   projection?: DocxProjectionMode
   docx_b64?: string
+  docx_path?: string
+  output_path?: string
   document?: TipTapDoc
   sections?: DocxSectionInput[]
   discussions?: DocxDiscussionInput[]
@@ -60,6 +63,7 @@ export interface DocxCliSuccessResponse {
   blocked: boolean
   source_sha256?: string
   docx_b64?: string
+  docx_path?: string
   docx_sha256?: string
   document?: TipTapDoc
   sections_count?: number
@@ -118,10 +122,26 @@ export async function handleExchangeCliRequest(rawJson: string): Promise<string>
     const opts = parsed.options ?? {}
 
     if (parsed.operation === 'import') {
-      if (typeof parsed.docx_b64 !== 'string' || parsed.docx_b64.length === 0) {
-        throw new DocxCliInputError('invalid_request', 'Missing docx_b64 for import operation.')
+      let bytes: Buffer
+      if (typeof parsed.docx_path === 'string' && parsed.docx_path.length > 0) {
+        let st: Awaited<ReturnType<typeof lstat>>
+        try {
+          st = await lstat(parsed.docx_path)
+        } catch {
+          throw new DocxCliInputError('invalid_request', 'Missing or unreadable docx_path for import operation.')
+        }
+        if (st.isSymbolicLink() || !st.isFile()) {
+          throw new DocxCliInputError('invalid_request', 'docx_path must be a regular non-symlink file.')
+        }
+        if (st.size > DEFAULT_MAX_STDIN_BYTES) {
+          throw new DocxCliInputError('limit_exceeded', `docx_path exceeded ${DEFAULT_MAX_STDIN_BYTES} bytes.`)
+        }
+        bytes = await readFile(parsed.docx_path)
+      } else if (typeof parsed.docx_b64 === 'string' && parsed.docx_b64.length > 0) {
+        bytes = Buffer.from(parsed.docx_b64, 'base64')
+      } else {
+        throw new DocxCliInputError('invalid_request', 'Missing docx_path or docx_b64 for import operation.')
       }
-      const bytes = Buffer.from(parsed.docx_b64, 'base64')
       const result = await importDocx(bytes, {
         profile,
         quotas: parsed.quotas,
@@ -209,6 +229,32 @@ export async function handleExchangeCliRequest(rawJson: string): Promise<string>
         return JSON.stringify(response)
       }
 
+      if (typeof parsed.output_path === 'string' && parsed.output_path.length > 0) {
+        let existing: Awaited<ReturnType<typeof lstat>> | null = null
+        try {
+          existing = await lstat(parsed.output_path)
+        } catch {
+          existing = null
+        }
+        if (existing !== null && (existing.isSymbolicLink() || !existing.isFile())) {
+          throw new DocxCliInputError('invalid_request', 'output_path must be a regular non-symlink file.')
+        }
+        await writeFile(parsed.output_path, result.binary, { mode: 0o600 })
+        const response: DocxCliSuccessResponse = {
+          version: 1,
+          request_id: reqId,
+          ok: true,
+          operation: 'export',
+          profile,
+          blocked: false,
+          docx_path: parsed.output_path,
+          docx_sha256: sha256Hex(result.binary),
+          report: result.report,
+          semantic: result.semantic,
+        }
+        return JSON.stringify(response)
+      }
+
       const response: DocxCliSuccessResponse = {
         version: 1,
         request_id: reqId,
@@ -254,8 +300,50 @@ async function readStdinBounded(maxBytes: number): Promise<string> {
   return Buffer.concat(chunks, total).toString('utf8')
 }
 
+async function runPersistentCli(maxBytes: number): Promise<void> {
+  let buffered = ''
+  for await (const chunk of process.stdin) {
+    buffered += Buffer.isBuffer(chunk) ? chunk.toString('utf8') : String(chunk)
+    if (Buffer.byteLength(buffered, 'utf8') > maxBytes) {
+      process.stdout.write(`${JSON.stringify(errorPayload('', 'limit_exceeded', `CLI stdin payload exceeded ${maxBytes} bytes.`))}\n`)
+      return
+    }
+    let newlineIdx = buffered.indexOf('\n')
+    while (newlineIdx !== -1) {
+      const line = buffered.slice(0, newlineIdx).trim()
+      buffered = buffered.slice(newlineIdx + 1)
+      if (line.length > 0) {
+        try {
+          const output = await handleExchangeCliRequest(line)
+          process.stdout.write(`${output}\n`)
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err)
+          const code = err instanceof DocxCliInputError ? err.code : 'runtime_failed'
+          process.stdout.write(`${JSON.stringify(errorPayload('', code, message))}\n`)
+        }
+      }
+      newlineIdx = buffered.indexOf('\n')
+    }
+  }
+  const trailing = buffered.trim()
+  if (trailing.length > 0) {
+    try {
+      const output = await handleExchangeCliRequest(trailing)
+      process.stdout.write(`${output}\n`)
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      const code = err instanceof DocxCliInputError ? err.code : 'runtime_failed'
+      process.stdout.write(`${JSON.stringify(errorPayload('', code, message))}\n`)
+    }
+  }
+}
+
 async function runCli(): Promise<void> {
   const maxBytes = DEFAULT_MAX_STDIN_BYTES
+  if (process.argv.includes('--persistent')) {
+    await runPersistentCli(maxBytes)
+    return
+  }
   try {
     const input = await readStdinBounded(maxBytes)
     const output = await handleExchangeCliRequest(input)

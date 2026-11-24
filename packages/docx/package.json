@@ -61,7 +61,6 @@
   },
   "dependencies": {
     "docx": "9.16.0",
-    "fast-xml-parser": "^5.3.5",
     "fflate": "0.8.3",
     "saxes": "6.0.0",
     "yauzl": "3.4.0"

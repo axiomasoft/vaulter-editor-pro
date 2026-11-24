@@ -331,4 +331,77 @@ describe('VaulterLocalDocxExport & Offline Browser Parity (10.1-B)', () => {
     wrapper.unmount()
     manual.unmount()
   })
+
+  it('reuses a single Web Worker across preview/export, cancels stale previews, and terminates on unmount', async () => {
+    const baseFactory = createMockWorkerFactory()
+    const workers: Worker[] = []
+    const workerFactory = vi.fn(() => {
+      const w = baseFactory()
+      workers.push(w)
+      return w
+    })
+
+    const wrapper = mount(VaulterLocalDocxExport, {
+      props: {
+        content: CORPUS_D1.document,
+        revision: CONFIRMED_REVISION,
+        confirmed: true,
+        accessible: true,
+        autoDownload: false,
+        workerFactory,
+      },
+    })
+    await flushPromises()
+    expect(workerFactory).toHaveBeenCalledTimes(1)
+    expect(workers[0].terminate).not.toHaveBeenCalled()
+
+    await wrapper.find('[data-control="profile"]').setValue('legacy-discussions')
+    await wrapper.find('[data-control="profile"]').setValue('discussions')
+    await flushPromises()
+    expect(workerFactory).toHaveBeenCalledTimes(1)
+    expect(wrapper.find('[data-diagnostic-code="LEGACY_COMMENTS_FLATTENED"]').exists()).toBe(false)
+
+    await wrapper.find('[data-action="export-docx"]').trigger('click')
+    await flushPromises()
+    expect(workerFactory).toHaveBeenCalledTimes(1)
+    expect(workers[0].terminate).not.toHaveBeenCalled()
+
+    wrapper.unmount()
+    expect(workers[0].terminate).toHaveBeenCalledTimes(1)
+  })
+
+  it('uses a default Web Worker in VaulterLocalDocxExport when global Worker is available', async () => {
+    const baseFactory = createMockWorkerFactory()
+    const created: Worker[] = []
+    let calls = 0
+    class MockWorker {
+      constructor() {
+        calls += 1
+        const w = baseFactory()
+        created.push(w)
+        return w as unknown as MockWorker
+      }
+    }
+    vi.stubGlobal('Worker', MockWorker)
+    try {
+      const wrapper = mount(VaulterLocalDocxExport, {
+        props: {
+          content: CORPUS_D1.document,
+          revision: CONFIRMED_REVISION,
+          confirmed: true,
+          accessible: true,
+          autoPreview: true,
+        },
+      })
+      await flushPromises()
+      await wrapper.find('button').trigger('click')
+      await flushPromises()
+      expect(calls).toBe(1)
+      expect(created[0].terminate).not.toHaveBeenCalled()
+      wrapper.unmount()
+      expect(created[0].terminate).toHaveBeenCalledTimes(1)
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
 })

@@ -1,4 +1,4 @@
-import { computed, ref, shallowRef, toRaw, toValue, watch, type ComputedRef, type MaybeRefOrGetter, type Ref, type ShallowRef } from 'vue'
+import { computed, getCurrentScope, onScopeDispose, ref, shallowRef, toRaw, toValue, watch, type ComputedRef, type MaybeRefOrGetter, type Ref, type ShallowRef } from 'vue'
 import {
   DOCX_PROFILE_IDS,
   exportDocx,
@@ -162,47 +162,10 @@ function unwrapWorkerPayload(value: unknown): unknown {
   return value
 }
 
-function runWorkerRequest(
-  worker: Worker,
-  request: DocxWorkerRequest,
-): Promise<Omit<ExportDocxResult, 'binary'> | ExportDocxResult> {
-  return new Promise((resolve, reject) => {
-    const onMessage = (event: MessageEvent<DocxWorkerResponse>) => {
-      const payload = event.data
-      if (!payload || payload.id !== request.id) {
-        return
-      }
-      cleanup()
-      if (payload.ok) {
-        resolve(payload.result)
-      } else {
-        reject(
-          new LocalDocxExportError(
-            'worker_error',
-            payload.error.message,
-            payload.error.report as LossReport | undefined,
-          ),
-        )
-      }
-    }
-    const onError = (err: ErrorEvent) => {
-      cleanup()
-      reject(new LocalDocxExportError('worker_error', err.message || 'DOCX worker failed'))
-    }
-    const cleanup = () => {
-      worker.removeEventListener('message', onMessage)
-      worker.removeEventListener('error', onError)
-      worker.terminate()
-    }
-    worker.addEventListener('message', onMessage)
-    worker.addEventListener('error', onError)
-    try {
-      worker.postMessage(unwrapWorkerPayload(request))
-    } catch (error) {
-      cleanup()
-      reject(error)
-    }
-  })
+interface PendingWorkerRequest {
+  kind: 'preview' | 'export'
+  resolve: (value: Omit<ExportDocxResult, 'binary'> | ExportDocxResult | null) => void
+  reject: (reason?: unknown) => void
 }
 
 export function useLocalDocxExport(options: UseLocalDocxExportOptions): UseLocalDocxExportReturn {
@@ -258,6 +221,110 @@ export function useLocalDocxExport(options: UseLocalDocxExportOptions): UseLocal
   })
 
   let reqSeq = 0
+  let previewSeq = 0
+  let exportSeq = 0
+  let worker: Worker | null = null
+  let disposed = false
+  let latestPreviewId: string | null = null
+  let latestExportId: string | null = null
+  const pending = new Map<string, PendingWorkerRequest>()
+
+  const onWorkerMessage = (event: MessageEvent<DocxWorkerResponse>) => {
+    const payload = event.data
+    if (!payload) return
+    const entry = pending.get(payload.id)
+    if (!entry) return
+    pending.delete(payload.id)
+    if (payload.ok) {
+      entry.resolve(payload.result)
+    } else {
+      entry.reject(
+        new LocalDocxExportError(
+          'worker_error',
+          payload.error.message,
+          payload.error.report as LossReport | undefined,
+        ),
+      )
+    }
+  }
+
+  const teardownWorker = (reason?: string) => {
+    const active = worker
+    worker = null
+    if (active) {
+      active.removeEventListener('message', onWorkerMessage)
+      active.removeEventListener('error', onWorkerError)
+      active.terminate()
+    }
+    for (const [id, entry] of pending.entries()) {
+      pending.delete(id)
+      if (entry.kind === 'preview') {
+        entry.resolve(null)
+      } else {
+        entry.reject(new LocalDocxExportError('worker_error', reason || 'DOCX worker failed'))
+      }
+    }
+  }
+
+  const onWorkerError = (err: ErrorEvent) => {
+    teardownWorker(err.message || 'DOCX worker failed')
+  }
+
+  function ensureWorker(): Worker {
+    if (!worker) {
+      const created = options.workerFactory!()
+      created.addEventListener('message', onWorkerMessage)
+      created.addEventListener('error', onWorkerError)
+      worker = created
+    }
+    return worker
+  }
+
+  function sendWorkerRequest(
+    request: DocxWorkerRequest,
+  ): Promise<Omit<ExportDocxResult, 'binary'> | ExportDocxResult | null> {
+    if (disposed) {
+      return request.kind === 'preview'
+        ? Promise.resolve(null)
+        : Promise.reject(new LocalDocxExportError('worker_error', 'DOCX export worker disposed.'))
+    }
+    if (request.kind === 'preview' && latestPreviewId !== null) {
+      const prev = pending.get(latestPreviewId)
+      if (prev) {
+        pending.delete(latestPreviewId)
+        prev.resolve(null)
+      }
+    } else if (request.kind === 'export' && latestExportId !== null) {
+      const prev = pending.get(latestExportId)
+      if (prev) {
+        pending.delete(latestExportId)
+        prev.reject(new LocalDocxExportError('worker_error', 'Superseded by a newer DOCX export request.'))
+      }
+    }
+    if (request.kind === 'preview') {
+      latestPreviewId = request.id
+    } else {
+      latestExportId = request.id
+    }
+
+    const activeWorker = ensureWorker()
+    return new Promise((resolve, reject) => {
+      pending.set(request.id, { kind: request.kind, resolve, reject })
+      try {
+        activeWorker.postMessage(unwrapWorkerPayload(request))
+      } catch (err) {
+        pending.delete(request.id)
+        reject(err)
+      }
+    })
+  }
+
+  if (getCurrentScope()) {
+    onScopeDispose(() => {
+      disposed = true
+      teardownWorker('DOCX export worker disposed.')
+    })
+  }
 
   function buildPayload(src: LocalDocxSource & { content: TipTapDoc }) {
     const marker = buildSourceMarker(src.revision, projection.value)
@@ -281,6 +348,7 @@ export function useLocalDocxExport(options: UseLocalDocxExportOptions): UseLocal
   }
 
   async function preview(): Promise<LossReport | null> {
+    const seq = ++previewSeq
     const src = toValue(options.source)
     error.value = null
     try {
@@ -293,10 +361,9 @@ export function useLocalDocxExport(options: UseLocalDocxExportOptions): UseLocal
     }
 
     const { exportInput, exportOptions } = buildPayload(src)
-    let result: Omit<ExportDocxResult, 'binary'>
+    let result: Omit<ExportDocxResult, 'binary'> | null
     if (options.workerFactory) {
-      const worker = options.workerFactory()
-      result = await runWorkerRequest(worker, {
+      result = await sendWorkerRequest({
         id: `preview-${++reqSeq}`,
         kind: 'preview',
         input: exportInput,
@@ -306,12 +373,17 @@ export function useLocalDocxExport(options: UseLocalDocxExportOptions): UseLocal
       result = previewDocxExport(exportInput, exportOptions)
     }
 
+    if (!result || seq !== previewSeq || disposed) {
+      return null
+    }
+
     previewReport.value = result.report
     previewSemantic.value = result.semantic
     return result.report
   }
 
   async function exportLocal(): Promise<LocalDocxExportOutput> {
+    const seq = ++exportSeq
     const src = toValue(options.source)
     error.value = null
     assertConfirmedAccessible(src)
@@ -322,13 +394,16 @@ export function useLocalDocxExport(options: UseLocalDocxExportOptions): UseLocal
       let result: ExportDocxResult
 
       if (options.workerFactory) {
-        const worker = options.workerFactory()
-        result = (await runWorkerRequest(worker, {
+        const res = await sendWorkerRequest({
           id: `export-${++reqSeq}`,
           kind: 'export',
           input: exportInput,
           options: exportOptions,
-        })) as ExportDocxResult
+        })
+        if (!res) {
+          throw new LocalDocxExportError('worker_error', 'DOCX export cancelled.')
+        }
+        result = res as ExportDocxResult
       } else {
         result = await exportDocx(exportInput, exportOptions)
       }
@@ -373,7 +448,9 @@ export function useLocalDocxExport(options: UseLocalDocxExportOptions): UseLocal
       error.value = wrapped
       throw wrapped
     } finally {
-      exporting.value = false
+      if (seq === exportSeq) {
+        exporting.value = false
+      }
     }
   }
 

@@ -1,8 +1,11 @@
-import { execFileSync } from 'node:child_process'
-import { readFileSync } from 'node:fs'
-import { resolve } from 'node:path'
+import { execFileSync, spawn } from 'node:child_process'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join, resolve } from 'node:path'
+import { Packer } from 'docx'
 import { strFromU8, unzipSync, zipSync, strToU8 } from 'fflate'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
+import { exportDocx } from '../src/node'
 import { handleExchangeCliRequest } from '../src/cli'
 import { CORPUS_D1, CORPUS_D4 } from '../../../tests/corpus/docx/corpus'
 
@@ -112,5 +115,82 @@ describe('@vaulter/editor-pro-docx exchange CLI bridge', () => {
     expect(parsed.request_id).toBe('cli-sec-1')
     expect(parsed.ok).toBe(false)
     expect(parsed.error.code).toBe('xml_xxe_forbidden')
+  })
+
+  it('compresses ZIP once without Packer.toArrayBuffer roundtrip during exportDocx', async () => {
+    const spy = vi.spyOn(Packer, 'toArrayBuffer')
+    const exported = await exportDocx(
+      { document: CORPUS_D1.document, sourceMarker: CORPUS_D1.sourceMarker },
+      { profile: 'standard' },
+    )
+    expect(exported.blocked).toBe(false)
+    expect(exported.binary).not.toBeNull()
+    expect(spy).not.toHaveBeenCalled()
+    spy.mockRestore()
+  })
+
+  it('supports docx_path / output_path without base64 and handles multiple requests in --persistent mode', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'vedx-cli-test-'))
+    try {
+      const outPath = join(dir, 'out.docx')
+      const expRes = JSON.parse(await handleExchangeCliRequest(JSON.stringify({
+        version: 1,
+        request_id: 'cli-path-exp',
+        operation: 'export',
+        profile_id: 'standard',
+        output_path: outPath,
+        document: CORPUS_D1.document,
+      }))) as { ok: boolean; docx_path?: string; docx_b64?: string; docx_sha256?: string }
+      expect(expRes.ok).toBe(true)
+      expect(expRes.docx_path).toBe(outPath)
+      expect(expRes.docx_b64).toBeUndefined()
+      expect(expRes.docx_sha256).toMatch(/^[0-9a-f]{64}$/)
+
+      const impRes = JSON.parse(await handleExchangeCliRequest(JSON.stringify({
+        version: 1,
+        request_id: 'cli-path-imp',
+        operation: 'import',
+        profile_id: 'standard',
+        docx_path: outPath,
+      }))) as { ok: boolean; source_sha256?: string; document?: { type: string } }
+      expect(impRes.ok).toBe(true)
+      expect(impRes.source_sha256).toBe(expRes.docx_sha256)
+      expect(impRes.document?.type).toBe('doc')
+
+      const cliDist = resolve(__dirname, '../dist/cli.js')
+      const inPath = join(dir, 'in.docx')
+      writeFileSync(inPath, readFileSync(outPath))
+      const child = spawn(process.execPath, [cliDist, '--persistent'], { stdio: ['pipe', 'pipe', 'pipe'] })
+      const lines: string[] = []
+      let buf = ''
+      const done = new Promise<void>((resolveDone, rejectDone) => {
+        child.stdout.on('data', (chunk: Buffer) => {
+          buf += chunk.toString('utf8')
+          let idx = buf.indexOf('\n')
+          while (idx !== -1) {
+            const line = buf.slice(0, idx).trim()
+            buf = buf.slice(idx + 1)
+            if (line) lines.push(line)
+            idx = buf.indexOf('\n')
+          }
+          if (lines.length === 2) {
+            child.stdin.end()
+          }
+        })
+        child.on('error', rejectDone)
+        child.on('close', (code) => {
+          if (code === 0) resolveDone()
+          else rejectDone(new Error(`Persistent CLI exited with code ${code}`))
+        })
+      })
+      child.stdin.write(`${JSON.stringify({ version: 1, request_id: 'p-1', operation: 'import', profile_id: 'standard', docx_path: inPath })}\n`)
+      child.stdin.write(`${JSON.stringify({ version: 1, request_id: 'p-2', operation: 'import', profile_id: 'standard', docx_path: inPath })}\n`)
+      await done
+      expect(lines).toHaveLength(2)
+      expect(JSON.parse(lines[0])).toMatchObject({ ok: true, request_id: 'p-1' })
+      expect(JSON.parse(lines[1])).toMatchObject({ ok: true, request_id: 'p-2' })
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 })

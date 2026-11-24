@@ -26,7 +26,6 @@ export default defineConfig({
         'fflate',
         'yauzl',
         'saxes',
-        'fast-xml-parser',
         /^node:/,
         'fs',
         'path',

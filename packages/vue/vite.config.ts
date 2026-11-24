@@ -15,17 +15,17 @@ export default defineConfig({
   },
   build: {
     lib: {
-      entry: fileURLToPath(new URL('./src/index.ts', import.meta.url)),
-      name: 'VaulterEditorProVue',
-      fileName: 'vaulter-editor-pro-vue',
+      entry: {
+        'vaulter-editor-pro-vue': fileURLToPath(new URL('./src/index.ts', import.meta.url)),
+        'local-export-worker': fileURLToPath(new URL('./src/docx/localExportWorker.ts', import.meta.url)),
+      },
+      formats: ['es', 'cjs'],
+      fileName: (format, entryName) => `${entryName}.${format === 'es' ? 'js' : 'cjs'}`,
     },
     rollupOptions: {
       external: ['vue', 'yjs', 'prosemirror-changeset', /^@tiptap\//, /^@vaulter\//],
       output: {
         exports: 'named',
-        globals: {
-          vue: 'Vue',
-        },
       },
     },
   },

@@ -24,6 +24,7 @@ use Vaulter\Documents\Contracts\AtomicDocumentMutation;
 use Vaulter\Documents\Contracts\LockedDocumentMutation;
 use Vaulter\Documents\DocumentsManager;
 use Vaulter\Documents\Exceptions\InvalidDocumentContentException;
+use Vaulter\Documents\State\CollaborativeState;
 use Vaulter\Drive\Contracts\DriveExtension;
 use Vaulter\Drive\Contracts\DriveHandle;
 use Vaulter\Drive\Data\Snapshots\NodeSnapshot;
@@ -597,19 +598,43 @@ final readonly class ExchangeOperations implements DriveExtension
                     throw ExchangeException::stalePreview('preview_head_missing');
                 }
 
+                $replayed = $record !== null;
+                $readPosition = $position;
+                $intent = [
+                    'operation' => 'exchange.apply_import',
+                    'exchange_job_id' => $lockedJob->id,
+                    'format' => $lockedJob->format->value,
+                    'profile_id' => $lockedJob->profileId,
+                ];
                 if ($record === null) {
                     $this->assertPreviewHead($lockedJob, $input, $meta['collab_epoch'], $meta['state_version']);
                     if ($meta['write_mode'] !== 'journal') {
                         throw ExchangeException::stalePreview('write_mode_changed');
                     }
 
-                    // The strict Hub has no whole-document replacement effect.
-                    throw ExchangeException::unsupportedDocument('journal_import_replacement_unavailable');
+                    $projected = $journal->projected($actor, $generation, $position);
+                    if ($projected === null) {
+                        throw ExchangeException::unsupportedDocument('collaboration_journal_unavailable');
+                    }
+                    $readPosition = $projected['position'];
+                    $basePosition = $readPosition;
+                    // The strict room seeds from JSON before it runs commands, unless it already has a checkpoint.
+                    if ($readPosition === 0 && $this->container->make(CollaborativeState::class)->lock($nodeId)->collabState === null) {
+                        $basePosition = 1;
+                    }
+                    $intent += [
+                        'base_generation' => $generation,
+                        'base_position' => $basePosition,
+                        'atomic_effects' => [
+                            ['effect' => 'exchange.apply_import', 'replacement' => $normalizedDoc],
+                        ],
+                    ];
+                } else {
+                    // Preserve the fingerprint of commands registered before the job link existed.
+                    $intent['document'] = $normalizedDoc;
                 }
 
-                if ($lockedJob->applyCommandId === null) {
-                    // For an unlinked legacy command, register verifies the old fingerprint before
-                    // linking the receipt. The document lock keeps the lookup and verification together.
+                if ($record === null || $lockedJob->applyCommandId === null) {
                     $record = $journal->register(
                         scope: $actor,
                         key: $applyCommandId,
@@ -624,14 +649,8 @@ final readonly class ExchangeOperations implements DriveExtension
                         ]),
                         generation: $generation,
                         schema: is_int($record['schema_version'] ?? null) ? $record['schema_version'] : $meta['schema_version'],
-                        readPosition: $position,
-                        intent: [
-                            'operation' => 'exchange.apply_import',
-                            'exchange_job_id' => $lockedJob->id,
-                            'format' => $lockedJob->format->value,
-                            'profile_id' => $lockedJob->profileId,
-                            'document' => $normalizedDoc,
-                        ],
+                        readPosition: $readPosition,
+                        intent: $intent,
                     );
                 }
 
@@ -654,7 +673,7 @@ final readonly class ExchangeOperations implements DriveExtension
                     writeMode: 'journal',
                     generation: is_int($record['generation'] ?? null) ? $record['generation'] : $generation,
                     position: is_int($record['to_seq'] ?? null) ? $record['to_seq'] : $position,
-                    replayed: true,
+                    replayed: $replayed,
                     pendingCommit: ! $committed,
                 );
             });

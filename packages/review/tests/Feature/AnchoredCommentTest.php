@@ -552,3 +552,56 @@ it('handles snapshot edit narrowing, full-deletion detach without losing replies
         ->and($afterAmbig->anchor->sourcePosition)->toBe(3);
     expect($review->comments($drive)->find($ambigDoc, $ambigReply->comment->id)->comment->body)->toBe('Do not lose me');
 });
+
+it('executes O(1)/O(page) SQL queries in find() and filtered list() regardless of comment count', function (): void {
+    $owner = AccessTestHelpers::user(1);
+    $storage = AccessTestHelpers::storage();
+    AccessTestHelpers::grant($storage->rootNode, RoleRegistry::OWNER, subjectId: 1);
+
+    $drive = app(Vaulter::class)->drive($storage)->actingAs($owner);
+    $docs = app(DocumentsManager::class)->in($drive);
+    $review = app(ReviewManager::class)->comments($drive);
+    $doc = $docs->create('perf-comments', 'vaulter/rich-text', makeTextBlockDoc('Performance test body'));
+
+    $root = $review->add($doc, new AddAnchoredCommentInput(
+        body: 'Root 0',
+        anchor: new CommentAnchorInput(
+            generation: 0,
+            sourcePosition: 1,
+            schemaVersion: 2,
+            blockId: 'blk_p42',
+            selectorKind: SelectorKind::SnapshotUtf16,
+            selectorPayload: ['from_utf16' => 0, 'to_utf16' => 5],
+            quoteText: 'Perfo',
+        ),
+    ));
+
+    $commentsApi = app(DocumentsManager::class)->comments($drive);
+    for ($i = 1; $i <= 240; $i++) {
+        $commentsApi->add($doc, new AddCommentInput('Spacer '.$i));
+    }
+    $lateReply = $review->add($doc, new AddAnchoredCommentInput('Late reply', parentId: $root->comment->id));
+
+    $conn = app(VaulterDatabase::class)->connection();
+    $conn->flushQueryLog();
+    $conn->enableQueryLog();
+    try {
+        $found = $review->find($doc, $lateReply->comment->id);
+        $findQueries = count($conn->getQueryLog());
+        expect($found->comment->id)->toBe($lateReply->comment->id)
+            ->and($findQueries)->toBeLessThanOrEqual(15);
+
+        // Fetch cursor for the last page containing $lateReply
+        $page1 = $review->list($doc, CommentFilterStatus::All, new ListOptions(perPage: 200));
+        expect($page1->nextCursor)->not->toBeNull();
+
+        $conn->flushQueryLog();
+        $filteredPage2 = $review->list($doc, CommentFilterStatus::Active, new ListOptions(perPage: 50, cursor: $page1->nextCursor));
+        $listQueries = count($conn->getQueryLog());
+        expect(array_map(static fn ($item): string => $item->comment->id, $filteredPage2->items))
+            ->toContain($lateReply->comment->id)
+            ->and($listQueries)->toBeLessThanOrEqual(15);
+    } finally {
+        $conn->disableQueryLog();
+    }
+});

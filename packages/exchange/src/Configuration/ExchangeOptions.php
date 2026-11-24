@@ -46,6 +46,7 @@ final readonly class ExchangeOptions implements OptionsFactory
         public string $nodeBinary = 'node',
         public string $cliPath = '',
         public int $runtimeTimeoutSeconds = 30,
+        public bool $persistentWorker = false,
     ) {}
 
     /** @param array<array-key, mixed> $config */
@@ -97,6 +98,12 @@ final readonly class ExchangeOptions implements OptionsFactory
             ? trim($config['queue_name'])
             : 'default';
 
+        $rawPersistent = $config['persistent_worker'] ?? false;
+        $persistentWorker = is_bool($rawPersistent)
+            ? $rawPersistent
+            : (is_string($rawPersistent) && in_array(strtolower(trim($rawPersistent)), ['1', 'true', 'yes', 'on'], true))
+            || (is_int($rawPersistent) && $rawPersistent === 1);
+
         return new self(
             formats: $formats,
             defaultProfile: $defaultProfile,
@@ -116,6 +123,7 @@ final readonly class ExchangeOptions implements OptionsFactory
             nodeBinary: $nodeBinary,
             cliPath: $cliPath,
             runtimeTimeoutSeconds: self::positiveInt($config['runtime_timeout_seconds'] ?? null, 30),
+            persistentWorker: $persistentWorker,
         );
     }
 

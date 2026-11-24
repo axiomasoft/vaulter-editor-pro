@@ -20,6 +20,7 @@ use Vaulter\Drive\Access\Roles\RoleRegistry;
 use Vaulter\Drive\Enums\Access\GrantScope;
 use Vaulter\Drive\Testing\Access\AccessTestHelpers;
 use Vaulter\Drive\Vaulter;
+use Vaulter\EditorPro\Exchange\Configuration\ExchangeOptions;
 use Vaulter\EditorPro\Exchange\Contracts\BeforeArtifactLinkHook;
 use Vaulter\EditorPro\Exchange\Data\ApplyExchangeImportInput;
 use Vaulter\EditorPro\Exchange\Enums\ExchangeJobState;
@@ -27,6 +28,7 @@ use Vaulter\EditorPro\Exchange\Exceptions\ExchangeException;
 use Vaulter\EditorPro\Exchange\ExchangeManager;
 use Vaulter\EditorPro\Exchange\Repositories\ExchangeJobRepository;
 use Vaulter\EditorPro\Exchange\Runtime\CanonicalJson;
+use Vaulter\EditorPro\Exchange\Runtime\NodeDocxExchangeRuntime;
 use Vaulter\Media\Contracts\Cas\BlobPins;
 use Vaulter\Media\Contracts\Cas\BlobStore;
 use Vaulter\Media\Data\Snapshots\BlobSnapshot;
@@ -765,7 +767,7 @@ it('enforces ACL on import, export, download, preview, apply, and permission rev
     $this->getJson('api/vaulter/v1/documents/'.$docNode->id.'/exchange-jobs/'.$exportJobId)->assertNotFound();
 });
 
-it('rejects unsupported journal replacements and recovers legacy command receipts after the head advances', function (): void {
+it('applies imports through the journal and recovers receipts after the head advances', function (string $scenario): void {
     $owner = AccessTestHelpers::user(1);
     $storage = AccessTestHelpers::storage();
     AccessTestHelpers::grant($storage->rootNode, RoleRegistry::OWNER, subjectId: 1);
@@ -802,7 +804,6 @@ it('rejects unsupported journal replacements and recovers legacy command receipt
         app(RoomOwnership::class)->acquire($locked, $roomOwner);
     });
 
-    // Align journal headSeq = 1 with initial document state_version = 1.
     $update = static fn (string $payload, ?int $seed = null): UpdateEnvelope => new UpdateEnvelope(
         0,
         (string) Str::uuid(),
@@ -811,75 +812,110 @@ it('rejects unsupported journal replacements and recovers legacy command receipt
         'server',
         $seed,
     );
-    app(UpdateLog::class)->appendFenced($docNode->id, $update('seed', 1), $roomOwner, 1, 0, static fn () => null);
-
     $commandId = 'journal-cmd-77';
     $applyUrl = 'api/vaulter/v1/documents/'.$docNode->id.'/exchange-jobs/'.$jobId.'/apply';
-    $this->withHeaders(['Idempotency-Key' => 'journal-refused'])
-        ->postJson($applyUrl, ['apply_command_id' => $commandId])
-        ->assertStatus(422)
-        ->assertJsonPath('code', 'exchange_unsupported_document');
-    expect(DB::table($tables->table('collaboration_commands'))->where('command_id', $commandId)->count())->toBe(0);
-    expect(app(ExchangeJobRepository::class)->findById($jobId)?->applyCommandId)->toBeNull();
-
-    // Recreate the pre-fix crash window: a durable command exists with no job link.
     $preview = $this->getJson('api/vaulter/v1/documents/'.$docNode->id.'/exchange-jobs/'.$jobId)
         ->assertOk()->json('data.preview');
-    $principal = Actor::user($owner)->ref();
-    $actor = new CommandActor(
-        $principal, $storage->tenantId === null ? null : (string) $storage->tenantId,
-        'drive:'.$storage->id, $principal->type.':'.$principal->id, (string) $storage->id, $docNode->id,
-    );
-    $hash = hash('sha256', 'proposal:'.$jobId.':'.$commandId);
-    $proposal = sprintf('%s-%s-4%s-%04x-%s', substr($hash, 0, 8), substr($hash, 8, 4),
-        substr($hash, 13, 3), (hexdec(substr($hash, 16, 4)) & 0x3FFF) | 0x8000, substr($hash, 20, 12));
-    app(CommandJournal::class)->register(
-        scope: $actor,
-        key: $commandId,
-        proposal: $proposal,
-        digest: CanonicalJson::sha256Hex([
-            'exchange_job_id' => $jobId,
-            'document_id' => $head->documentId,
-            'apply_command_id' => $commandId,
-            'generation' => 0,
-            'position' => 1,
-            'document' => $preview,
-        ]),
-        generation: 0,
-        schema: $head->schemaVersion,
-        readPosition: 1,
-        intent: [
-            'operation' => 'exchange.apply_import',
-            'exchange_job_id' => $jobId,
-            'format' => 'docx',
-            'profile_id' => 'standard',
-            'document' => $preview,
-        ],
-    );
+    if ($scenario === 'legacy') {
+        // Recreate the pre-fix crash window: a durable command exists with no job link.
+        app(UpdateLog::class)->appendFenced($docNode->id, $update('seed', 1), $roomOwner, 1, 0, static fn () => null);
+        $principal = Actor::user($owner)->ref();
+        $actor = new CommandActor(
+            $principal, $storage->tenantId === null ? null : (string) $storage->tenantId,
+            'drive:'.$storage->id, $principal->type.':'.$principal->id, (string) $storage->id, $docNode->id,
+        );
+        $hash = hash('sha256', 'proposal:'.$jobId.':'.$commandId);
+        $proposal = sprintf('%s-%s-4%s-%04x-%s', substr($hash, 0, 8), substr($hash, 8, 4),
+            substr($hash, 13, 3), (hexdec(substr($hash, 16, 4)) & 0x3FFF) | 0x8000, substr($hash, 20, 12));
+        app(CommandJournal::class)->register(
+            scope: $actor,
+            key: $commandId,
+            proposal: $proposal,
+            digest: CanonicalJson::sha256Hex([
+                'exchange_job_id' => $jobId,
+                'document_id' => $head->documentId,
+                'apply_command_id' => $commandId,
+                'generation' => 0,
+                'position' => 1,
+                'document' => $preview,
+            ]),
+            generation: 0,
+            schema: $head->schemaVersion,
+            readPosition: 1,
+            intent: [
+                'operation' => 'exchange.apply_import',
+                'exchange_job_id' => $jobId,
+                'format' => 'docx',
+                'profile_id' => 'standard',
+                'document' => $preview,
+            ],
+        );
+    } else {
+        $this->withHeaders(['Idempotency-Key' => 'journal-wrong-position'])
+            ->postJson($applyUrl, ['apply_command_id' => $commandId, 'expected_position' => 2])
+            ->assertStatus(409)
+            ->assertJsonPath('code', 'exchange_stale_preview');
+        expect(app(ExchangeJobRepository::class)->findById($jobId)?->applyCommandId)->toBeNull();
+
+        $this->withHeaders(['Idempotency-Key' => 'journal-new'])
+            ->postJson($applyUrl, ['apply_command_id' => $commandId, 'expected_position' => 1])
+            ->assertStatus(202)
+            ->assertJsonPath('data.pending_commit', true)
+            ->assertJsonPath('data.replayed', false);
+        expect(app(ExchangeJobRepository::class)->findById($jobId)?->applyCommandId)->toBe($commandId);
+        app(UpdateLog::class)->appendFenced($docNode->id, $update('seed', 1), $roomOwner, 1, 0, static fn () => null);
+    }
 
     // Room owner discovers next pending intent and settles it into UpdateLog + durable receipt.
     $nextIntent = $db->transaction(static fn (): ?array => app(CommandJournal::class)->next(app(CollaborativeState::class)->lock($docNode->id)));
     expect($nextIntent)->not->toBeNull();
+    if ($scenario !== 'legacy') {
+        expect($nextIntent['intent']['base_generation'])->toBe(0)
+            ->and($nextIntent['intent']['base_position'])->toBe(1)
+            ->and($nextIntent['intent']['atomic_effects'])->toHaveCount(1);
+        $effect = $nextIntent['intent']['atomic_effects'][0];
+        expect($effect['effect'])->toBe('exchange.apply_import')
+            ->and(CanonicalJson::sha256Hex($effect['replacement']))->toBe(CanonicalJson::sha256Hex($preview));
+    }
+
+    $stale = $scenario === 'stale';
+    if ($stale) {
+        app(UpdateLog::class)->appendFenced($docNode->id, $update('interleaving-edit'), $roomOwner, 1, 1, static fn () => null);
+    }
 
     $settled = app(CommandJournal::class)->settle(
         id: (string) $nextIntent['id'],
         owner: $roomOwner,
         fence: 1,
         generation: 0,
-        base: 1,
+        base: $stale ? 2 : 1,
         fingerprint: (string) $nextIntent['fingerprint'],
-        updates: [$update('apply-docx-commit')],
+        updates: $stale ? [] : [$update('apply-docx-commit')],
         evidence: ['ranges' => []],
+        reject: $stale ? 'precondition_failed' : null,
     );
+
+    if ($stale) {
+        expect($settled['state'])->toBe('rejected');
+        $this->withHeaders(['Idempotency-Key' => 'journal-apply-after-conflict'])
+            ->postJson($applyUrl, ['apply_command_id' => $commandId])
+            ->assertStatus(409)
+            ->assertJsonPath('code', 'exchange_stale_preview');
+        expect(app(ExchangeJobRepository::class)->findById($jobId)?->state)->toBe(ExchangeJobState::PreviewReady);
+
+        return;
+    }
 
     expect($settled['state'])->toBe('committed')
         ->and($settled['receipt_id'])->toBeString();
 
     DB::table($tables->table('documents'))->where('node_id', $docNode->id)->update(['state_version' => 2]);
-    $this->withHeaders(['Idempotency-Key' => 'journal-stale'])
-        ->postJson($applyUrl, ['apply_command_id' => 'different-command', 'expected_position' => 2])
-        ->assertStatus(409)
-        ->assertJsonPath('code', 'exchange_stale_preview');
+    if ($scenario === 'legacy') {
+        $this->withHeaders(['Idempotency-Key' => 'journal-stale'])
+            ->postJson($applyUrl, ['apply_command_id' => 'different-command', 'expected_position' => 2])
+            ->assertStatus(409)
+            ->assertJsonPath('code', 'exchange_stale_preview');
+    }
 
     $this->withHeaders(['Idempotency-Key' => 'journal-apply-after-settle'])
         ->postJson($applyUrl, ['apply_command_id' => $commandId])
@@ -892,7 +928,7 @@ it('rejects unsupported journal replacements and recovers legacy command receipt
         ->assertOk()
         ->assertJsonPath('data.state', 'applied')
         ->assertJsonPath('data.apply_receipt_id', $settled['receipt_id']);
-});
+})->with(['new', 'legacy', 'stale']);
 
 it('releases exchange source/output pins on document trash purge and retention cleanup without touching sibling docs', function (): void {
     $owner = AccessTestHelpers::user(1);
@@ -966,4 +1002,25 @@ it('releases exchange source/output pins on document trash purge and retention c
     // Confirm ApplyExchangeImportInput is constructible and referenced cleanly.
     $input = new ApplyExchangeImportInput('noop-cmd');
     expect($input->applyCommandId)->toBe('noop-cmd');
+});
+
+it('uses temp files and reuses a persistent node worker across export/import calls when enabled', function (): void {
+    $options = new ExchangeOptions(
+        cliPath: dirname(__DIR__, 3).'/docx/dist/cli.js',
+        persistentWorker: true,
+    );
+    $runtime = new NodeDocxExchangeRuntime($options);
+
+    try {
+        $exp = $runtime->exportDocx(sampleRichDocument('Persistent worker clause'), 'standard');
+        expect($exp->blocked)->toBeFalse()
+            ->and($exp->docxBytes)->toBeString()
+            ->and(substr((string) $exp->docxBytes, 0, 2))->toBe('PK');
+
+        $imp = $runtime->importDocx((string) $exp->docxBytes, 'standard');
+        expect($imp->blocked)->toBeFalse()
+            ->and(json_encode($imp->document, JSON_THROW_ON_ERROR))->toContain('Persistent worker clause');
+    } finally {
+        $runtime->shutdown();
+    }
 });

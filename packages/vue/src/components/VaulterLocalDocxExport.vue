@@ -61,6 +61,19 @@ const emit = defineEmits<{
   error: [error: unknown]
 }>()
 
+function createDefaultWorkerFactory(): (() => Worker) | undefined {
+  if (typeof Worker !== 'function') {
+    return undefined
+  }
+  return () => {
+    const base =
+      typeof import.meta.url === 'string' && import.meta.url.includes('://')
+        ? import.meta.url
+        : 'http://localhost/'
+    return new Worker(new URL('../docx/localExportWorker.ts', base), { type: 'module' })
+  }
+}
+
 const {
   profile,
   projection,
@@ -92,7 +105,7 @@ const {
   enableDiscussions: props.enableDiscussions,
   enableRevisions: props.enableRevisions,
   requireFormattingRevisions: props.requireFormattingRevisions,
-  workerFactory: props.workerFactory,
+  workerFactory: props.workerFactory ?? createDefaultWorkerFactory(),
   autoPreview: props.autoPreview,
 })
 

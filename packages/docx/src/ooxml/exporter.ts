@@ -910,6 +910,32 @@ function removeContentTypeOverride(contentTypesXml: string, partName: string): s
   return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">${defaultTags}${overrideTags}</Types>`
 }
 
+async function extractCompiledEntries(doc: Document): Promise<Record<string, Uint8Array>> {
+  type DocxCompiler = {
+    compile?: (file: Document) => Map<string, string | ArrayBufferView | ArrayBuffer>
+  }
+  const compiler = (Packer as unknown as { compiler?: DocxCompiler }).compiler
+  if (compiler && typeof compiler.compile === 'function') {
+    const compiled = compiler.compile(doc)
+    const entries: Record<string, Uint8Array> = {}
+    for (const [path, data] of compiled.entries()) {
+      if (typeof data === 'string') {
+        entries[path] = encodeUtf8(data)
+      } else if (data instanceof Uint8Array) {
+        entries[path] = data
+      } else if (ArrayBuffer.isView(data)) {
+        entries[path] = new Uint8Array(data.buffer, data.byteOffset, data.byteLength)
+      } else {
+        entries[path] = new Uint8Array(data)
+      }
+    }
+    return entries
+  }
+
+  const rawBuffer = await Packer.toArrayBuffer(doc)
+  return fflateUnzipRaw(new Uint8Array(rawBuffer))
+}
+
 export async function exportIntermediateToDocx(
   model: IntermediateDocument,
   options: ExportOoxmlOptions,
@@ -1070,8 +1096,7 @@ export async function exportIntermediateToDocx(
     sections,
   })
 
-  const rawBuffer = await Packer.toArrayBuffer(doc)
-  const zipEntries = fflateUnzipRaw(new Uint8Array(rawBuffer))
+  const zipEntries = await extractCompiledEntries(doc)
 
   let relsXml = decodeUtf8(zipEntries['word/_rels/document.xml.rels'])
   let contentTypesXml = decodeUtf8(zipEntries['[Content_Types].xml'])

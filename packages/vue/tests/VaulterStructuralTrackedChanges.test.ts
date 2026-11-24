@@ -1,4 +1,5 @@
 import { Editor, Extension } from '@tiptap/core'
+import { Node as ProseMirrorNode } from '@tiptap/pm/model'
 import { TableKit } from '@tiptap/extension-table'
 import StarterKit from '@tiptap/starter-kit'
 import { ySyncPlugin, yUndoPlugin } from '@tiptap/y-tiptap'
@@ -442,4 +443,24 @@ it('enforces overlap conflict policy v1 keeping 2nd suggestion open with conflic
   const snapshotAfterReject = REVIEW_TRACKED_PLUGIN_KEY.getState(editor.state)
   expect(snapshotAfterReject?.textMeta[bobSugg!.suggestionId]?.conflicted).toBe(false)
   expect(applySuggestionDecision(editor, 'accept', { ids: [bobSugg!.suggestionId] })).toBe(true)
+})
+
+it('avoids full-document descendants scans on trivial text edits and selection moves', () => {
+  const { editor } = openStructuralEditor({
+    author: () => 'alice',
+    content: '<h1 data-block-id="h1">Title</h1><p data-block-id="p1">First</p><p data-block-id="p2">Second</p>',
+  })
+  editor.commands.setTextSelection(2)
+  editor.commands.updateAttributes('heading', { level: 2 })
+  expect(REVIEW_TRACKED_PLUGIN_KEY.getState(editor.state)?.structural).toHaveLength(1)
+
+  const spy = vi.spyOn(ProseMirrorNode.prototype, 'descendants')
+  try {
+    // Untracked/selection-only and trivial inline text edits should not scan the full document
+    editor.commands.setTextSelection(10)
+    editor.view.dispatch(editor.state.tr.insertText('X', 10, 10).setMeta('vaulter:untracked', true))
+    expect(spy).not.toHaveBeenCalled()
+  } finally {
+    spy.mockRestore()
+  }
 })

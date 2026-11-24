@@ -25,6 +25,10 @@ export function attachDocxWorkerListener(scope: WorkerScopeLike): void {
   })
 }
 
-if (typeof self !== 'undefined' && typeof (self as unknown as WorkerScopeLike).postMessage === 'function') {
+if (
+  typeof self !== 'undefined' &&
+  typeof window === 'undefined' &&
+  typeof (self as unknown as WorkerScopeLike).postMessage === 'function'
+) {
   attachDocxWorkerListener(self as unknown as WorkerScopeLike)
 }

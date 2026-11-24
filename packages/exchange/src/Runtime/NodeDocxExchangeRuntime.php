@@ -15,12 +15,44 @@ use Vaulter\EditorPro\Exchange\Data\ExchangeRuntimeImportResult;
 use Vaulter\EditorPro\Exchange\Exceptions\ExchangeException;
 
 /**
- * Executes `@vaulter/editor-pro-docx` in an isolated Node subprocess over bounded stdin/stdout JSON.
+ * Executes `@vaulter/editor-pro-docx` in an isolated Node subprocess using temp-file binary
+ * transfer (`0600`) and optional persistent `--persistent` NDJSON worker mode.
  */
 #[Internal]
-final readonly class NodeDocxExchangeRuntime implements DocxExchangeRuntime
+final class NodeDocxExchangeRuntime implements DocxExchangeRuntime
 {
-    public function __construct(private ExchangeOptions $options) {}
+    /** @var resource|null */
+    private mixed $workerProcess = null;
+
+    /** @var array{0: resource, 1: resource, 2: resource}|null */
+    private ?array $workerPipes = null;
+
+    public function __construct(private readonly ExchangeOptions $options) {}
+
+    public function __destruct()
+    {
+        $this->shutdown();
+    }
+
+    public function shutdown(): void
+    {
+        if ($this->workerPipes !== null) {
+            foreach ($this->workerPipes as $pipe) {
+                if (is_resource($pipe)) {
+                    @fclose($pipe);
+                }
+            }
+            $this->workerPipes = null;
+        }
+        if (is_resource($this->workerProcess)) {
+            $status = proc_get_status($this->workerProcess);
+            if ($status['running']) {
+                @proc_terminate($this->workerProcess);
+            }
+            @proc_close($this->workerProcess);
+        }
+        $this->workerProcess = null;
+    }
 
     public function importDocx(
         string $docxBytes,
@@ -29,23 +61,34 @@ final readonly class NodeDocxExchangeRuntime implements DocxExchangeRuntime
         array $options = [],
     ): ExchangeRuntimeImportResult {
         $requestId = (string) Str::uuid();
-        $payload = [
-            'version' => 1,
-            'request_id' => $requestId,
-            'operation' => 'import',
-            'profile_id' => $profileId,
-            'docx_b64' => base64_encode($docxBytes),
-            'quotas' => [
-                'maxEntries' => $this->options->zipMaxEntries,
-                'maxFileBytes' => $this->options->zipMaxEntryBytes,
-                'maxTotalBytes' => $this->options->zipMaxTotalBytes,
-                'maxCompressionRatio' => $this->options->zipMaxRatio,
-            ],
-            ...($sourceMarker !== null ? ['source_marker' => $sourceMarker] : []),
-            ...($options !== [] ? ['options' => $options] : []),
-        ];
+        $inputPath = $this->createTempFile('vedx-in-');
 
-        $response = $this->invoke($payload, $requestId);
+        try {
+            $written = @file_put_contents($inputPath, $docxBytes);
+            if ($written !== strlen($docxBytes)) {
+                throw ExchangeException::runtimeFailed('temp_file_failed', 'Failed to write temporary DOCX input file.');
+            }
+
+            $payload = [
+                'version' => 1,
+                'request_id' => $requestId,
+                'operation' => 'import',
+                'profile_id' => $profileId,
+                'docx_path' => $inputPath,
+                'quotas' => [
+                    'maxEntries' => $this->options->zipMaxEntries,
+                    'maxFileBytes' => $this->options->zipMaxEntryBytes,
+                    'maxTotalBytes' => $this->options->zipMaxTotalBytes,
+                    'maxCompressionRatio' => $this->options->zipMaxRatio,
+                ],
+                ...($sourceMarker !== null ? ['source_marker' => $sourceMarker] : []),
+                ...($options !== [] ? ['options' => $options] : []),
+            ];
+
+            $response = $this->invoke($payload, $requestId);
+        } finally {
+            @unlink($inputPath);
+        }
 
         $rawDoc = $response['document'] ?? null;
         $rawReport = $response['report'] ?? null;
@@ -82,68 +125,81 @@ final readonly class NodeDocxExchangeRuntime implements DocxExchangeRuntime
         $title = is_string($options['title'] ?? null) ? $options['title'] : null;
         $creator = is_string($options['creator'] ?? null) ? $options['creator'] : null;
 
-        $payload = [
-            'version' => 1,
-            'request_id' => $requestId,
-            'operation' => 'export',
-            'profile_id' => $profileId,
-            'document' => $document,
-            ...($projection !== null ? ['projection' => $projection] : []),
-            ...($sourceMarker !== null ? ['source_marker' => $sourceMarker] : []),
-            ...($discussions !== [] ? ['discussions' => $discussions] : []),
-            ...($title !== null ? ['title' => $title] : []),
-            ...($creator !== null ? ['creator' => $creator] : []),
-            ...($options !== [] ? ['options' => $options] : []),
-        ];
+        $outputPath = $this->createTempFile('vedx-out-');
 
         try {
-            $response = $this->invoke($payload, $requestId);
-        } catch (ExchangeException $blocked) {
-            if ($blocked->problemCode() === 'exchange_profile_blocked') {
+            $payload = [
+                'version' => 1,
+                'request_id' => $requestId,
+                'operation' => 'export',
+                'profile_id' => $profileId,
+                'output_path' => $outputPath,
+                'document' => $document,
+                ...($projection !== null ? ['projection' => $projection] : []),
+                ...($sourceMarker !== null ? ['source_marker' => $sourceMarker] : []),
+                ...($discussions !== [] ? ['discussions' => $discussions] : []),
+                ...($title !== null ? ['title' => $title] : []),
+                ...($creator !== null ? ['creator' => $creator] : []),
+                ...($options !== [] ? ['options' => $options] : []),
+            ];
+
+            try {
+                $response = $this->invoke($payload, $requestId);
+            } catch (ExchangeException $blocked) {
+                if ($blocked->problemCode() === 'exchange_profile_blocked') {
+                    return new ExchangeRuntimeExportResult(
+                        blocked: true,
+                        docxBytes: null,
+                        docxSha256: null,
+                        report: ['blocked' => true, 'blocking_reasons' => [$blocked->getMessage()]],
+                        semantic: null,
+                    );
+                }
+                throw $blocked;
+            }
+
+            $rawReport = $response['report'] ?? null;
+            $rawSemantic = $response['semantic'] ?? null;
+            if ((bool) ($response['blocked'] ?? false)) {
                 return new ExchangeRuntimeExportResult(
                     blocked: true,
                     docxBytes: null,
                     docxSha256: null,
-                    report: ['blocked' => true, 'blocking_reasons' => [$blocked->getMessage()]],
-                    semantic: null,
+                    report: is_array($rawReport) ? self::stringKeyMap($rawReport) : ['blocked' => true],
+                    semantic: is_array($rawSemantic) ? self::stringKeyMap($rawSemantic) : null,
                 );
             }
-            throw $blocked;
-        }
 
-        $rawReport = $response['report'] ?? null;
-        $rawSemantic = $response['semantic'] ?? null;
-        if ((bool) ($response['blocked'] ?? false)) {
+            $returnedPath = is_string($response['docx_path'] ?? null) ? $response['docx_path'] : '';
+            $expectedSha = is_string($response['docx_sha256'] ?? null) ? $response['docx_sha256'] : '';
+            if ($returnedPath !== $outputPath || preg_match('/\A[0-9a-f]{64}\z/', $expectedSha) !== 1 || ! is_array($rawReport)) {
+                throw ExchangeException::runtimeFailed('malformed_export_response');
+            }
+
+            clearstatcache(true, $outputPath);
+            $size = @filesize($outputPath);
+            if (! is_int($size) || $size <= 0) {
+                throw ExchangeException::runtimeFailed('malformed_export_response');
+            }
+            if ($size > $this->options->maxExportBytes) {
+                throw ExchangeException::zipLimitExceeded('export_size_limit');
+            }
+
+            $bytes = @file_get_contents($outputPath);
+            if (! is_string($bytes) || ! hash_equals($expectedSha, hash('sha256', $bytes))) {
+                throw ExchangeException::runtimeFailed('checksum_mismatch');
+            }
+
             return new ExchangeRuntimeExportResult(
-                blocked: true,
-                docxBytes: null,
-                docxSha256: null,
-                report: is_array($rawReport) ? self::stringKeyMap($rawReport) : ['blocked' => true],
+                blocked: false,
+                docxBytes: $bytes,
+                docxSha256: $expectedSha,
+                report: self::stringKeyMap($rawReport),
                 semantic: is_array($rawSemantic) ? self::stringKeyMap($rawSemantic) : null,
             );
+        } finally {
+            @unlink($outputPath);
         }
-
-        $b64 = is_string($response['docx_b64'] ?? null) ? $response['docx_b64'] : '';
-        $expectedSha = is_string($response['docx_sha256'] ?? null) ? $response['docx_sha256'] : '';
-        if ($b64 === '' || preg_match('/\A[0-9a-f]{64}\z/', $expectedSha) !== 1 || ! is_array($rawReport)) {
-            throw ExchangeException::runtimeFailed('malformed_export_response');
-        }
-
-        $bytes = base64_decode($b64, true);
-        if (! is_string($bytes) || ! hash_equals($expectedSha, hash('sha256', $bytes))) {
-            throw ExchangeException::runtimeFailed('checksum_mismatch');
-        }
-        if (strlen($bytes) > $this->options->maxExportBytes) {
-            throw ExchangeException::zipLimitExceeded('export_size_limit');
-        }
-
-        return new ExchangeRuntimeExportResult(
-            blocked: false,
-            docxBytes: $bytes,
-            docxSha256: $expectedSha,
-            report: self::stringKeyMap($rawReport),
-            semantic: is_array($rawSemantic) ? self::stringKeyMap($rawSemantic) : null,
-        );
     }
 
     /**
@@ -162,18 +218,22 @@ final readonly class NodeDocxExchangeRuntime implements DocxExchangeRuntime
             throw ExchangeException::invalidCommand('Failed to serialize exchange runtime request.', previous: $e);
         }
 
-        $process = new Process([$this->options->nodeBinary, $this->options->cliPath]);
-        $process->setInput($stdin."\n");
-        $process->setTimeout((float) $this->options->runtimeTimeoutSeconds);
-        $process->run();
+        if ($this->options->persistentWorker) {
+            $stdout = $this->invokePersistent($stdin."\n");
+        } else {
+            $process = new Process([$this->options->nodeBinary, $this->options->cliPath]);
+            $process->setInput($stdin."\n");
+            $process->setTimeout((float) $this->options->runtimeTimeoutSeconds);
+            $process->run();
 
-        $stdout = trim($process->getOutput());
-        if ($stdout === '') {
-            $stderr = trim($process->getErrorOutput());
-            throw ExchangeException::runtimeFailed(
-                'process_failed',
-                $stderr !== '' ? $stderr : 'DOCX runtime exited with empty output (code '.$process->getExitCode().').',
-            );
+            $stdout = trim($process->getOutput());
+            if ($stdout === '') {
+                $stderr = trim($process->getErrorOutput());
+                throw ExchangeException::runtimeFailed(
+                    'process_failed',
+                    $stderr !== '' ? $stderr : 'DOCX runtime exited with empty output (code '.$process->getExitCode().').',
+                );
+            }
         }
 
         try {
@@ -213,6 +273,125 @@ final readonly class NodeDocxExchangeRuntime implements DocxExchangeRuntime
         }
 
         return self::stringKeyMap($decoded);
+    }
+
+    private function createTempFile(string $prefix): string
+    {
+        $path = tempnam(sys_get_temp_dir(), $prefix);
+        if ($path === false) {
+            throw ExchangeException::runtimeFailed('temp_file_failed', 'Unable to allocate temporary DOCX file.');
+        }
+        if (! @chmod($path, 0o600)) {
+            @unlink($path);
+            throw ExchangeException::runtimeFailed('temp_file_failed', 'Unable to set permissions on temporary DOCX file.');
+        }
+
+        return $path;
+    }
+
+    private function invokePersistent(string $line): string
+    {
+        for ($attempt = 0; $attempt < 2; $attempt++) {
+            $reused = is_resource($this->workerProcess);
+            $pipes = $this->ensurePersistentWorker();
+            $written = @fwrite($pipes[0], $line);
+            @fflush($pipes[0]);
+            if ($written !== strlen($line)) {
+                $this->shutdown();
+                if ($reused && $attempt === 0) {
+                    continue;
+                }
+                throw ExchangeException::runtimeFailed('process_failed', 'Failed to write request to persistent DOCX worker.');
+            }
+
+            $deadline = microtime(true) + (float) $this->options->runtimeTimeoutSeconds;
+            $buffer = '';
+            while (true) {
+                $remaining = $deadline - microtime(true);
+                if ($remaining <= 0.0) {
+                    $this->shutdown();
+                    throw ExchangeException::runtimeFailed('process_timeout', 'Persistent DOCX worker timed out.');
+                }
+
+                $read = [$pipes[1]];
+                $write = null;
+                $except = null;
+                $sec = (int) floor($remaining);
+                $usec = (int) (($remaining - $sec) * 1_000_000);
+                $ready = @stream_select($read, $write, $except, $sec, $usec);
+                if ($ready === false) {
+                    $this->shutdown();
+                    throw ExchangeException::runtimeFailed('process_failed', 'stream_select failed on persistent DOCX worker.');
+                }
+                if ($ready === 0) {
+                    $this->shutdown();
+                    throw ExchangeException::runtimeFailed('process_timeout', 'Persistent DOCX worker timed out.');
+                }
+
+                $chunk = @fgets($pipes[1]);
+                if ($chunk === false) {
+                    $stderr = @stream_get_contents($pipes[2]);
+                    $this->shutdown();
+                    if ($reused && $attempt === 0) {
+                        break;
+                    }
+                    $detail = is_string($stderr) && trim($stderr) !== '' ? trim($stderr) : 'Persistent DOCX worker exited unexpectedly.';
+                    throw ExchangeException::runtimeFailed('process_failed', $detail);
+                }
+
+                $buffer .= $chunk;
+                if (str_ends_with($buffer, "\n")) {
+                    $trimmed = trim($buffer);
+                    if ($trimmed !== '') {
+                        return $trimmed;
+                    }
+                    $buffer = '';
+                }
+            }
+        }
+
+        throw ExchangeException::runtimeFailed('process_failed', 'Persistent DOCX worker failed.');
+    }
+
+    /** @return array{0: resource, 1: resource, 2: resource} */
+    private function ensurePersistentWorker(): array
+    {
+        if (is_resource($this->workerProcess) && $this->workerPipes !== null) {
+            $status = proc_get_status($this->workerProcess);
+            if ($status['running']) {
+                return $this->workerPipes;
+            }
+            $this->shutdown();
+        }
+
+        $descriptors = [
+            0 => ['pipe', 'r'],
+            1 => ['pipe', 'w'],
+            2 => ['pipe', 'w'],
+        ];
+        $pipes = [];
+        $process = @proc_open(
+            [$this->options->nodeBinary, $this->options->cliPath, '--persistent'],
+            $descriptors,
+            $pipes,
+        );
+        if (! is_resource($process)
+            || ! isset($pipes[0], $pipes[1], $pipes[2])
+            || ! is_resource($pipes[0])
+            || ! is_resource($pipes[1])
+            || ! is_resource($pipes[2])) {
+            if (is_resource($process)) {
+                @proc_close($process);
+            }
+            throw ExchangeException::runtimeFailed('process_failed', 'Unable to start persistent DOCX worker.');
+        }
+
+        stream_set_blocking($pipes[1], false);
+        stream_set_blocking($pipes[2], false);
+        $this->workerProcess = $process;
+        $this->workerPipes = [$pipes[0], $pipes[1], $pipes[2]];
+
+        return $this->workerPipes;
     }
 
     /**

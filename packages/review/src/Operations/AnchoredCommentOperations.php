@@ -4,15 +4,20 @@ declare(strict_types=1);
 
 namespace Vaulter\EditorPro\Review\Operations;
 
+use DateTimeImmutable;
+use DateTimeInterface;
+use DateTimeZone;
+use Illuminate\Support\Carbon;
+use JsonException;
 use Packman\Attributes\Api;
 use Packman\Attributes\Internal;
+use stdClass;
 use Vaulter\Data\Page;
 use Vaulter\Documents\Configuration\DocumentsOptions;
 use Vaulter\Documents\Data\Comments\AddCommentInput;
 use Vaulter\Documents\Data\Snapshots\CommentSnapshot;
 use Vaulter\Documents\DocumentsManager;
 use Vaulter\Documents\Exceptions\CommentNotFoundException;
-use Vaulter\Documents\Operations\CommentOperations;
 use Vaulter\Drive\Contracts\DriveExtension;
 use Vaulter\Drive\Contracts\DriveHandle;
 use Vaulter\Drive\Data\ListOptions;
@@ -88,7 +93,9 @@ final readonly class AnchoredCommentOperations implements DriveExtension
         $comments = $commentPage->items;
 
         $ids = array_map(static fn (CommentSnapshot $c): string => $c->id, $comments);
-        $roots = $filter === CommentFilterStatus::All ? [] : $this->threadRoots($documentComments, $node, $comments);
+        $roots = $filter === CommentFilterStatus::All || $comments === []
+            ? []
+            : $this->threadRoots($comments[0]->nodeId, $comments);
         foreach ($roots as $root) {
             $ids[] = $root->id;
         }
@@ -128,11 +135,26 @@ final readonly class AnchoredCommentOperations implements DriveExtension
         return new Page(items: $filtered, nextCursor: $commentPage->nextCursor);
     }
 
+    /** @var list<string> */
+    private const array COMMENT_COLUMNS = [
+        'id',
+        'node_id',
+        'parent_id',
+        'author_type',
+        'author_id',
+        'body',
+        'anchor',
+        'resolved_at',
+        'resolved_by',
+        'created_at',
+        'version',
+    ];
+
     /**
      * @param  list<CommentSnapshot>  $comments
      * @return array<string, CommentSnapshot> Thread roots keyed by reply ID
      */
-    private function threadRoots(CommentOperations $documents, NodeSnapshot|string|int $node, array $comments): array
+    private function threadRoots(string $nodeId, array $comments): array
     {
         $known = [];
         $replies = [];
@@ -143,10 +165,14 @@ final readonly class AnchoredCommentOperations implements DriveExtension
             }
         }
 
+        if ($replies === [] || ! $this->lookup->fitsKey($nodeId)) {
+            return [];
+        }
+
+        $queried = array_fill_keys(array_keys($known), true);
         $roots = [];
-        $cursor = null;
-        $hasMore = true;
-        while ($replies !== []) {
+
+        while (true) {
             foreach ($replies as $replyId => $parentId) {
                 while (isset($known[$parentId])) {
                     $parent = $known[$parentId];
@@ -161,17 +187,42 @@ final readonly class AnchoredCommentOperations implements DriveExtension
                 }
             }
 
-            if ($replies === [] || ! $hasMore) {
+            if ($replies === []) {
                 break;
             }
 
-            // Documents exposes the scoped comment list as a cursor feed.
-            $page = $documents->list($node, new ListOptions(perPage: 200, cursor: $cursor));
-            foreach ($page->items as $comment) {
-                $known[$comment->id] = $comment;
+            $missingIds = [];
+            foreach ($replies as $parentId) {
+                if (! isset($queried[$parentId])) {
+                    $queried[$parentId] = true;
+                    if ($this->lookup->fitsKey($parentId)) {
+                        $missingIds[] = $parentId;
+                    }
+                }
             }
-            $cursor = $page->nextCursor;
-            $hasMore = $cursor !== null;
+
+            if ($missingIds === []) {
+                break;
+            }
+
+            $fetchedAny = false;
+            foreach (array_chunk($missingIds, 500) as $chunk) {
+                $rows = $this->lookup->connection()
+                    ->table($this->lookup->table('node_comments'))
+                    ->where('node_id', $nodeId)
+                    ->whereIn('id', $chunk)
+                    ->get(self::COMMENT_COLUMNS);
+
+                foreach ($rows as $row) {
+                    $snapshot = self::rowToCommentSnapshot($row);
+                    $known[$snapshot->id] = $snapshot;
+                    $fetchedAny = true;
+                }
+            }
+
+            if (! $fetchedAny) {
+                break;
+            }
         }
 
         return $roots;
@@ -179,26 +230,104 @@ final readonly class AnchoredCommentOperations implements DriveExtension
 
     public function find(NodeSnapshot|string|int $node, CommentSnapshot|string|int $comment): AnchoredCommentData
     {
+        $drive = $this->drive();
+        $nodeSnapshot = $drive->nodes()->find($node);
+        if (! $this->documentsOptions->comments->enabled || ! $drive->profile()->commentsEnabled()) {
+            throw ProfileRestrictionException::forOperation('comments');
+        }
+
         $commentId = self::commentIdOf($comment);
-        $page = $this->list($node, CommentFilterStatus::All, new ListOptions(perPage: 100));
-        foreach ($page->items as $item) {
-            if ($item->comment->id === $commentId) {
-                return $item;
-            }
+        if (! $this->lookup->fitsKey($nodeSnapshot->id) || ! $this->lookup->fitsKey($commentId)) {
+            throw CommentNotFoundException::forNode($nodeSnapshot->id, $commentId);
         }
 
-        $cursor = $page->nextCursor;
-        while ($cursor !== null) {
-            $nextPage = $this->list($node, CommentFilterStatus::All, new ListOptions(cursor: $cursor, perPage: 100));
-            foreach ($nextPage->items as $item) {
-                if ($item->comment->id === $commentId) {
-                    return $item;
+        $row = $this->lookup->connection()
+            ->table($this->lookup->table('node_comments'))
+            ->where('id', $commentId)
+            ->where('node_id', $nodeSnapshot->id)
+            ->first(self::COMMENT_COLUMNS);
+
+        if (! $row instanceof stdClass) {
+            throw CommentNotFoundException::forNode($nodeSnapshot->id, $commentId);
+        }
+
+        $snapshot = self::rowToCommentSnapshot($row);
+        $anchor = $this->anchors->findByComment($snapshot->id);
+
+        return new AnchoredCommentData(
+            comment: $snapshot,
+            anchor: $anchor,
+            etag: self::commentTag($snapshot),
+        );
+    }
+
+    private static function rowToCommentSnapshot(stdClass $row): CommentSnapshot
+    {
+        /** @var int|string|null $rawId */
+        $rawId = $row->id ?? null;
+        /** @var int|string|null $rawNodeId */
+        $rawNodeId = $row->node_id ?? null;
+        /** @var int|string|null $rawParentId */
+        $rawParentId = $row->parent_id ?? null;
+        /** @var int|string|null $rawAuthorId */
+        $rawAuthorId = $row->author_id ?? null;
+        /** @var int|string|null $rawResolvedBy */
+        $rawResolvedBy = $row->resolved_by ?? null;
+
+        $anchor = null;
+        $rawAnchor = $row->anchor ?? null;
+        if (is_string($rawAnchor) && $rawAnchor !== '') {
+            try {
+                $decoded = json_decode($rawAnchor, true, 512, JSON_THROW_ON_ERROR);
+                if (is_array($decoded)) {
+                    $anchor = self::stringKeyMap($decoded);
                 }
+            } catch (JsonException) {
+                $anchor = null;
             }
-            $cursor = $nextPage->nextCursor;
+        } elseif (is_array($rawAnchor)) {
+            $anchor = self::stringKeyMap($rawAnchor);
         }
 
-        throw CommentNotFoundException::forNode(self::nodeIdOf($node), $commentId);
+        return new CommentSnapshot(
+            id: Identity::stringify($rawId),
+            nodeId: Identity::stringify($rawNodeId),
+            parentId: $rawParentId !== null ? Identity::stringify($rawParentId) : null,
+            authorType: is_string($row->author_type ?? null) ? $row->author_type : '',
+            authorId: Identity::stringify($rawAuthorId),
+            body: is_string($row->body ?? null) ? $row->body : '',
+            anchor: $anchor,
+            resolvedAt: self::parseUtcTime($row->resolved_at ?? null),
+            resolvedBy: $rawResolvedBy !== null ? Identity::stringify($rawResolvedBy) : null,
+            createdAt: self::parseUtcTime($row->created_at ?? null) ?? new DateTimeImmutable('@0'),
+            version: is_numeric($row->version ?? null) ? (int) $row->version : 0,
+        );
+    }
+
+    private static function parseUtcTime(mixed $raw): ?DateTimeImmutable
+    {
+        if ($raw instanceof DateTimeInterface) {
+            return DateTimeImmutable::createFromInterface($raw)->setTimezone(new DateTimeZone('UTC'));
+        }
+        if (is_string($raw) && $raw !== '') {
+            return Carbon::parse($raw)->toImmutable()->setTimezone(new DateTimeZone('UTC'));
+        }
+
+        return null;
+    }
+
+    /**
+     * @param  array<array-key, mixed>  $raw
+     * @return array<string, mixed>
+     */
+    private static function stringKeyMap(array $raw): array
+    {
+        $out = [];
+        foreach ($raw as $k => $v) {
+            $out[(string) $k] = $v;
+        }
+
+        return $out;
     }
 
     /**

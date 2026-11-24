@@ -16,14 +16,19 @@
   "files": [
     "dist"
   ],
-  "main": "./dist/vaulter-editor-pro-vue.umd.cjs",
+  "main": "./dist/vaulter-editor-pro-vue.cjs",
   "module": "./dist/vaulter-editor-pro-vue.js",
   "types": "./dist/index.d.ts",
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/vaulter-editor-pro-vue.js",
-      "require": "./dist/vaulter-editor-pro-vue.umd.cjs"
+      "require": "./dist/vaulter-editor-pro-vue.cjs"
+    },
+    "./worker": {
+      "types": "./dist/docx/localExportWorker.d.ts",
+      "import": "./dist/local-export-worker.js",
+      "require": "./dist/local-export-worker.cjs"
     }
   },
   "scripts": {

@@ -1,10 +1,10 @@
 import { Extension, Mark } from '@tiptap/core'
 import type { Editor } from '@tiptap/core'
 import { isHistoryTransaction } from '@tiptap/pm/history'
-import type { Node } from '@tiptap/pm/model'
+import { Fragment, type Node } from '@tiptap/pm/model'
 import type { EditorState, Transaction } from '@tiptap/pm/state'
 import { Plugin, PluginKey } from '@tiptap/pm/state'
-import { Mapping } from '@tiptap/pm/transform'
+import { AddMarkStep, AttrStep, Mapping, RemoveMarkStep, ReplaceStep } from '@tiptap/pm/transform'
 import { Decoration, DecorationSet } from '@tiptap/pm/view'
 import { ySyncPluginKey, yUndoPluginKey } from '@tiptap/y-tiptap'
 import type { Map as YMap, Transaction as YTransaction } from 'yjs'
@@ -12,7 +12,6 @@ import { trackStructure } from '../review/trackStructure'
 import { trackText } from '../review/trackText'
 import type { TextRun } from '../review/trackText'
 import {
-  findBlockPosById,
   getDocSnapshot,
   registerDocSnapshot,
   type TextSuggestionMetadata,
@@ -187,70 +186,148 @@ function splitsSurrogate(doc: Node, position: number): boolean {
   return /^[\uDC00-\uDFFF]/.test(doc.resolve(position).nodeAfter?.text ?? '')
 }
 
+interface CachedTrackedPluginData {
+  decorations: DecorationSet
+  textSuggestionsByBlock: Map<string, TrackedTextSuggestion[]>
+  blockPosById: Map<string, number> | null
+}
+
+const pluginStateCache = new WeakMap<TrackedChangesPluginState, CachedTrackedPluginData>()
+
+function fragmentHasSuggestionMark(fragment: Fragment): boolean {
+  for (let i = 0; i < fragment.childCount; i++) {
+    const child = fragment.child(i)
+    if (child.marks.some(mark => suggestionMarker(mark) !== null)) {
+      return true
+    }
+    if (!child.isText && child.content.size > 0 && fragmentHasSuggestionMark(child.content)) {
+      return true
+    }
+  }
+  return false
+}
+
+function collectBlockTextSuggestions(
+  block: Node,
+  blockId: string,
+  textMeta: Readonly<Record<string, TextSuggestionMetadata>>,
+  seen: ReadonlySet<string>,
+): TrackedTextSuggestion[] {
+  const textAgg = new Map<string, TrackedTextSuggestion>()
+  let offset = 0
+  block.forEach(node => {
+    for (const mark of node.marks) {
+      const marker = suggestionMarker(mark)
+      if (!marker || marker.kind === 'mark_change' || seen.has(marker.suggestionId)) continue
+      const meta = textMeta[marker.suggestionId]
+      const prev = textAgg.get(marker.suggestionId)
+      const text = node.text ?? ''
+      const end = offset + node.nodeSize
+      if (!prev) {
+        textAgg.set(marker.suggestionId, {
+          suggestionId: marker.suggestionId,
+          groupId: meta?.groupId ?? marker.groupId ?? marker.suggestionId,
+          parentId: marker.parentId,
+          kind: marker.kind,
+          blockId,
+          from: offset,
+          to: marker.kind === 'insert' ? offset : end,
+          before: marker.kind === 'delete' ? text : '',
+          after: marker.kind === 'insert' ? text : '',
+          author: meta?.author ?? marker.author ?? '',
+          conflicted: meta?.conflicted ?? false,
+          conflictReason: meta?.conflictReason ?? null,
+          conflictWithId: meta?.conflictWithId ?? null,
+        })
+      } else if (marker.kind === 'delete') {
+        prev.to = end
+        prev.before += text
+        prev.kind = prev.after ? 'replace' : 'delete'
+      } else {
+        prev.after += text
+        prev.kind = prev.before ? 'replace' : 'insert'
+      }
+    }
+    offset += node.nodeSize
+  })
+  return [...textAgg.values()]
+}
+
+function buildTextSuggestionsByBlock(
+  doc: Node,
+  pluginState: TrackedChangesPluginState,
+): Map<string, TrackedTextSuggestion[]> {
+  const seen = new Set<string>(pluginState.structural.map(s => s.suggestionId))
+  const byBlock = new Map<string, TrackedTextSuggestion[]>()
+  doc.descendants(block => {
+    if (!block.isTextblock || typeof block.attrs?.blockId !== 'string') return undefined
+    const items = collectBlockTextSuggestions(block, block.attrs.blockId, pluginState.textMeta, seen)
+    if (items.length > 0) {
+      byBlock.set(block.attrs.blockId, items)
+    }
+    return false
+  })
+  return byBlock
+}
+
 function collectCurrentSuggestions(
   doc: Node,
   pluginState: TrackedChangesPluginState,
 ): TrackedSuggestion[] {
+  const cached = pluginStateCache.get(pluginState)
+  const byBlock = cached?.textSuggestionsByBlock ?? buildTextSuggestionsByBlock(doc, pluginState)
   const results: TrackedSuggestion[] = [...pluginState.structural]
-  const seen = new Set<string>(pluginState.structural.map(s => s.suggestionId))
-
-  // Collect open text suggestions anchored inside doc blocks using textMeta where available
-  const textAgg = new Map<string, TrackedTextSuggestion>()
-  doc.descendants(block => {
-    if (!block.isTextblock || typeof block.attrs?.blockId !== 'string') return undefined
-    const blockId = block.attrs.blockId
-    let offset = 0
-    block.forEach(node => {
-      for (const mark of node.marks) {
-        const marker = suggestionMarker(mark)
-        if (!marker || marker.kind === 'mark_change' || seen.has(marker.suggestionId)) continue
-        const meta = pluginState.textMeta[marker.suggestionId]
-        const prev = textAgg.get(marker.suggestionId)
-        const text = node.text ?? ''
-        const end = offset + node.nodeSize
-        if (!prev) {
-          textAgg.set(marker.suggestionId, {
-            suggestionId: marker.suggestionId,
-            groupId: meta?.groupId ?? marker.groupId ?? marker.suggestionId,
-            parentId: marker.parentId,
-            kind: marker.kind,
-            blockId,
-            from: offset,
-            to: marker.kind === 'insert' ? offset : end,
-            before: marker.kind === 'delete' ? text : '',
-            after: marker.kind === 'insert' ? text : '',
-            author: meta?.author ?? marker.author ?? '',
-            conflicted: meta?.conflicted ?? false,
-            conflictReason: meta?.conflictReason ?? null,
-            conflictWithId: meta?.conflictWithId ?? null,
-          })
-        } else {
-          if (marker.kind === 'delete') {
-            prev.to = end
-            prev.before += text
-            prev.kind = prev.after ? 'replace' : 'delete'
-          } else {
-            prev.after += text
-            prev.kind = prev.before ? 'replace' : 'insert'
-          }
-        }
-      }
-      offset += node.nodeSize
-    })
-    return false
-  })
-
-  for (const s of textAgg.values()) {
-    results.push(s)
+  for (const items of byBlock.values()) {
+    results.push(...items)
   }
   return results
 }
 
-function buildDecorations(doc: Node, state: TrackedChangesPluginState): DecorationSet {
+function buildDecorationsFromIndex(
+  doc: Node,
+  structural: readonly TrackedStructuralRecord[],
+  blockPosById: Map<string, number> | null,
+): { decorations: DecorationSet; blockPosById: Map<string, number> | null } {
+  const nonMark = structural.filter(rec => rec.kind !== 'mark_change')
+  if (nonMark.length === 0) {
+    return { decorations: DecorationSet.empty, blockPosById }
+  }
+
+  const needed = new Set(nonMark.map(rec => rec.blockId))
+  const resolved = new Map<string, { pos: number; node: Node }>()
+  const missing = new Set<string>()
+
+  for (const blockId of needed) {
+    const cachedPos = blockPosById?.get(blockId)
+    if (cachedPos !== undefined && cachedPos >= 0 && cachedPos < doc.content.size) {
+      const node = doc.nodeAt(cachedPos)
+      if (node && node.attrs?.blockId === blockId) {
+        resolved.set(blockId, { pos: cachedPos, node })
+        continue
+      }
+    }
+    missing.add(blockId)
+  }
+
+  let nextIndex = blockPosById
+  if (missing.size > 0) {
+    nextIndex = new Map<string, number>()
+    doc.descendants((node, pos) => {
+      const id = node.attrs?.blockId
+      if (typeof id === 'string' && id !== '') {
+        nextIndex!.set(id, pos)
+        if (missing.has(id)) {
+          resolved.set(id, { pos, node })
+          missing.delete(id)
+        }
+      }
+      return undefined
+    })
+  }
+
   const decorations: Decoration[] = []
-  for (const rec of state.structural) {
-    if (rec.kind === 'mark_change') continue
-    const hit = findBlockPosById(doc, rec.blockId)
+  for (const rec of nonMark) {
+    const hit = resolved.get(rec.blockId)
     if (!hit) continue
     decorations.push(
       Decoration.node(hit.pos, hit.pos + hit.node.nodeSize, {
@@ -261,7 +338,140 @@ function buildDecorations(doc: Node, state: TrackedChangesPluginState): Decorati
       }),
     )
   }
-  return DecorationSet.create(doc, decorations)
+  return { decorations: DecorationSet.create(doc, decorations), blockPosById: nextIndex }
+}
+
+function mapBlockPosIndex(
+  prevIndex: Map<string, number> | null,
+  tr: Transaction,
+  oldDoc: Node,
+): Map<string, number> | null {
+  if (!prevIndex) return null
+  if (!tr.docChanged) return prevIndex
+  const canMap = tr.steps.every(step => {
+    if (step instanceof AddMarkStep || step instanceof RemoveMarkStep) return true
+    if (step instanceof AttrStep) return step.attr !== 'blockId'
+    if (step instanceof ReplaceStep && step.slice.openStart === 0 && step.slice.openEnd === 0) {
+      const $from = oldDoc.resolve(step.from)
+      const $to = oldDoc.resolve(step.to)
+      if (!$from.sameParent($to)) return false
+      for (let i = 0; i < step.slice.content.childCount; i++) {
+        if (!step.slice.content.child(i).isInline) return false
+      }
+      return true
+    }
+    return false
+  })
+  if (!canMap) return null
+  const mapped = new Map<string, number>()
+  for (const [id, pos] of prevIndex) {
+    mapped.set(id, tr.mapping.map(pos, -1))
+  }
+  return mapped
+}
+
+function isTrivialInlineNoMarkEdit(
+  tr: Transaction,
+  oldDoc: Node,
+  prevMap: Map<string, TrackedTextSuggestion[]>,
+): boolean {
+  if (tr.steps.length === 0) return true
+  for (const step of tr.steps) {
+    if (!(step instanceof ReplaceStep) || step.slice.openStart !== 0 || step.slice.openEnd !== 0) {
+      return false
+    }
+    const $from = oldDoc.resolve(step.from)
+    const $to = oldDoc.resolve(step.to)
+    if (!$from.sameParent($to) || !$from.parent.isTextblock) return false
+    const blockId = $from.parent.attrs?.blockId
+    if (typeof blockId !== 'string' || prevMap.has(blockId)) return false
+    if (fragmentHasSuggestionMark(step.slice.content)) return false
+  }
+  return true
+}
+
+function updateTextSuggestionsCache(
+  prevMap: Map<string, TrackedTextSuggestion[]>,
+  tr: Transaction,
+  oldDoc: Node,
+  nextState: TrackedChangesPluginState,
+  prevState: TrackedChangesPluginState,
+): Map<string, TrackedTextSuggestion[]> {
+  if (!tr.docChanged) {
+    if (nextState.textMeta === prevState.textMeta && nextState.structural === prevState.structural) {
+      return prevMap
+    }
+    const seen = new Set<string>(nextState.structural.map(s => s.suggestionId))
+    const refreshed = new Map<string, TrackedTextSuggestion[]>()
+    for (const [blockId, items] of prevMap) {
+      const nextItems = items
+        .filter(item => !seen.has(item.suggestionId))
+        .map(item => {
+          const meta = nextState.textMeta[item.suggestionId]
+          return meta
+            ? {
+                ...item,
+                author: meta.author,
+                groupId: meta.groupId,
+                conflicted: meta.conflicted ?? false,
+                conflictReason: meta.conflictReason ?? null,
+                conflictWithId: meta.conflictWithId ?? null,
+              }
+            : item
+        })
+      if (nextItems.length > 0) {
+        refreshed.set(blockId, nextItems)
+      }
+    }
+    return refreshed
+  }
+
+  if (!tr.getMeta(REVIEW_DECISION_META) && !tr.getMeta(ySyncPluginKey) && !isHistoryTransaction(tr)) {
+    if (isTrivialInlineNoMarkEdit(tr, oldDoc, prevMap)) {
+      return prevMap
+    }
+
+    const nextMap = new Map(prevMap)
+    const seen = new Set<string>(nextState.structural.map(s => s.suggestionId))
+    const dirtyRanges: Array<{ from: number; to: number }> = []
+
+    for (let i = 0; i < tr.mapping.maps.length; i++) {
+      const stepMap = tr.mapping.maps[i]
+      const tailMapping = tr.mapping.slice(i + 1)
+      stepMap.forEach((oldStart, oldEnd, newStart, newEnd) => {
+        oldDoc.nodesBetween(Math.max(0, oldStart), Math.min(oldDoc.content.size, oldEnd), node => {
+          if (node.isTextblock && typeof node.attrs?.blockId === 'string') {
+            nextMap.delete(node.attrs.blockId)
+            return false
+          }
+          return undefined
+        })
+        dirtyRanges.push({
+          from: tailMapping.map(newStart, -1),
+          to: tailMapping.map(newEnd, 1),
+        })
+      })
+    }
+
+    for (const range of dirtyRanges) {
+      const from = Math.max(0, Math.min(range.from, tr.doc.content.size))
+      const to = Math.max(from, Math.min(range.to, tr.doc.content.size))
+      tr.doc.nodesBetween(from, to, block => {
+        if (!block.isTextblock || typeof block.attrs?.blockId !== 'string') return undefined
+        const blockId = block.attrs.blockId
+        const items = collectBlockTextSuggestions(block, blockId, nextState.textMeta, seen)
+        if (items.length > 0) {
+          nextMap.set(blockId, items)
+        } else {
+          nextMap.delete(blockId)
+        }
+        return false
+      })
+    }
+    return nextMap
+  }
+
+  return buildTextSuggestionsByBlock(tr.doc, nextState)
 }
 
 export const VaulterTrackedChanges = Extension.create<TrackedChangesOptions, TrackedChangesStorage>({
@@ -430,10 +640,16 @@ export const VaulterTrackedChanges = Extension.create<TrackedChangesOptions, Tra
       state: {
         init: (_config, instance) => {
           const initial: TrackedChangesPluginState = { structural: [], textMeta: {} }
+          pluginStateCache.set(initial, {
+            decorations: DecorationSet.empty,
+            textSuggestionsByBlock: buildTextSuggestionsByBlock(instance.doc, initial),
+            blockPosById: null,
+          })
           registerDocSnapshot(instance.doc, initial)
           return initial
         },
         apply: (tr, prev, oldState) => {
+          const prevCache = pluginStateCache.get(prev)
           const decisionMeta = tr.getMeta(REVIEW_DECISION_META) as {
             structural: readonly TrackedStructuralRecord[]
             textMeta: Readonly<Record<string, TextSuggestionMetadata>>
@@ -443,6 +659,16 @@ export const VaulterTrackedChanges = Extension.create<TrackedChangesOptions, Tra
               structural: decisionMeta.structural,
               textMeta: decisionMeta.textMeta,
             }
+            const nextBlockIndex = mapBlockPosIndex(prevCache?.blockPosById ?? null, tr, oldState.doc)
+            const { decorations, blockPosById } = buildDecorationsFromIndex(tr.doc, decided.structural, nextBlockIndex)
+            const textSuggestionsByBlock = updateTextSuggestionsCache(
+              prevCache?.textSuggestionsByBlock ?? new Map(),
+              tr,
+              oldState.doc,
+              decided,
+              prev,
+            )
+            pluginStateCache.set(decided, { decorations, textSuggestionsByBlock, blockPosById })
             registerDocSnapshot(tr.doc, decided)
             return decided
           }
@@ -455,7 +681,8 @@ export const VaulterTrackedChanges = Extension.create<TrackedChangesOptions, Tra
           } | undefined
 
           const records = sharedRecords(oldState)
-          let structural = records && (tr.getMeta(ySyncPluginKey) || tr.getMeta(sharedStructureMeta))
+          const sharedSyncChanged = Boolean(records && (tr.getMeta(ySyncPluginKey) || tr.getMeta(sharedStructureMeta)))
+          let structural = sharedSyncChanged && records
             ? readSharedRecords(records)
             : [...prev.structural]
           let textMeta = prev.textMeta
@@ -475,24 +702,58 @@ export const VaulterTrackedChanges = Extension.create<TrackedChangesOptions, Tra
             if (structureMeta.textMeta) {
               textMeta = structureMeta.textMeta
             }
-          } else if (tr.docChanged) {
-            // Preserve live doc snapshot state on text edits / history replay
-            if (isHistoryTransaction(tr)) {
-              // Filter out structural records whose block/marks are no longer present after undo
-              structural = structural.filter(r => {
-                if (r.kind === 'mark_change') {
-                  let hasMark = false
-                  tr.doc.descendants(n => {
-                    if (n.marks.some(m => m.attrs?.suggestionId === r.suggestionId)) hasMark = true
-                  })
-                  return hasMark
+          } else if (tr.docChanged && isHistoryTransaction(tr)) {
+            // Single-pass filter for mark_change records whose marks are no longer present after undo
+            const markIds = new Set(
+              structural.filter(r => r.kind === 'mark_change').map(r => r.suggestionId),
+            )
+            if (markIds.size > 0) {
+              const present = new Set<string>()
+              tr.doc.descendants(n => {
+                if (present.size === markIds.size) return false
+                for (const m of n.marks) {
+                  const id = m.attrs?.suggestionId
+                  if (typeof id === 'string' && markIds.has(id)) {
+                    present.add(id)
+                  }
                 }
-                return true
+                return undefined
               })
+              structural = structural.filter(r => r.kind !== 'mark_change' || present.has(r.suggestionId))
             }
           }
 
           const nextState: TrackedChangesPluginState = { structural, textMeta }
+          const structuralChanged = sharedSyncChanged
+            || Boolean(structureMeta?.removedIds?.length)
+            || Boolean(structureMeta?.updatedRecords?.length)
+            || Boolean(structureMeta?.addedRecords?.length)
+            || (tr.docChanged && isHistoryTransaction(tr))
+
+          let blockPosById = mapBlockPosIndex(prevCache?.blockPosById ?? null, tr, oldState.doc)
+          let decorations: DecorationSet
+          if (!structuralChanged && prevCache) {
+            if (structural.length === 0) {
+              decorations = DecorationSet.empty
+            } else if (!tr.docChanged) {
+              decorations = prevCache.decorations
+            } else {
+              decorations = prevCache.decorations.map(tr.mapping, tr.doc)
+            }
+          } else {
+            const rebuilt = buildDecorationsFromIndex(tr.doc, structural, blockPosById)
+            decorations = rebuilt.decorations
+            blockPosById = rebuilt.blockPosById
+          }
+
+          const textSuggestionsByBlock = updateTextSuggestionsCache(
+            prevCache?.textSuggestionsByBlock ?? new Map(),
+            tr,
+            oldState.doc,
+            nextState,
+            prev,
+          )
+          pluginStateCache.set(nextState, { decorations, textSuggestionsByBlock, blockPosById })
           registerDocSnapshot(tr.doc, nextState)
           return nextState
         },
@@ -501,7 +762,7 @@ export const VaulterTrackedChanges = Extension.create<TrackedChangesOptions, Tra
         decorations: state => {
           const pluginState = REVIEW_TRACKED_PLUGIN_KEY.getState(state)
           if (!pluginState || pluginState.structural.length === 0) return DecorationSet.empty
-          return buildDecorations(state.doc, pluginState)
+          return pluginStateCache.get(pluginState)?.decorations ?? DecorationSet.empty
         },
         handleDOMEvents: {
           compositionstart: view => {
