@@ -329,7 +329,16 @@ final readonly class ExchangeOperations implements DriveExtension
             $previewDoc = is_array($previewPayload['document'] ?? null) ? self::stringMap($previewPayload['document']) : null;
         }
 
-        return new ExchangePreviewData($job, $previewDoc, $semantic);
+        $applied = $job->state === ExchangeJobState::Applied;
+
+        return new ExchangePreviewData(
+            job: $job,
+            previewDocument: $previewDoc,
+            semantic: $semantic,
+            writeMode: $applied ? $docMeta['write_mode'] : null,
+            appliedGeneration: $applied ? $docMeta['collab_epoch'] : null,
+            appliedPosition: $applied ? $docMeta['state_version'] : null,
+        );
     }
 
     public function download(NodeSnapshot|string|int $document, string $jobId): ExchangeDownloadData

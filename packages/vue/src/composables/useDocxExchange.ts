@@ -177,16 +177,24 @@ export function useDocxExchange(options: UseDocxExchangeOptions): UseDocxExchang
       applyConfirmed.value = false
       applyReceipt.value = null
     }
-    if (next.state === 'applied' && next.apply_command_id && next.apply_receipt_id && !applyReceipt.value) {
+    if (
+      next.state === 'applied' &&
+      next.apply_command_id &&
+      next.apply_receipt_id &&
+      !applyReceipt.value &&
+      next.write_mode != null &&
+      next.applied_generation != null &&
+      next.applied_position != null
+    ) {
       applyReceipt.value = {
         job_id: next.id,
         document_id: next.document_id,
         state: next.state,
         apply_command_id: next.apply_command_id,
         apply_receipt_id: next.apply_receipt_id,
-        write_mode: 'snapshot',
-        generation: next.source_generation ?? 0,
-        position: next.source_position ?? 0,
+        write_mode: next.write_mode,
+        generation: next.applied_generation,
+        position: next.applied_position,
         replayed: true,
         pending_commit: false,
       }

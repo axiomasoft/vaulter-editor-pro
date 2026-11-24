@@ -4,10 +4,12 @@ declare(strict_types=1);
 
 use Illuminate\Routing\Route;
 use Illuminate\Support\Facades\Route as Router;
+use Illuminate\Support\Facades\Schema;
 use Symfony\Component\Finder\Finder;
 use Vaulter\Operations\IdempotencyPolicy;
 use Vaulter\Operations\OperationCatalog;
 use Vaulter\Operations\OperationPolicy;
+use Vaulter\Schema\SchemaHelpers;
 
 it('declares all review operations and binds every mutating route 1:1 with idempotency policies', function (): void {
     /** @var array<string, OperationPolicy> $policies */
@@ -84,4 +86,27 @@ it('never imports internal vaulter classes or Eloquent models on #[Api] files', 
 
     expect($apiViolations)->toBe([])
         ->and($internalImports)->toBe([]);
+});
+
+it('covers review document foreign keys without a redundant single-column document_id index', function (): void {
+    $schema = file_get_contents(dirname(__DIR__, 2).'/src/Schema/ReviewSchema.php');
+    expect($schema)->toBeString()
+        ->and($schema)->not->toContain('foreignKeyIndex(');
+
+    $helpers = app(SchemaHelpers::class);
+    foreach (['document_revision_pins', 'document_comment_anchors', 'document_suggestions'] as $entity) {
+        $table = $helpers->table($entity);
+        $covering = false;
+        foreach (Schema::getIndexes($table) as $index) {
+            expect($index['name'])->not->toEndWith('document_id_index')
+                ->and($index['name'])->not->toEndWith('document_id_fk_idx');
+            if ($index['primary'] !== true) {
+                expect($index['columns'])->not->toBe(['document_id']);
+            }
+            if (($index['columns'][0] ?? null) === 'document_id' && count($index['columns']) > 1) {
+                $covering = true;
+            }
+        }
+        expect($covering)->toBeTrue();
+    }
 });

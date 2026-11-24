@@ -316,6 +316,13 @@ it('roundtrips rich documents through server DOCX export, download, import previ
     expect(json_encode($headAfterApply->content->toArray(), JSON_THROW_ON_ERROR))
         ->toContain('Edited external DOCX clause');
 
+    $this->getJson('api/vaulter/v1/documents/'.$docNode->id.'/exchange-jobs/'.$editedJobId)
+        ->assertOk()
+        ->assertJsonPath('data.state', 'applied')
+        ->assertJsonPath('data.write_mode', 'snapshot')
+        ->assertJsonPath('data.applied_generation', $headAfterApply->epoch)
+        ->assertJsonPath('data.applied_position', $headAfterApply->stateVersion);
+
     // 5. Re-export after apply and confirm updated text roundtrips back into DOCX.
     $reExport = $this->withHeaders(['Idempotency-Key' => 'http-reexport-3'])
         ->postJson('api/vaulter/v1/documents/'.$docNode->id.'/exchange-jobs', [

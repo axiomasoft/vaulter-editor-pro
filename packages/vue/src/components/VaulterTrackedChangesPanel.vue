@@ -14,6 +14,7 @@ const props = withDefaults(
     initialSuggestions?: DocumentSuggestion[]
     clientOptions?: UseTrackedChangesOptions
     autoLoad?: boolean
+    resolveAuthor?: (authorSubject: string) => string
   }>(),
   {
     editor: null,
@@ -22,6 +23,7 @@ const props = withDefaults(
     initialSuggestions: undefined,
     clientOptions: undefined,
     autoLoad: true,
+    resolveAuthor: undefined,
   },
 )
 
@@ -59,6 +61,10 @@ const {
   capabilities: props.capabilities ?? props.clientOptions?.capabilities,
   initialSuggestions: props.initialSuggestions ?? props.clientOptions?.initialSuggestions,
 })
+
+function authorLabel(authorSubject: string): string {
+  return props.resolveAuthor?.(authorSubject) ?? authorSubject
+}
 
 const projections: Array<{ mode: TrackedProjection; label: string }> = [
   { mode: 'original', label: 'Original' },
@@ -252,7 +258,15 @@ defineExpose({
       >
         <div class="vaulter-tracked-changes__meta">
           <span class="vaulter-tracked-changes__kind">{{ item.kind }}</span>
-          <span class="vaulter-tracked-changes__author">{{ item.author_subject }}</span>
+          <span class="vaulter-tracked-changes__author">
+            <slot
+              name="author"
+              :author-subject="item.author_subject"
+              :label="authorLabel(item.author_subject)"
+            >
+              {{ authorLabel(item.author_subject) }}
+            </slot>
+          </span>
           <span class="vaulter-tracked-changes__state">{{ item.state }}</span>
           <span v-if="item.pending_commit" class="vaulter-tracked-changes__pending" data-pending-commit="true">
             pending commit

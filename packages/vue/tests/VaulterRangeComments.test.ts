@@ -188,8 +188,38 @@ describe('VaulterRangeComments sidebar', () => {
     await flushPromises()
     expect(client.comments.add).toHaveBeenCalledWith('node-1', { body: 'Follow-up from sidebar', parent_id: 'c-active', anchor: null }, undefined)
     expect(wrapper.text()).toContain('Follow-up from sidebar')
+    expect(wrapper.find('[data-comment-id="c-active"] .vaulter-range-comments__author').text()).toBe('user#1')
 
     wrapper.unmount()
+  })
+
+  it('resolves author names through a prop and replaces the label through the author slot', async () => {
+    const comment = makeAnchoredComment({ id: 'c-named', body: 'Named author' })
+    const client = makeMockClient([comment])
+    const resolved = mount(VaulterRangeComments, {
+      props: {
+        nodeId: 'node-1',
+        actualityContext: { currentGeneration: 1 },
+        clientOptions: { client },
+        resolveAuthor: (author: { type: string; id: string }) => `Ada ${author.id}`,
+      },
+    })
+    await flushPromises()
+    expect(resolved.get('.vaulter-range-comments__author').text()).toBe('Ada 1')
+
+    const slotted = mount(VaulterRangeComments, {
+      props: {
+        nodeId: 'node-1',
+        actualityContext: { currentGeneration: 1 },
+        clientOptions: { client },
+      },
+      slots: {
+        author: `<template #author="{ label }"><em data-author-label>{{ label }}</em></template>`,
+      },
+    })
+    await flushPromises()
+    expect(slotted.get('[data-author-label]').text()).toBe('user#1')
+    expect(slotted.find('.vaulter-range-comments__author').text()).toBe('user#1')
   })
 
   it('evaluates stale_generation and shifted snapshot actuality indicators', async () => {

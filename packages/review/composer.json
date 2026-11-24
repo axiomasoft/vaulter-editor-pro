@@ -1,6 +1,6 @@
 {
     "name": "axiomasoft/vaulter-editor-pro-review",
-    "description": "Vaulter Editor Pro — revision pinning, preview/compare and generation-scoped range comment anchors.",
+    "description": "Vaulter Editor Pro — revision pinning, preview/compare and generation-scoped range comment anchors. PHP 8.2 and 8.3 are not supported.",
     "type": "library",
     "license": "proprietary",
     "homepage": "https://github.com/axiomasoft/vaulter-editor-pro",

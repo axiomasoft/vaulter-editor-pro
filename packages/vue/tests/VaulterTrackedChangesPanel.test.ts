@@ -173,4 +173,35 @@ describe('VaulterTrackedChangesPanel', () => {
     expect((wrapper.find('[data-suggestion-id="sp"] .vaulter-tracked-changes__accept').element as HTMLButtonElement).disabled).toBe(true)
     expect((wrapper.find('[data-suggestion-id="sp"] .vaulter-tracked-changes__reject').element as HTMLButtonElement).disabled).toBe(true)
   })
+
+  it('resolves author_subject through a prop and the author slot without changing data-author', async () => {
+    const item = makeSuggestion({ id: 's-named', author_subject: 'user:ada' })
+    const client = makeMockClient([item])
+    const resolved = mount(VaulterTrackedChangesPanel, {
+      props: {
+        nodeId: 'doc_1',
+        clientOptions: { client },
+        resolveAuthor: (authorSubject: string) => authorSubject.replace('user:', 'Name '),
+      },
+    })
+    await flushPromises()
+    const row = resolved.get('[data-suggestion-id="s-named"]')
+    expect(row.attributes('data-author')).toBe('user:ada')
+    expect(row.get('.vaulter-tracked-changes__author').text()).toBe('Name ada')
+
+    const slotted = mount(VaulterTrackedChangesPanel, {
+      props: {
+        nodeId: 'doc_1',
+        autoLoad: false,
+        initialSuggestions: [item],
+        clientOptions: { client },
+      },
+      slots: {
+        author: `<template #author="{ label }"><em data-author-label>{{ label }}</em></template>`,
+      },
+    })
+    await flushPromises()
+    expect(slotted.get('[data-author-label]').text()).toBe('user:ada')
+    expect(slotted.get('[data-suggestion-id="s-named"]').attributes('data-author')).toBe('user:ada')
+  })
 })

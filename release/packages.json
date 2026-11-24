@@ -14,7 +14,8 @@
                 "axiomasoft/vaulter-core": "^1.0",
                 "axiomasoft/vaulter-drive": "^1.0",
                 "axiomasoft/vaulter-documents": "^1.0",
-                "axiomasoft/vaulter-media": "^1.0"
+                "axiomasoft/vaulter-media": "^1.0",
+                "axiomasoft/vaulter-collaboration": "^1.0"
             }
         },
         {
@@ -30,7 +31,8 @@
                 "axiomasoft/vaulter-core": "^1.0",
                 "axiomasoft/vaulter-drive": "^1.0",
                 "axiomasoft/vaulter-documents": "^1.0",
-                "axiomasoft/vaulter-media": "^1.0"
+                "axiomasoft/vaulter-media": "^1.0",
+                "axiomasoft/vaulter-collaboration": "^1.0"
             }
         }
     ],

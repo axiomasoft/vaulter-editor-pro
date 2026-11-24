@@ -32,6 +32,7 @@ const props = withDefaults(
     defaultProjection?: DocxProjectionMode
     workerFactory?: () => Worker
     autoPreview?: boolean
+    autoDownload?: boolean
   }>(),
   {
     revision: null,
@@ -49,6 +50,7 @@ const props = withDefaults(
     defaultProjection: undefined,
     workerFactory: undefined,
     autoPreview: true,
+    autoDownload: true,
   },
 )
 
@@ -72,6 +74,7 @@ const {
   error,
   preview,
   exportLocal,
+  download,
 } = useLocalDocxExport({
   source: () => ({
     content: props.content,
@@ -113,7 +116,7 @@ async function handlePreview(): Promise<LossReport | null> {
 
 async function handleExport(): Promise<LocalDocxExportOutput | null> {
   try {
-    const result = await exportLocal()
+    const result = props.autoDownload ? await download() : await exportLocal()
     emit('exported', result)
     return result
   } catch (caught) {

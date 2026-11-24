@@ -153,7 +153,7 @@ it('registers guarded accepts and update-free rejects for every strict profile',
             ->and($intent['atomic_effects'])->toHaveCount(1);
         [$effect] = $intent['atomic_effects'];
         expect($effect['effect'])->toBe('replace_review_document')
-            ->and($effect['expected'])->toBe(journalRichDoc())
+            ->and($effect['expected'])->toEqual(journalRichDoc())
             ->and($effect['replacement'])->not->toBe($effect['expected']);
         BlockIdentity::assertComplete($effect['replacement']);
         $receipt = settleNextJournalCommand($node->id, $owner, 1, 'committed-review-'.$factory);

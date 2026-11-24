@@ -6,6 +6,7 @@ namespace Vaulter\EditorPro\Review\Schema;
 
 use Illuminate\Database\Query\Expression;
 use Illuminate\Database\Schema\Blueprint;
+use Illuminate\Database\Schema\ColumnDefinition;
 use Illuminate\Support\Arr;
 use InvalidArgumentException;
 use Packman\Attributes\Internal;
@@ -91,7 +92,7 @@ final class ReviewSchema implements ModuleSchema
         }
         HostKeyColumns::add(table: $table, column: 'tenant_id', nullable: false, index: false);
         $ids->reference(table: $table, column: 'document_id');
-        Arr::last($table->getColumns())?->index(false);
+        $this->withoutLeadingDocumentIndex($table);
         $table->uuid('group_id');
         $table->uuid('proposal_id')->nullable();
         $table->bigInteger('generation');
@@ -175,7 +176,7 @@ final class ReviewSchema implements ModuleSchema
         Arr::last($table->getColumns())?->index(false);
 
         $ids->reference(table: $table, column: 'document_id');
-        Arr::last($table->getColumns())?->index(false);
+        $this->withoutLeadingDocumentIndex($table);
 
         HostKeyColumns::add(table: $table, column: 'tenant_id', nullable: false, index: false);
 
@@ -210,7 +211,6 @@ final class ReviewSchema implements ModuleSchema
         $table->timestampTz('expires_at')->nullable();
 
         $table->primary('revision_id', $name.'_pkey');
-        $this->helpers->foreignKeyIndex(table: $table, column: 'document_id');
         if ($driver !== 'pgsql') {
             $table->index(['document_id', 'pinned_at'], $name.'_doc');
         }
@@ -238,7 +238,7 @@ final class ReviewSchema implements ModuleSchema
         Arr::last($table->getColumns())?->index(false);
 
         $ids->reference(table: $table, column: 'document_id');
-        Arr::last($table->getColumns())?->index(false);
+        $this->withoutLeadingDocumentIndex($table);
 
         if ($driver === 'sqlite') {
             $table->rawColumn(
@@ -290,7 +290,6 @@ final class ReviewSchema implements ModuleSchema
         $table->timestampTz('updated_at')->useCurrent();
 
         $table->unique('comment_id', $name.'_comment_uniq');
-        $this->helpers->foreignKeyIndex(table: $table, column: 'document_id');
         $table->index(['document_id', 'generation', 'anchor_state', 'block_id'], $name.'_doc');
 
         $table->foreign('comment_id', $name.'_comment_fk')
@@ -373,5 +372,17 @@ final class ReviewSchema implements ModuleSchema
         $driver = $this->helpers->dbConnection()->getDriverName();
 
         return $driver === 'mariadb' ? 'mysql' : $driver;
+    }
+
+    /**
+     * `reference()` marks the column indexed. On create, `index(false)` still emits that
+     * single-column index, which duplicates the covering composite. Clear the fluent flag.
+     */
+    private function withoutLeadingDocumentIndex(Blueprint $table): void
+    {
+        $column = Arr::last($table->getColumns());
+        if ($column instanceof ColumnDefinition) {
+            $column->offsetSet('index', null);
+        }
     }
 }

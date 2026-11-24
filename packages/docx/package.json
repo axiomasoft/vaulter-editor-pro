@@ -2,7 +2,7 @@
   "name": "@vaulter/editor-pro-docx",
   "version": "1.0.0",
   "description": "Isomorphic DOCX/OOXML <-> intermediate model <-> TipTap JSON & review converter for Vaulter Editor Pro.",
-  "license": "UNLICENSED",
+  "license": "proprietary",
   "engines": {
     "node": ">=26.13.1"
   },

@@ -179,6 +179,9 @@ export interface ExchangeJob {
   source_revision_id: string | null
   source_generation: number | null
   source_position: number | null
+  write_mode?: string | null
+  applied_generation?: number | null
+  applied_position?: number | null
   output_blob_id: string | null
   apply_command_id: string | null
   apply_receipt_id: string | null

@@ -176,6 +176,72 @@ describe('VaulterDocxExchange UI & Reconnect Workflow (10.2)', () => {
     expect(reconnectedWrapper.get('[data-summary="warning"]').text()).toContain('Warnings: 1')
   })
 
+  it('restores an applied receipt from write_mode and applied markers on job status', async () => {
+    const applied = makeJob({
+      state: 'applied',
+      apply_command_id: 'apply-cmd-9',
+      apply_receipt_id: '01950000-0000-7000-8000-000000000099',
+      source_generation: 2,
+      source_position: 5,
+      write_mode: 'journal',
+      applied_generation: 4,
+      applied_position: 11,
+    })
+    const fetchMock = vi.fn(async (input: RequestInfo | URL): Promise<Response> => {
+      const url = String(input)
+      if (url.includes(`/documents/node-1/exchange-jobs/${applied.id}`)) {
+        return jsonResponse(200, { data: applied })
+      }
+      return jsonResponse(404, { code: 'not_found' })
+    })
+    const client = createReviewClient({ fetch: fetchMock as unknown as typeof fetch })
+    window.sessionStorage.setItem('exchange-node-1', applied.id)
+
+    const wrapper = mount(VaulterDocxExchange, {
+      props: {
+        nodeId: 'node-1',
+        client,
+        storageKey: 'exchange-node-1',
+        autoReconnect: true,
+      },
+    })
+    await flushPromises()
+
+    expect(wrapper.attributes('data-job-state')).toBe('applied')
+    expect(wrapper.vm.applyReceipt).toMatchObject({
+      write_mode: 'journal',
+      generation: 4,
+      position: 11,
+      replayed: true,
+      apply_receipt_id: applied.apply_receipt_id,
+    })
+  })
+
+  it('does not invent a snapshot receipt when applied status omits the final marker', async () => {
+    const applied = makeJob({
+      state: 'applied',
+      apply_command_id: 'apply-cmd-9',
+      apply_receipt_id: '01950000-0000-7000-8000-000000000099',
+      source_generation: 2,
+      source_position: 5,
+    })
+    const fetchMock = vi.fn(async (): Promise<Response> => jsonResponse(200, { data: applied }))
+    const client = createReviewClient({ fetch: fetchMock as unknown as typeof fetch })
+
+    const wrapper = mount(VaulterDocxExchange, {
+      props: {
+        nodeId: 'node-1',
+        client,
+        initialJobId: applied.id,
+        autoReconnect: true,
+      },
+    })
+    await flushPromises()
+
+    expect(wrapper.attributes('data-job-state')).toBe('applied')
+    expect(wrapper.vm.applyReceipt).toBeNull()
+  })
+
   it('blocks apply on blocked loss report and surfaces stale head conflict errors on apply', async () => {
     const blockedJob = makeJob({
       diagnostics_report: {

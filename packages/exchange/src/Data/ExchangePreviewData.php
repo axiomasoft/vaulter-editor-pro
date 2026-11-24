@@ -18,5 +18,8 @@ final readonly class ExchangePreviewData
         public ExchangeJobData $job,
         public ?array $previewDocument = null,
         public ?array $semantic = null,
+        public ?string $writeMode = null,
+        public ?int $appliedGeneration = null,
+        public ?int $appliedPosition = null,
     ) {}
 }

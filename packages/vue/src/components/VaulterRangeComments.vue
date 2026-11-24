@@ -11,11 +11,13 @@ const props = withDefaults(
     clientOptions?: UseRangeCommentsOptions
     initialFilter?: CommentFilterStatus
     autoLoad?: boolean
+    resolveAuthor?: (author: { type: string; id: string }) => string
   }>(),
   {
     clientOptions: undefined,
     initialFilter: 'all',
     autoLoad: true,
+    resolveAuthor: undefined,
   },
 )
 
@@ -61,6 +63,10 @@ const filterTabs: Array<{ key: CommentFilterStatus; label: string }> = [
 
 function setFilter(next: CommentFilterStatus): void {
   filter.value = next
+}
+
+function authorLabel(author: { type: string; id: string }): string {
+  return props.resolveAuthor?.(author) ?? `${author.type}#${author.id}`
 }
 
 async function handleResolve(comment: AnchoredComment): Promise<void> {
@@ -156,7 +162,11 @@ defineExpose({
         @click="emit('selectComment', item)"
       >
         <div class="vaulter-range-comments__header">
-          <span class="vaulter-range-comments__author">{{ item.root.author.type }}#{{ item.root.author.id }}</span>
+          <span class="vaulter-range-comments__author">
+            <slot name="author" :author="item.root.author" :label="authorLabel(item.root.author)">
+              {{ authorLabel(item.root.author) }}
+            </slot>
+          </span>
           <span class="vaulter-range-comments__actuality" :data-status="item.actuality.status">
             {{ item.actuality.status }}
           </span>
@@ -175,7 +185,11 @@ defineExpose({
             class="vaulter-range-comments__reply"
             :data-reply-id="rep.id"
           >
-            <span class="vaulter-range-comments__author">{{ rep.author.type }}#{{ rep.author.id }}</span>:
+            <span class="vaulter-range-comments__author">
+              <slot name="author" :author="rep.author" :label="authorLabel(rep.author)">
+                {{ authorLabel(rep.author) }}
+              </slot>
+            </span>:
             {{ rep.body }}
           </li>
         </ul>

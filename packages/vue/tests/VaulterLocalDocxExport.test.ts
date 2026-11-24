@@ -277,4 +277,58 @@ describe('VaulterLocalDocxExport & Offline Browser Parity (10.1-B)', () => {
     expect(compareSemanticReports(bD2.semantic, nD2.semantic).equal).toBe(true)
     expect(fetchTrap).toHaveBeenCalledTimes(0)
   })
+
+  it('downloads the exported docx from the export button and can skip the browser download', async () => {
+    const createObjectURL = vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:local-docx')
+    const revokeObjectURL = vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => undefined)
+    const click = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => undefined)
+
+    const wrapper = mount(VaulterLocalDocxExport, {
+      props: {
+        content: CORPUS_D1.document,
+        revision: CONFIRMED_REVISION,
+        title: 'Confirmed Agreement',
+        confirmed: true,
+        accessible: true,
+        workerFactory: createMockWorkerFactory(),
+      },
+    })
+    await flushPromises()
+    await wrapper.find('[data-action="export-docx"]').trigger('click')
+    await flushPromises()
+
+    expect(createObjectURL).toHaveBeenCalledTimes(1)
+    expect(click).toHaveBeenCalledTimes(1)
+    expect(revokeObjectURL).toHaveBeenCalledWith('blob:local-docx')
+    expect(wrapper.emitted('exported')).toHaveLength(1)
+    const anchor = document.querySelector('a')
+    expect(anchor).toBeNull()
+
+    createObjectURL.mockClear()
+    click.mockClear()
+    const manual = mount(VaulterLocalDocxExport, {
+      props: {
+        content: CORPUS_D1.document,
+        revision: CONFIRMED_REVISION,
+        confirmed: true,
+        accessible: true,
+        autoDownload: false,
+        workerFactory: createMockWorkerFactory(),
+      },
+    })
+    await flushPromises()
+    await manual.find('[data-action="export-docx"]').trigger('click')
+    await flushPromises()
+
+    expect(createObjectURL).not.toHaveBeenCalled()
+    expect(click).not.toHaveBeenCalled()
+    expect(manual.emitted('exported')).toHaveLength(1)
+    expect(fetchTrap).toHaveBeenCalledTimes(0)
+
+    createObjectURL.mockRestore()
+    revokeObjectURL.mockRestore()
+    click.mockRestore()
+    wrapper.unmount()
+    manual.unmount()
+  })
 })

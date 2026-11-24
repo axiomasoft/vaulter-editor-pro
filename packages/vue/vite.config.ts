@@ -20,7 +20,7 @@ export default defineConfig({
       fileName: 'vaulter-editor-pro-vue',
     },
     rollupOptions: {
-      external: ['vue', 'yjs', /^@tiptap\//, /^@vaulter\//],
+      external: ['vue', 'yjs', 'prosemirror-changeset', /^@tiptap\//, /^@vaulter\//],
       output: {
         exports: 'named',
         globals: {
