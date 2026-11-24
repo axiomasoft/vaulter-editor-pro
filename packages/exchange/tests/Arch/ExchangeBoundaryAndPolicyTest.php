@@ -107,4 +107,17 @@ it('creates v_document_exchange_jobs with required columns and foreign key index
             'updated_at',
             'finished_at',
         ]))->toBeTrue();
+
+    $sectionsTable = app(DatabaseOptions::class)->table('document_sections');
+    expect(Schema::hasTable($sectionsTable))->toBeTrue()
+        ->and(Schema::hasColumns($sectionsTable, [
+            'id',
+            'tenant_id',
+            'document_id',
+            'generation',
+            'source_position',
+            'schema_version',
+            'sections_json',
+            'updated_at',
+        ]))->toBeTrue();
 });

@@ -26,6 +26,7 @@ use Vaulter\EditorPro\Exchange\Enums\ExchangeJobState;
 use Vaulter\EditorPro\Exchange\Exceptions\ExchangeException;
 use Vaulter\EditorPro\Exchange\Repositories\ExchangeJobRepository;
 use Vaulter\EditorPro\Exchange\Repositories\ExchangeLookup;
+use Vaulter\EditorPro\Exchange\Repositories\ExchangeReviewStateStore;
 use Vaulter\EditorPro\Exchange\Runtime\CanonicalJson;
 use Vaulter\EditorPro\Exchange\Security\DocxZipArchiveGuard;
 use Vaulter\Media\Contracts\Cas\BlobStore;
@@ -46,6 +47,7 @@ final readonly class ExchangeJobProcessor
         private DocxExchangeRuntime $runtime,
         private ExchangeJobRepository $jobs,
         private ExchangeLookup $lookup,
+        private ExchangeReviewStateStore $reviewState,
         private ExchangeOptions $options,
         private Container $container,
     ) {}
@@ -140,6 +142,10 @@ final readonly class ExchangeJobProcessor
         $report = $result->report;
         $report['blocked'] = $result->blocked || ($report['blocked'] ?? false) === true;
         $normalizedDoc = $this->normalizeTipTapForStore($result->document, $report);
+        $sections = $result->sections;
+        $discussions = $result->discussions;
+        $revisions = $result->revisions;
+        $this->reviewState->resolvePreviewBlockBindings($normalizedDoc, $discussions, $revisions);
         $report['source_head'] = [
             'generation' => $job->sourceGeneration ?? $headGeneration,
             'position' => $job->sourcePosition ?? $headPosition,
@@ -156,6 +162,9 @@ final readonly class ExchangeJobProcessor
             'source_generation' => $job->sourceGeneration ?? $headGeneration,
             'source_position' => $job->sourcePosition ?? $headPosition,
             'document' => $normalizedDoc,
+            'sections' => $sections,
+            'discussions' => $discussions,
+            'revisions' => $revisions,
             'report' => $report,
         ]);
 
@@ -195,16 +204,21 @@ final readonly class ExchangeJobProcessor
 
         if ($snapshotPayload === null) {
             $snap = $this->documents->in($drive)->content($nodeId, $job->sourceRevisionId);
+            $gen = $snap->revision !== null ? $snap->revision->epoch : $snap->epoch;
             $snapshotPayload = [
                 'document' => $snap->content->toArray(),
                 'source_marker' => [
                     'nodeId' => $nodeId,
                     'documentId' => $snap->documentId,
                     'revisionId' => $snap->revision?->id,
-                    'generation' => $snap->revision !== null ? $snap->revision->epoch : $snap->epoch,
+                    'generation' => $gen,
                     'position' => $snap->revision !== null ? $snap->revision->stateVersion : $snap->stateVersion,
                 ],
-                'discussions' => [],
+                'sections' => $this->reviewState->loadSections($snap->documentId, $gen),
+                'discussions' => $this->reviewState->loadDiscussions($drive, $nodeId, $snap->documentId, $gen),
+                'revisions' => $job->sourceRevisionId === null
+                    ? $this->reviewState->loadOpenSuggestions($snap->documentId, $gen)
+                    : [],
                 'options' => [],
             ];
         }
@@ -216,12 +230,9 @@ final readonly class ExchangeJobProcessor
 
         $docMap = self::stringMap($rawDoc);
         $rawMarker = is_array($snapshotPayload['source_marker'] ?? null) ? self::stringMap($snapshotPayload['source_marker']) : null;
-        $rawDiscussions = is_array($snapshotPayload['discussions'] ?? null) ? $snapshotPayload['discussions'] : [];
-        /** @var list<array<string, mixed>> $discussions */
-        $discussions = array_values(array_map(
-            static fn (mixed $item): array => is_array($item) ? self::stringMap($item) : [],
-            $rawDiscussions,
-        ));
+        $sections = self::listOfStringMaps($snapshotPayload['sections'] ?? null);
+        $discussions = self::listOfStringMaps($snapshotPayload['discussions'] ?? null);
+        $revisions = self::listOfStringMaps($snapshotPayload['revisions'] ?? null);
         $rawOptions = is_array($snapshotPayload['options'] ?? null) ? self::stringMap($snapshotPayload['options']) : [];
 
         $result = $this->runtime->exportDocx(
@@ -230,16 +241,20 @@ final readonly class ExchangeJobProcessor
             sourceMarker: $rawMarker,
             discussions: $discussions,
             options: $rawOptions,
+            sections: $sections,
+            revisions: $revisions,
         );
 
         $report = $result->report;
-        $this->recordLoss(
-            $report,
-            'body_only_export',
-            'document',
-            'Only the stored document body is available for export. Section layout, headers, footers, and document discussions are omitted.',
-            action: 'projected',
-        );
+        if ($sections === [] && $discussions === [] && $revisions === []) {
+            $this->recordLoss(
+                $report,
+                'body_only_export',
+                'document',
+                'Only the stored document body is available for export. Section layout, headers, footers, and document discussions are omitted.',
+                action: 'projected',
+            );
+        }
         if ($result->semantic !== null) {
             $report['semantic'] = $result->semantic;
         }
@@ -277,15 +292,12 @@ final readonly class ExchangeJobProcessor
         $schema = TipTapSchema::richText();
         [$decayed, $lossless] = TipTapContent::decayReporting($rawDoc, $schema);
         if (! $lossless) {
-            $revisionLoss = ! $schema->allowsMark('suggestion') && self::hasSuggestionMark($rawDoc);
             $this->recordLoss(
                 $report,
-                $revisionLoss ? 'host_revision_marks_unsupported' : 'host_schema_loss',
-                $revisionLoss ? 'revisions' : 'document',
-                $revisionLoss
-                    ? 'The document schema cannot preserve tracked insertions and deletions. This preview cannot be applied.'
-                    : 'The document schema discarded unsupported nodes, marks, or attributes.',
-                action: $revisionLoss ? 'blocked' : 'dropped',
+                'host_schema_loss',
+                'document',
+                'The document schema discarded unsupported nodes, marks, or attributes.',
+                action: 'dropped',
             );
         }
         $sanitized = $decayed->withSanitizedUrls()->toArray();
@@ -293,25 +305,6 @@ final readonly class ExchangeJobProcessor
         $validated = TipTapContent::fromArray($withBlockIds, $schema);
 
         return $validated->toArray();
-    }
-
-    /** @param array<array-key, mixed> $node */
-    private static function hasSuggestionMark(array $node): bool
-    {
-        $marks = $node['marks'] ?? null;
-        foreach (is_array($marks) ? $marks : [] as $mark) {
-            if (is_array($mark) && ($mark['type'] ?? null) === 'suggestion') {
-                return true;
-            }
-        }
-        $content = $node['content'] ?? null;
-        foreach (is_array($content) ? $content : [] as $child) {
-            if (is_array($child) && self::hasSuggestionMark($child)) {
-                return true;
-            }
-        }
-
-        return false;
     }
 
     /** @param array<string, mixed> $report */
@@ -401,6 +394,22 @@ final readonly class ExchangeJobProcessor
         $out = [];
         foreach ($raw as $k => $v) {
             $out[(string) $k] = $v;
+        }
+
+        return $out;
+    }
+
+    /** @return list<array<string, mixed>> */
+    private static function listOfStringMaps(mixed $raw): array
+    {
+        if (! is_array($raw)) {
+            return [];
+        }
+        $out = [];
+        foreach ($raw as $item) {
+            if (is_array($item)) {
+                $out[] = self::stringMap($item);
+            }
         }
 
         return $out;

@@ -1248,8 +1248,16 @@ export function toIntermediate(
         const slice = rawContent.slice(cursor, cursor + count)
         cursor += count
         const blocks: IntermediateBlock[] = []
+        const breakAfter = new Set(
+          Array.isArray((sInput as { pageBreakAfterBlocks?: unknown }).pageBreakAfterBlocks)
+            ? ((sInput as { pageBreakAfterBlocks?: number[] }).pageBreakAfterBlocks ?? [])
+            : [],
+        )
         for (let i = 0; i < slice.length; i += 1) {
           blocks.push(...convertBlockNode(slice[i], `section[${s}].block[${i}]`, diagnostics, tracker))
+          if (breakAfter.has(i)) {
+            blocks.push({ type: 'pageBreak', id: null })
+          }
         }
         const firstHeader = convertHeaderFooterSlot(sInput.headers?.first, `section[${s}].header.first`, diagnostics, tracker)
         const firstFooter = convertHeaderFooterSlot(sInput.footers?.first, `section[${s}].footer.first`, diagnostics, tracker)
@@ -1691,4 +1699,677 @@ export function fromIntermediate(
 
 export function normalizeFontSizePt(halfPt: number): number {
   return ptToHalfPoints(halfPointsToPt(halfPt)) / 2
+}
+
+export interface ExportSuggestionInput {
+  id: string
+  kind: 'insert' | 'delete' | 'replace' | 'mark_change' | 'block_join' | string
+  group_id?: string | null
+  author?: string | null
+  created_at?: string | null
+  target_block_id: string
+  from_utf16: number
+  to_utf16: number
+  before?: string | null
+  after?: string | null
+  payload?: Record<string, unknown> | null
+}
+
+function parseFormattingSummary(
+  fc: FormattingChangeMeta,
+): Array<{ operation: 'added' | 'removed'; markName: string; markAttrs?: Record<string, unknown> }> {
+  if (fc.markChanges && fc.markChanges.length > 0) {
+    return fc.markChanges
+  }
+  const out: Array<{ operation: 'added' | 'removed'; markName: string }> = []
+  for (const part of fc.summary.split(',')) {
+    const trimmed = part.trim()
+    const match = /^(added|removed):([a-zA-Z0-9_]+)$/.exec(trimmed)
+    if (match) {
+      out.push({ operation: match[1] as 'added' | 'removed', markName: match[2] })
+    }
+  }
+  return out
+}
+
+function cloneMarksForBaseline(inline: IntermediateTextInline): IntermediateMark[] {
+  let marks = [...inline.marks]
+  if (inline.formattingChange) {
+    for (const change of parseFormattingSummary(inline.formattingChange)) {
+      if (change.operation === 'added') {
+        marks = marks.filter((m) => m.type !== change.markName)
+      }
+    }
+  }
+  return marks
+}
+
+function baselineInlinesFromBlock(inlines: readonly IntermediateInline[]): IntermediateInline[] {
+  const out: IntermediateInline[] = []
+  for (const inline of inlines) {
+    if (inline.type === 'text') {
+      if (inline.revision?.kind === 'insert') {
+        continue
+      }
+      out.push({
+        type: 'text',
+        text: inline.text,
+        marks: cloneMarksForBaseline(inline),
+      })
+    } else if (inline.type === 'hardBreak') {
+      if (inline.revision?.kind === 'insert') {
+        continue
+      }
+      out.push({ type: 'hardBreak' })
+    } else if (inline.type === 'image') {
+      out.push(inline)
+    }
+  }
+  return out
+}
+
+export function extractCleanImportPayload(model: IntermediateDocument): {
+  document: TipTapDoc
+  sections: Array<Record<string, unknown>>
+  discussions: Array<Record<string, unknown>>
+  revisions: Array<Record<string, unknown>>
+} {
+  const cleanSectionsModel: IntermediateSection[] = []
+  const sectionsOut: Array<Record<string, unknown>> = []
+  const revisionsOut: Array<Record<string, unknown>> = []
+
+  // Map discussionId -> { blockIndex, fromUtf16, toUtf16, quoteText, prefix, suffix }
+  const discussionAnchors = new Map<
+    string,
+    { blockIndex: number; fromUtf16: number; toUtf16: number; quoteText: string; prefix: string; suffix: string }
+  >()
+  const openDiscussionRanges = new Map<string, { blockIndex: number; start: number; text: string }>()
+
+  let textblockCursor = 0
+
+  const processBlockList = (blocks: readonly IntermediateBlock[]): IntermediateBlock[] => {
+    const kept: IntermediateBlock[] = []
+    for (const block of blocks) {
+      if (block.type === 'pageBreak' || block.type === 'unsupportedBlock') {
+        continue
+      }
+      if (block.type === 'paragraph' || block.type === 'heading') {
+        const currentBlockIdx = textblockCursor++
+        if (block.attrs.blockJoinDeletion && currentBlockIdx > 0) {
+          revisionsOut.push({
+            id: block.attrs.blockJoinDeletion.id,
+            kind: 'block_join',
+            group_id: block.attrs.blockJoinDeletion.groupId ?? null,
+            author: block.attrs.blockJoinDeletion.author,
+            created_at: block.attrs.blockJoinDeletion.date,
+            block_index: currentBlockIdx - 1,
+            second_block_index: currentBlockIdx,
+            from_utf16: 0,
+            to_utf16: 0,
+            before: '',
+            after: 'join',
+          })
+        }
+
+        const cleanInlines = baselineInlinesFromBlock(block.inlines)
+        const baseText = cleanInlines
+          .map((inl) => (inl.type === 'text' ? inl.text : inl.type === 'hardBreak' ? '\n' : ' '))
+          .join('')
+
+        let offset = 0
+        let lastDel: {
+          id: string
+          groupId: string | null
+          from: number
+          to: number
+          text: string
+          author: string
+          date: string
+        } | null = null
+
+        for (const inline of block.inlines) {
+          if (inline.type === 'text') {
+            const len = inline.text.length
+            const rev = inline.revision
+            if (rev?.kind === 'insert') {
+              if (lastDel && rev.groupId && lastDel.groupId === rev.groupId) {
+                revisionsOut.push({
+                  id: lastDel.id,
+                  replacement_id: rev.id,
+                  kind: 'replace',
+                  group_id: rev.groupId,
+                  author: rev.author,
+                  created_at: rev.date,
+                  block_index: currentBlockIdx,
+                  from_utf16: lastDel.from,
+                  to_utf16: lastDel.to,
+                  before: lastDel.text,
+                  after: inline.text,
+                })
+                lastDel = null
+              } else {
+                if (lastDel) {
+                  revisionsOut.push({
+                    id: lastDel.id,
+                    kind: 'delete',
+                    group_id: lastDel.groupId,
+                    author: lastDel.author,
+                    created_at: lastDel.date,
+                    block_index: currentBlockIdx,
+                    from_utf16: lastDel.from,
+                    to_utf16: lastDel.to,
+                    before: lastDel.text,
+                    after: '',
+                  })
+                  lastDel = null
+                }
+                revisionsOut.push({
+                  id: rev.id,
+                  kind: 'insert',
+                  group_id: rev.groupId ?? null,
+                  author: rev.author,
+                  created_at: rev.date,
+                  block_index: currentBlockIdx,
+                  from_utf16: offset,
+                  to_utf16: offset,
+                  before: '',
+                  after: inline.text,
+                })
+              }
+              continue
+            }
+
+            if (lastDel) {
+              revisionsOut.push({
+                id: lastDel.id,
+                kind: 'delete',
+                group_id: lastDel.groupId,
+                author: lastDel.author,
+                created_at: lastDel.date,
+                block_index: currentBlockIdx,
+                from_utf16: lastDel.from,
+                to_utf16: lastDel.to,
+                before: lastDel.text,
+                after: '',
+              })
+              lastDel = null
+            }
+
+            const start = offset
+            const end = offset + len
+            offset = end
+
+            if (rev?.kind === 'delete') {
+              lastDel = {
+                id: rev.id,
+                groupId: rev.groupId ?? null,
+                from: start,
+                to: end,
+                text: inline.text,
+                author: rev.author,
+                date: rev.date,
+              }
+            }
+
+            if (inline.formattingChange && len > 0) {
+              const parsed = parseFormattingSummary(inline.formattingChange)
+              const firstChange = parsed[0] ?? { operation: 'added' as const, markName: 'bold' }
+              revisionsOut.push({
+                id: inline.formattingChange.id,
+                kind: 'mark_change',
+                group_id: null,
+                author: inline.formattingChange.author,
+                created_at: inline.formattingChange.date,
+                block_index: currentBlockIdx,
+                from_utf16: start,
+                to_utf16: end,
+                before: '',
+                after: inline.formattingChange.summary,
+                payload: {
+                  mark_name: firstChange.markName,
+                  mark_attrs: firstChange.markAttrs ?? {},
+                  operation: firstChange.operation,
+                  quote_text: inline.text,
+                  summary: inline.formattingChange.summary,
+                },
+              })
+            }
+
+            const ids = new Set(inline.commentIds ?? [])
+            for (const [dId, active] of [...openDiscussionRanges.entries()]) {
+              if (!ids.has(dId) || active.blockIndex !== currentBlockIdx) {
+                if (!discussionAnchors.has(dId) && active.text.length > 0) {
+                  const pStart = Math.max(0, active.start - 24)
+                  discussionAnchors.set(dId, {
+                    blockIndex: active.blockIndex,
+                    fromUtf16: active.start,
+                    toUtf16: active.start + active.text.length,
+                    quoteText: active.text,
+                    prefix: baseText.slice(pStart, active.start),
+                    suffix: baseText.slice(active.start + active.text.length, active.start + active.text.length + 24),
+                  })
+                }
+                openDiscussionRanges.delete(dId)
+              }
+            }
+            for (const dId of ids) {
+              const existing = openDiscussionRanges.get(dId)
+              if (existing && existing.blockIndex === currentBlockIdx) {
+                existing.text += inline.text
+              } else if (!discussionAnchors.has(dId)) {
+                openDiscussionRanges.set(dId, { blockIndex: currentBlockIdx, start, text: inline.text })
+              }
+            }
+          } else if (inline.type === 'hardBreak') {
+            if (inline.revision?.kind !== 'insert') {
+              offset += 1
+            }
+          } else if (inline.type === 'image') {
+            offset += 1
+          }
+        }
+
+        if (lastDel) {
+          revisionsOut.push({
+            id: lastDel.id,
+            kind: 'delete',
+            group_id: lastDel.groupId,
+            author: lastDel.author,
+            created_at: lastDel.date,
+            block_index: currentBlockIdx,
+            from_utf16: lastDel.from,
+            to_utf16: lastDel.to,
+            before: lastDel.text,
+            after: '',
+          })
+        }
+
+        for (const [dId, active] of [...openDiscussionRanges.entries()]) {
+          if (active.blockIndex === currentBlockIdx && !discussionAnchors.has(dId) && active.text.length > 0) {
+            const pStart = Math.max(0, active.start - 24)
+            discussionAnchors.set(dId, {
+              blockIndex: active.blockIndex,
+              fromUtf16: active.start,
+              toUtf16: active.start + active.text.length,
+              quoteText: active.text,
+              prefix: baseText.slice(pStart, active.start),
+              suffix: baseText.slice(active.start + active.text.length, active.start + active.text.length + 24),
+            })
+          }
+          openDiscussionRanges.delete(dId)
+        }
+
+        const { blockJoinDeletion: _bjd, formattingChange: _fc, ...cleanAttrs } = block.attrs
+        kept.push({
+          ...block,
+          attrs: cleanAttrs,
+          inlines: cleanInlines,
+        })
+      } else if (block.type === 'codeBlock') {
+        textblockCursor++
+        kept.push(block)
+      } else if (block.type === 'blockquote') {
+        kept.push({ ...block, blocks: processBlockList(block.blocks) })
+      } else if (block.type === 'table') {
+        kept.push({
+          ...block,
+          rows: block.rows.map((row) => ({
+            ...row,
+            cells: row.cells.map((cell) => ({
+              ...cell,
+              blocks: processBlockList(cell.blocks),
+            })),
+          })),
+        })
+      } else {
+        kept.push(block)
+      }
+    }
+    return kept
+  }
+
+  for (const sec of model.sections) {
+    const pageBreakAfterBlocks: number[] = []
+    const nonBreakBlocks: IntermediateBlock[] = []
+    let topTipTapBlockCount = 0
+    let activeListKey: string | null = null
+
+    for (const block of sec.blocks) {
+      if (block.type === 'pageBreak') {
+        if (topTipTapBlockCount > 0) {
+          pageBreakAfterBlocks.push(topTipTapBlockCount - 1)
+        }
+        activeListKey = null
+        continue
+      }
+      if (block.type === 'unsupportedBlock') {
+        continue
+      }
+      nonBreakBlocks.push(block)
+      if ((block.type === 'paragraph' || block.type === 'heading') && block.attrs.list) {
+        const key = `${block.attrs.list.kind}:${block.attrs.list.numId}`
+        if (activeListKey !== key) {
+          topTipTapBlockCount += 1
+          activeListKey = key
+        }
+      } else {
+        topTipTapBlockCount += 1
+        activeListKey = null
+      }
+    }
+
+    const cleanBlocks = processBlockList(nonBreakBlocks)
+    cleanSectionsModel.push({ ...sec, blocks: cleanBlocks })
+
+    const serializeSlot = (slot: HeaderFooterContent | null | undefined) => {
+      if (!slot) return null
+      return {
+        type: 'doc',
+        content: blocksToTipTap(slot.blocks),
+      }
+    }
+
+    sectionsOut.push({
+      id: sec.id,
+      type: sec.type ?? 'nextPage',
+      ...(sec.pageSize ? { pageSize: sec.pageSize } : {}),
+      ...(sec.margins ? { margins: sec.margins } : {}),
+      titlePg: sec.titlePg === true,
+      headers: {
+        ...(sec.headers.default ? { default: serializeSlot(sec.headers.default) } : {}),
+        ...(sec.headers.first ? { first: serializeSlot(sec.headers.first) } : {}),
+        ...(sec.headers.even ? { even: serializeSlot(sec.headers.even) } : {}),
+      },
+      footers: {
+        ...(sec.footers.default ? { default: serializeSlot(sec.footers.default) } : {}),
+        ...(sec.footers.first ? { first: serializeSlot(sec.footers.first) } : {}),
+        ...(sec.footers.even ? { even: serializeSlot(sec.footers.even) } : {}),
+      },
+      blockCount: topTipTapBlockCount,
+      ...(pageBreakAfterBlocks.length > 0 ? { pageBreakAfterBlocks } : {}),
+    })
+  }
+
+  const discussionsOut = model.discussions.map((d) => {
+    const anchor = discussionAnchors.get(d.id)
+    return {
+      id: d.id,
+      anchorState: anchor ? 'attached' : d.anchorState,
+      resolved: d.resolved,
+      quoteText: anchor?.quoteText ?? d.quoteText ?? '',
+      blockIndex: anchor?.blockIndex ?? null,
+      fromUtf16: anchor?.fromUtf16 ?? 0,
+      toUtf16: anchor?.toUtf16 ?? 0,
+      prefix: anchor?.prefix ?? '',
+      suffix: anchor?.suffix ?? '',
+      comments: d.comments.map((c) => ({
+        id: c.id,
+        parentId: c.parentId ?? null,
+        author: c.author,
+        initials: c.initials ?? null,
+        createdAt: c.createdAt,
+        body: c.bodyParagraphs.join('\n'),
+      })),
+    }
+  })
+
+  const cleanDocContent: TipTapNode[] = []
+  for (const sec of cleanSectionsModel) {
+    cleanDocContent.push(...blocksToTipTap(sec.blocks))
+  }
+
+  return {
+    document: { type: 'doc', content: cleanDocContent },
+    sections: sectionsOut,
+    discussions: discussionsOut,
+    revisions: revisionsOut,
+  }
+}
+
+export function decorateDocumentForExport(
+  document: TipTapDoc,
+  suggestions: readonly ExportSuggestionInput[],
+  projection: DocxProjectionMode,
+): TipTapDoc {
+  if (projection === 'original' || suggestions.length === 0) {
+    return document
+  }
+
+  const byBlock = new Map<string, ExportSuggestionInput[]>()
+  const blockJoins: ExportSuggestionInput[] = []
+  for (const s of suggestions) {
+    if (s.kind === 'block_join') {
+      blockJoins.push(s)
+      continue
+    }
+    const list = byBlock.get(s.target_block_id) ?? []
+    list.push(s)
+    byBlock.set(s.target_block_id, list)
+  }
+
+  const applyInlineToContent = (
+    content: readonly TipTapNode[],
+    items: readonly ExportSuggestionInput[],
+  ): TipTapNode[] => {
+    let current = [...content]
+    const sorted = [...items].sort((a, b) => b.to_utf16 - a.to_utf16 || b.from_utf16 - a.from_utf16)
+
+    for (const s of sorted) {
+      const from = s.from_utf16
+      const to = s.to_utf16
+      const author = s.author ?? 'Unknown Author'
+      const createdAt = s.created_at ?? '1970-01-01T00:00:00Z'
+      const nextContent: TipTapNode[] = []
+      let pos = 0
+      let insertedAtZero = false
+
+      const buildSuggMark = (
+        type: 'add' | 'delete' | 'replaceDeletion' | 'replaceInsertion' | 'markChange',
+        id: string,
+        extra: Record<string, unknown> = {},
+      ): TipTapMark => ({
+        type: 'suggestion',
+        attrs: {
+          id,
+          type,
+          ...(s.group_id ? { groupId: s.group_id } : {}),
+          author,
+          createdAt,
+          userMetadata: { name: author },
+          ...extra,
+        },
+      })
+
+      if (s.kind === 'insert' && from === 0 && current.length === 0) {
+        if (projection === 'proposed') {
+          nextContent.push({ type: 'text', text: s.after ?? '' })
+        } else {
+          nextContent.push({
+            type: 'text',
+            text: s.after ?? '',
+            marks: [buildSuggMark('add', s.id)],
+          })
+        }
+        current = nextContent
+        continue
+      }
+
+      for (const inline of current) {
+        if (inline.type !== 'text') {
+          if (s.kind === 'insert' && !insertedAtZero && pos === from) {
+            insertedAtZero = true
+            nextContent.push(
+              projection === 'proposed'
+                ? { type: 'text', text: s.after ?? '' }
+                : { type: 'text', text: s.after ?? '', marks: [buildSuggMark('add', s.id)] },
+            )
+          }
+          nextContent.push(inline)
+          pos += 1
+          continue
+        }
+
+        const text = inline.text ?? ''
+        const len = text.length
+        const start = pos
+        const end = pos + len
+        pos = end
+
+        if (s.kind === 'insert') {
+          if (!insertedAtZero && from >= start && from <= end) {
+            insertedAtZero = true
+            const rel = from - start
+            const pre = text.slice(0, rel)
+            const post = text.slice(rel)
+            if (pre !== '') nextContent.push({ ...inline, text: pre })
+            nextContent.push(
+              projection === 'proposed'
+                ? { type: 'text', text: s.after ?? '', ...(inline.marks ? { marks: inline.marks } : {}) }
+                : {
+                    type: 'text',
+                    text: s.after ?? '',
+                    marks: [...(inline.marks ?? []), buildSuggMark('add', s.id)],
+                  },
+            )
+            if (post !== '') nextContent.push({ ...inline, text: post })
+          } else {
+            nextContent.push(inline)
+          }
+          continue
+        }
+
+        if (end <= from || start >= to) {
+          nextContent.push(inline)
+          continue
+        }
+
+        const relStart = Math.max(0, from - start)
+        const relEnd = Math.min(len, to - start)
+        const pre = text.slice(0, relStart)
+        const mid = text.slice(relStart, relEnd)
+        const post = text.slice(relEnd)
+        if (pre !== '') nextContent.push({ ...inline, text: pre })
+
+        if (s.kind === 'delete') {
+          if (projection === 'review' && mid !== '') {
+            nextContent.push({
+              ...inline,
+              text: mid,
+              marks: [...(inline.marks ?? []), buildSuggMark('delete', s.id)],
+            })
+          }
+        } else if (s.kind === 'replace') {
+          if (projection === 'proposed') {
+            nextContent.push({
+              type: 'text',
+              text: s.after ?? '',
+              ...(inline.marks ? { marks: inline.marks } : {}),
+            })
+          } else {
+            if (mid !== '') {
+              nextContent.push({
+                ...inline,
+                text: mid,
+                marks: [...(inline.marks ?? []), buildSuggMark('replaceDeletion', s.id)],
+              })
+            }
+            if ((s.after ?? '') !== '') {
+              nextContent.push({
+                ...inline,
+                text: s.after ?? '',
+                marks: [...(inline.marks ?? []), buildSuggMark('replaceInsertion', `${s.id}_ins`)],
+              })
+            }
+          }
+        } else if (s.kind === 'mark_change') {
+          const markName = String(s.payload?.mark_name ?? 'bold')
+          const op = String(s.payload?.operation ?? 'added')
+          const baseMarks = (inline.marks ?? []).filter((m) => m.type !== markName)
+          const proposedMarks =
+            op === 'added'
+              ? [...baseMarks, { type: markName, ...(s.payload?.mark_attrs ? { attrs: s.payload.mark_attrs as Record<string, unknown> } : {}) }]
+              : baseMarks
+          if (projection === 'proposed') {
+            nextContent.push({ ...inline, text: mid, ...(proposedMarks.length > 0 ? { marks: proposedMarks } : {}) })
+          } else {
+            nextContent.push({
+              ...inline,
+              text: mid,
+              marks: [
+                ...proposedMarks,
+                buildSuggMark('markChange', s.id, {
+                  markChanges: [{ operation: op === 'removed' ? 'removed' : 'added', markName }],
+                }),
+              ],
+            })
+          }
+        }
+
+        if (post !== '') nextContent.push({ ...inline, text: post })
+      }
+
+      if (s.kind === 'insert' && !insertedAtZero) {
+        nextContent.push(
+          projection === 'proposed'
+            ? { type: 'text', text: s.after ?? '' }
+            : { type: 'text', text: s.after ?? '', marks: [buildSuggMark('add', s.id)] },
+        )
+      }
+
+      current = nextContent
+    }
+
+    return current
+  }
+
+  const joinSecondById = new Map<string, ExportSuggestionInput>()
+  for (const bj of blockJoins) {
+    const secondId = typeof bj.payload?.second_block_id === 'string' ? bj.payload.second_block_id : null
+    if (secondId) {
+      joinSecondById.set(secondId, bj)
+    }
+  }
+
+  const walk = (node: TipTapNode): TipTapNode => {
+    const blockId = typeof node.attrs?.blockId === 'string' ? node.attrs.blockId : null
+    let next = { ...node }
+    if (blockId && (node.type === 'paragraph' || node.type === 'heading')) {
+      const items = byBlock.get(blockId)
+      if (items && items.length > 0) {
+        next.content = applyInlineToContent(node.content ?? [], items)
+      }
+      if (projection === 'review' && joinSecondById.has(blockId)) {
+        const bj = joinSecondById.get(blockId)!
+        next.attrs = {
+          ...(next.attrs ?? {}),
+          blockJoinDeletion: {
+            id: bj.id,
+            kind: 'delete',
+            author: bj.author ?? 'Unknown Author',
+            date: bj.created_at ?? '1970-01-01T00:00:00Z',
+          },
+        }
+      }
+    } else if (Array.isArray(node.content)) {
+      if (projection === 'proposed' && blockJoins.length > 0) {
+        const mapped: TipTapNode[] = []
+        for (let i = 0; i < node.content.length; i += 1) {
+          const child = walk(node.content[i])
+          const childId = typeof child.attrs?.blockId === 'string' ? child.attrs.blockId : null
+          if (childId && joinSecondById.has(childId) && mapped.length > 0) {
+            const prev = mapped[mapped.length - 1]
+            prev.content = [...(prev.content ?? []), ...(child.content ?? [])]
+          } else {
+            mapped.push(child)
+          }
+        }
+        next.content = mapped
+      } else {
+        next.content = node.content.map(walk)
+      }
+    }
+    return next
+  }
+
+  return walk(document) as TipTapDoc
 }

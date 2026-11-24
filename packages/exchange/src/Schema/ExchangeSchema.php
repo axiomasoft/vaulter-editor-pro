@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Vaulter\EditorPro\Exchange\Schema;
 
 use Illuminate\Database\Schema\Blueprint;
+use Illuminate\Database\Schema\ColumnDefinition;
 use Illuminate\Support\Arr;
 use InvalidArgumentException;
 use Packman\Attributes\Internal;
@@ -29,7 +30,7 @@ final class ExchangeSchema implements ModuleSchema
     /** @return list<string> */
     public function entities(): array
     {
-        return ['document_exchange_jobs'];
+        return ['document_exchange_jobs', 'document_sections'];
     }
 
     /** @return list<KeyColumnExpectation> */
@@ -41,12 +42,14 @@ final class ExchangeSchema implements ModuleSchema
             new KeyColumnExpectation('document_exchange_jobs', 'source_blob_id', 'REF'),
             new KeyColumnExpectation('document_exchange_jobs', 'source_revision_id', 'REF'),
             new KeyColumnExpectation('document_exchange_jobs', 'output_blob_id', 'REF'),
+            new KeyColumnExpectation('document_sections', 'tenant_id', 'HK'),
+            new KeyColumnExpectation('document_sections', 'document_id', 'REF'),
         ];
     }
 
     public function create(string $entity): void
     {
-        if ($entity !== 'document_exchange_jobs') {
+        if (! in_array($entity, $this->entities(), true)) {
             throw new InvalidArgumentException(sprintf('Unknown exchange entity [%s].', $entity));
         }
 
@@ -54,12 +57,16 @@ final class ExchangeSchema implements ModuleSchema
 
         $this->helpers->schemaConnection()->create(
             $this->helpers->table($entity),
-            function (Blueprint $table) use ($ids): void {
-                $this->defineExchangeJobs($table, $ids);
+            function (Blueprint $table) use ($ids, $entity): void {
+                match ($entity) {
+                    'document_exchange_jobs' => $this->defineExchangeJobs($table, $ids),
+                    'document_sections' => $this->defineDocumentSections($table, $ids),
+                    default => throw new InvalidArgumentException(sprintf('Unknown exchange entity [%s].', $entity)),
+                };
             },
         );
 
-        $this->afterCreate();
+        $this->afterCreate($entity);
     }
 
     public function drop(string $entity): void
@@ -217,11 +224,59 @@ final class ExchangeSchema implements ModuleSchema
             ->restrictOnDelete();
     }
 
-    private function afterCreate(): void
+    private function defineDocumentSections(Blueprint $table, IdStrategy $ids): void
+    {
+        $name = $table->getTable();
+        $driver = $this->driver();
+
+        $table->uuid('id')->primary();
+        HostKeyColumns::add(table: $table, column: 'tenant_id', nullable: false, index: false);
+        $ids->reference(table: $table, column: 'document_id');
+        $this->withoutLeadingDocumentIndex($table);
+
+        if ($driver === 'sqlite') {
+            $table->rawColumn(
+                'generation',
+                'BIGINT NOT NULL CHECK(typeof(generation) = \'integer\' AND generation BETWEEN 0 AND '.self::MAX_JS_INT.')',
+            );
+            $table->rawColumn(
+                'source_position',
+                'BIGINT NOT NULL CHECK(typeof(source_position) = \'integer\' AND source_position BETWEEN 0 AND '.self::MAX_JS_INT.')',
+            );
+            $table->rawColumn(
+                'schema_version',
+                'INTEGER NOT NULL CHECK(typeof(schema_version) = \'integer\' AND schema_version > 0)',
+            );
+        } else {
+            $table->bigInteger('generation');
+            $table->bigInteger('source_position');
+            $table->integer('schema_version');
+        }
+
+        $table->jsonb('sections_json');
+        $table->timestampTz('updated_at')->useCurrent();
+
+        $table->unique(['document_id', 'generation'], $name.'_doc_gen_uniq');
+
+        $table->foreign('document_id', $name.'_document_fk')
+            ->references('id')
+            ->on($this->helpers->table('documents'))
+            ->cascadeOnDelete();
+    }
+
+    private function withoutLeadingDocumentIndex(Blueprint $table): void
+    {
+        $column = Arr::last($table->getColumns());
+        if ($column instanceof ColumnDefinition) {
+            $column->offsetSet('index', null);
+        }
+    }
+
+    private function afterCreate(string $entity): void
     {
         $conn = $this->helpers->dbConnection();
         $grammar = $conn->getQueryGrammar();
-        $name = $this->helpers->table('document_exchange_jobs');
+        $name = $this->helpers->table($entity);
         $wrappedTable = $grammar->wrapTable($name);
         $driver = $this->driver();
 
@@ -241,6 +296,15 @@ final class ExchangeSchema implements ModuleSchema
         }
 
         $conn->statement("ALTER TABLE {$wrappedTable} ALTER COLUMN id SET DEFAULT uuidv7()");
+
+        if ($entity === 'document_sections') {
+            $conn->statement("ALTER TABLE {$wrappedTable} ADD CHECK (generation BETWEEN 0 AND ".self::MAX_JS_INT.')');
+            $conn->statement("ALTER TABLE {$wrappedTable} ADD CHECK (source_position BETWEEN 0 AND ".self::MAX_JS_INT.')');
+            $conn->statement("ALTER TABLE {$wrappedTable} ADD CHECK (schema_version > 0)");
+            $conn->statement("ALTER TABLE {$wrappedTable} ADD CHECK (jsonb_typeof(sections_json) = 'array')");
+
+            return;
+        }
 
         $conn->statement("ALTER TABLE {$wrappedTable} ADD CHECK (octet_length(project_scope) BETWEEN 1 AND 255)");
         $conn->statement("ALTER TABLE {$wrappedTable} ADD CHECK (octet_length(effective_subject) BETWEEN 1 AND 255)");

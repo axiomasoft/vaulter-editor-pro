@@ -15,6 +15,9 @@ final readonly class ExchangeRuntimeImportResult
      * @param  array<string, mixed>  $document
      * @param  array<string, mixed>  $report
      * @param  array<string, mixed>|null  $semantic
+     * @param  list<array<string, mixed>>  $sections
+     * @param  list<array<string, mixed>>  $discussions
+     * @param  list<array<string, mixed>>  $revisions
      */
     public function __construct(
         public bool $blocked,
@@ -22,5 +25,8 @@ final readonly class ExchangeRuntimeImportResult
         public array $document,
         public array $report,
         public ?array $semantic = null,
+        public array $sections = [],
+        public array $discussions = [],
+        public array $revisions = [],
     ) {}
 }

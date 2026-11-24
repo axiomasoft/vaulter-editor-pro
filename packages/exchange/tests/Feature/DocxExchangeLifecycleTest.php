@@ -575,7 +575,7 @@ it('rejects stale preview on apply when document head advanced after preview gen
         ->not->toContain('Stale import candidate');
 });
 
-it('marks tracked-revision previews as blocked when the document schema cannot store the marks', function (): void {
+it('imports tracked-revision previews without host_revision_marks_unsupported under revisions profile, while strict-ooxml blocks native formatting revisions', function (): void {
     $owner = AccessTestHelpers::user(1);
     $storage = AccessTestHelpers::storage();
     AccessTestHelpers::grant($storage->rootNode, RoleRegistry::OWNER, subjectId: 1);
@@ -595,39 +595,51 @@ it('marks tracked-revision previews as blocked when the document schema cannot s
         ])->assertStatus(202);
     $jobUrl = $url.'/'.$registered->json('data.id');
     $report = $this->getJson($jobUrl)->assertOk()
-        ->assertJsonPath('data.diagnostics_report.blocked', true)
+        ->assertJsonPath('data.state', 'preview_ready')
+        ->assertJsonPath('data.diagnostics_report.blocked', false)
         ->json('data.diagnostics_report');
-    expect(array_column($report['diagnostics'], 'code'))->toContain('host_revision_marks_unsupported');
+    expect(array_column($report['diagnostics'], 'code'))->not->toContain('host_revision_marks_unsupported');
 
-    $this->withHeaders(['Idempotency-Key' => 'tracked-apply'])
-        ->postJson($jobUrl.'/apply', ['apply_command_id' => 'tracked-cmd'])
+    $strictReg = $this->actingAs($owner)->withHeaders(['Idempotency-Key' => 'tracked-strict-reg'])
+        ->postJson($url, [
+            'kind' => 'import',
+            'profile_id' => 'strict-ooxml',
+            'docx_b64' => base64_encode($bytes),
+        ])->assertStatus(202);
+    $strictUrl = $url.'/'.$strictReg->json('data.id');
+    $this->getJson($strictUrl)->assertOk()
+        ->assertJsonPath('data.diagnostics_report.blocked', true);
+
+    $this->withHeaders(['Idempotency-Key' => 'tracked-strict-apply'])
+        ->postJson($strictUrl.'/apply', ['apply_command_id' => 'tracked-strict-cmd'])
         ->assertStatus(422)
         ->assertJsonPath('code', 'exchange_profile_blocked');
     expect($docs->content($doc)->stateVersion)->toBe($before->stateVersion);
 });
 
-it('exposes section and discussion loss in the server import preview report', function (string $fixture, string $code): void {
+it('retains section and discussion metadata on server import without body_only warnings', function (string $fixture, string $forbiddenCode): void {
     $owner = AccessTestHelpers::user(1);
     $storage = AccessTestHelpers::storage();
     AccessTestHelpers::grant($storage->rootNode, RoleRegistry::OWNER, subjectId: 1);
     $drive = app(Vaulter::class)->drive($storage)->actingAs($owner);
-    $doc = app(DocumentsManager::class)->in($drive)->create('metadata-loss', 'vaulter/rich-text', sampleRichDocument());
+    $doc = app(DocumentsManager::class)->in($drive)->create('metadata-retained', 'vaulter/rich-text', sampleRichDocument());
     $bytes = file_get_contents(dirname(__DIR__, 4).'/tests/corpus/docx/'.$fixture);
     expect($bytes)->toBeString();
 
     $url = 'api/vaulter/v1/documents/'.$doc->id.'/exchange-jobs';
-    $registered = $this->actingAs($owner)->withHeaders(['Idempotency-Key' => 'metadata-loss'])
+    $registered = $this->actingAs($owner)->withHeaders(['Idempotency-Key' => 'metadata-retained-'.$fixture])
         ->postJson($url, [
             'kind' => 'import',
             'profile_id' => 'discussions',
             'docx_b64' => base64_encode($bytes),
         ])->assertStatus(202);
 
-    $this->getJson($url.'/'.$registered->json('data.id'))
+    $report = $this->getJson($url.'/'.$registered->json('data.id'))
         ->assertOk()
         ->assertJsonPath('data.state', 'preview_ready')
         ->assertJsonPath('data.diagnostics_report.blocked', false)
-        ->assertJsonFragment(['code' => $code, 'action' => 'dropped']);
+        ->json('data.diagnostics_report');
+    expect(array_column($report['diagnostics'], 'code'))->not->toContain($forbiddenCode);
 })->with([
     'sections' => ['d2-sections.docx', 'body_only_sections'],
     'discussions' => ['d3-discussions.docx', 'body_only_discussions'],
@@ -1023,4 +1035,143 @@ it('uses temp files and reuses a persistent node worker across export/import cal
     } finally {
         $runtime->shutdown();
     }
+});
+
+it('roundtrips D2 sections, D3 discussions, and D4 tracked changes through server import, apply, and export', function (): void {
+    $owner = AccessTestHelpers::user(1);
+    $storage = AccessTestHelpers::storage();
+    AccessTestHelpers::grant($storage->rootNode, RoleRegistry::OWNER, subjectId: 1);
+    $drive = app(Vaulter::class)->drive($storage)->actingAs($owner);
+    $docs = app(DocumentsManager::class)->in($drive);
+    $tables = app(DatabaseOptions::class);
+    $this->actingAs($owner);
+
+    // 1. D2 Sections roundtrip
+    $d2Doc = $docs->create('d2-server-doc', 'vaulter/rich-text', sampleRichDocument('D2 placeholder'));
+    $d2Bytes = file_get_contents(dirname(__DIR__, 4).'/tests/corpus/docx/d2-sections.docx');
+    expect($d2Bytes)->toBeString();
+    $d2Url = 'api/vaulter/v1/documents/'.$d2Doc->id.'/exchange-jobs';
+    $d2Imp = $this->withHeaders(['Idempotency-Key' => 'd2-imp'])
+        ->postJson($d2Url, ['kind' => 'import', 'profile_id' => 'discussions', 'docx_b64' => base64_encode($d2Bytes)])
+        ->assertStatus(202);
+    $this->withHeaders(['Idempotency-Key' => 'd2-apply'])
+        ->postJson($d2Url.'/'.$d2Imp->json('data.id').'/apply', ['apply_command_id' => 'd2-cmd'])
+        ->assertOk()
+        ->assertJsonPath('data.state', 'applied');
+    expect(DB::table($tables->table('document_sections'))->count())->toBe(1);
+
+    $d2Exp = $this->withHeaders(['Idempotency-Key' => 'd2-exp'])
+        ->postJson($d2Url, ['kind' => 'export', 'profile_id' => 'discussions'])
+        ->assertStatus(202);
+    expect(array_column($d2Exp->json('data.diagnostics_report.diagnostics') ?? [], 'code'))->not->toContain('body_only_export');
+    $d2OutBytes = $this->get($d2Url.'/'.$d2Exp->json('data.id').'/file')->assertOk()->streamedContent();
+    $d2Reimp = app(NodeDocxExchangeRuntime::class)->importDocx($d2OutBytes, 'discussions');
+    expect($d2Reimp->sections)->toHaveCount(2);
+
+    // 2. D3 Discussions roundtrip
+    $d3Doc = $docs->create('d3-server-doc', 'vaulter/rich-text', sampleRichDocument('D3 placeholder'));
+    $d3Bytes = file_get_contents(dirname(__DIR__, 4).'/tests/corpus/docx/d3-discussions.docx');
+    expect($d3Bytes)->toBeString();
+    $d3Url = 'api/vaulter/v1/documents/'.$d3Doc->id.'/exchange-jobs';
+    $d3Imp = $this->withHeaders(['Idempotency-Key' => 'd3-imp'])
+        ->postJson($d3Url, ['kind' => 'import', 'profile_id' => 'discussions', 'docx_b64' => base64_encode($d3Bytes)])
+        ->assertStatus(202);
+    $this->withHeaders(['Idempotency-Key' => 'd3-apply'])
+        ->postJson($d3Url.'/'.$d3Imp->json('data.id').'/apply', ['apply_command_id' => 'd3-cmd'])
+        ->assertOk();
+    expect(DB::table($tables->table('node_comments'))->where('node_id', $d3Doc->id)->count())->toBe(5)
+        ->and(DB::table($tables->table('document_comment_anchors'))->count())->toBe(3);
+
+    $d3Exp = $this->withHeaders(['Idempotency-Key' => 'd3-exp'])
+        ->postJson($d3Url, ['kind' => 'export', 'profile_id' => 'discussions'])
+        ->assertStatus(202);
+    expect(array_column($d3Exp->json('data.diagnostics_report.diagnostics') ?? [], 'code'))->not->toContain('body_only_export');
+    $d3OutBytes = $this->get($d3Url.'/'.$d3Exp->json('data.id').'/file')->assertOk()->streamedContent();
+    $d3Reimp = app(NodeDocxExchangeRuntime::class)->importDocx($d3OutBytes, 'discussions');
+    expect($d3Reimp->discussions)->toHaveCount(3);
+
+    // 3. D4 Revisions roundtrip + review projection
+    $d4Doc = $docs->create('d4-server-doc', 'vaulter/rich-text', sampleRichDocument('D4 placeholder'));
+    $d4Bytes = file_get_contents(dirname(__DIR__, 4).'/tests/corpus/docx/d4-revisions.docx');
+    expect($d4Bytes)->toBeString();
+    $d4Url = 'api/vaulter/v1/documents/'.$d4Doc->id.'/exchange-jobs';
+    $d4Imp = $this->withHeaders(['Idempotency-Key' => 'd4-imp'])
+        ->postJson($d4Url, ['kind' => 'import', 'profile_id' => 'revisions', 'docx_b64' => base64_encode($d4Bytes)])
+        ->assertStatus(202);
+    $this->withHeaders(['Idempotency-Key' => 'd4-apply'])
+        ->postJson($d4Url.'/'.$d4Imp->json('data.id').'/apply', ['apply_command_id' => 'd4-cmd'])
+        ->assertOk();
+    expect(DB::table($tables->table('document_suggestions'))->count())->toBe(5)
+        ->and(json_encode($docs->content($d4Doc)->content->toArray(), JSON_THROW_ON_ERROR))->not->toContain('added clause');
+
+    $d4Exp = $this->withHeaders(['Idempotency-Key' => 'd4-exp-review'])
+        ->postJson($d4Url, ['kind' => 'export', 'profile_id' => 'revisions', 'options' => ['projection' => 'review']])
+        ->assertStatus(202);
+    expect(array_column($d4Exp->json('data.diagnostics_report.diagnostics') ?? [], 'code'))->not->toContain('body_only_export');
+    $d4OutBytes = $this->get($d4Url.'/'.$d4Exp->json('data.id').'/file')->assertOk()->streamedContent();
+    $d4Reimp = app(NodeDocxExchangeRuntime::class)->importDocx($d4OutBytes, 'revisions');
+    expect($d4Reimp->revisions)->toHaveCount(5);
+});
+
+it('persists D2, D3, and D4 state atomically only when journal import settles', function (): void {
+    $owner = AccessTestHelpers::user(1);
+    $storage = AccessTestHelpers::storage();
+    AccessTestHelpers::grant($storage->rootNode, RoleRegistry::OWNER, subjectId: 1);
+    $drive = app(Vaulter::class)->drive($storage)->actingAs($owner);
+    $docs = app(DocumentsManager::class)->in($drive);
+    $db = app(VaulterDatabase::class);
+    $tables = app(DatabaseOptions::class);
+
+    $docNode = $docs->create('journal-d3-doc', 'vaulter/rich-text', sampleRichDocument('Initial journal text'));
+    $this->actingAs($owner);
+    $d3Bytes = file_get_contents(dirname(__DIR__, 4).'/tests/corpus/docx/d3-discussions.docx');
+    expect($d3Bytes)->toBeString();
+    $url = 'api/vaulter/v1/documents/'.$docNode->id.'/exchange-jobs';
+    $reg = $this->withHeaders(['Idempotency-Key' => 'journal-d3-reg'])
+        ->postJson($url, ['kind' => 'import', 'profile_id' => 'discussions', 'docx_b64' => base64_encode($d3Bytes)])
+        ->assertStatus(202);
+    $jobId = (string) $reg->json('data.id');
+
+    $roomOwner = (string) Str::uuid();
+    $db->transaction(static function () use ($db, $tables, $docNode, $roomOwner): void {
+        $db->connection()->table($tables->table('documents'))->where('node_id', $docNode->id)->update(['write_mode' => 'journal']);
+        $locked = app(CollaborativeState::class)->lock($docNode->id);
+        app(RoomOwnership::class)->selectProfile($locked, strict: true);
+        app(RoomOwnership::class)->acquire($locked, $roomOwner);
+    });
+
+    $this->withHeaders(['Idempotency-Key' => 'journal-d3-apply'])
+        ->postJson($url.'/'.$jobId.'/apply', ['apply_command_id' => 'journal-d3-cmd', 'expected_position' => 1])
+        ->assertStatus(202)
+        ->assertJsonPath('data.pending_commit', true);
+
+    expect(DB::table($tables->table('node_comments'))->where('node_id', $docNode->id)->count())->toBe(0);
+
+    $seed = 'seed';
+    app(UpdateLog::class)->appendFenced(
+        $docNode->id,
+        new UpdateEnvelope(0, (string) Str::uuid(), $seed, hash('sha256', $seed), 'server', 1),
+        $roomOwner, 1, 0, static fn () => null,
+    );
+    $nextIntent = $db->transaction(static fn (): ?array => app(CommandJournal::class)->next(app(CollaborativeState::class)->lock($docNode->id)));
+    expect($nextIntent)->not->toBeNull();
+    $settled = app(CommandJournal::class)->settle(
+        id: (string) $nextIntent['id'],
+        owner: $roomOwner,
+        fence: 1,
+        generation: 0,
+        base: 1,
+        fingerprint: (string) $nextIntent['fingerprint'],
+        updates: [new UpdateEnvelope(0, (string) Str::uuid(), 'commit', hash('sha256', 'commit'), 'server', null)],
+        evidence: ['ranges' => []],
+    );
+    expect($settled['state'])->toBe('committed');
+    DB::table($tables->table('documents'))->where('node_id', $docNode->id)->update(['state_version' => 2]);
+
+    $this->getJson($url.'/'.$jobId)
+        ->assertOk()
+        ->assertJsonPath('data.state', 'applied');
+    expect(DB::table($tables->table('node_comments'))->where('node_id', $docNode->id)->count())->toBe(5)
+        ->and(DB::table($tables->table('document_comment_anchors'))->count())->toBe(3)
+        ->and(DB::table($tables->table('document_sections'))->count())->toBe(1);
 });

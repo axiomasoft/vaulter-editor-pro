@@ -91,7 +91,7 @@ final class EditorProExchangeModule implements ExtensionPlugin, WithConfiguratio
     #[Override]
     public function tableNouns(): array
     {
-        return ['document_exchange_jobs'];
+        return ['document_exchange_jobs', 'document_sections'];
     }
 
     #[Override]

@@ -12,7 +12,12 @@ import type {
   SourceMarker,
   TipTapDoc,
 } from './model/types'
-import { fromIntermediate } from './tiptap/adapter'
+import {
+  decorateDocumentForExport,
+  extractCleanImportPayload,
+  fromIntermediate,
+  type ExportSuggestionInput,
+} from './tiptap/adapter'
 import { DocxSecurityError, type ZipQuotas } from './zip/guard'
 
 setDefaultZipReader(nodeZipReader)
@@ -31,6 +36,7 @@ export interface DocxCliRequest {
   document?: TipTapDoc
   sections?: DocxSectionInput[]
   discussions?: DocxDiscussionInput[]
+  revisions?: ExportSuggestionInput[]
   title?: string | null
   creator?: string | null
   source_marker?: SourceMarker | null
@@ -40,6 +46,8 @@ export interface DocxCliRequest {
     enableRevisions?: boolean
     requireFormattingRevisions?: boolean
     preserveSectionNodes?: boolean
+    stripSectionAndReviewMetadata?: boolean
+    bodyOnly?: boolean
   }
 }
 
@@ -66,6 +74,9 @@ export interface DocxCliSuccessResponse {
   docx_path?: string
   docx_sha256?: string
   document?: TipTapDoc
+  sections?: Array<Record<string, unknown>>
+  discussions?: Array<Record<string, unknown>>
+  revisions?: Array<Record<string, unknown>>
   sections_count?: number
   discussions_count?: number
   report: LossReport
@@ -152,26 +163,32 @@ export async function handleExchangeCliRequest(rawJson: string): Promise<string>
         requireFormattingRevisions: opts.requireFormattingRevisions,
       })
 
-      const tiptap = fromIntermediate(result.model, {
-        preserveSectionNodes: opts.preserveSectionNodes ?? false,
-      })
+      const extracted = extractCleanImportPayload(result.model)
+      const tiptap = opts.stripSectionAndReviewMetadata
+        ? null
+        : fromIntermediate(result.model, {
+            preserveSectionNodes: opts.preserveSectionNodes ?? false,
+          })
       const report = new LossReportBuilder()
       report.merge(result.report.diagnostics)
-      const hasSectionMetadata = tiptap.sections.length > 1 || tiptap.sections.some(section =>
-        section.pageSize || section.margins || section.titlePg ||
-        Object.values(section.headers).some(Boolean) || Object.values(section.footers).some(Boolean),
-      )
-      if (hasSectionMetadata) {
-        report.warn(
-          'body_only_sections', 'sections', 'document', 'dropped',
-          'The import response carries the body only. Section layout, headers, and footers are not retained.',
+
+      if (opts.bodyOnly) {
+        const hasSectionMetadata = result.model.sections.length > 1 || result.model.sections.some(section =>
+          section.pageSize || section.margins || section.titlePg ||
+          Object.values(section.headers).some(Boolean) || Object.values(section.footers).some(Boolean),
         )
-      }
-      if (tiptap.discussions.length > 0) {
-        report.warn(
-          'body_only_discussions', 'discussions', 'document', 'dropped',
-          'The import response does not retain discussion threads.',
-        )
+        if (hasSectionMetadata) {
+          report.warn(
+            'body_only_sections', 'sections', 'document', 'dropped',
+            'The import response carries the body only. Section layout, headers, and footers are not retained.',
+          )
+        }
+        if (result.model.discussions.length > 0) {
+          report.warn(
+            'body_only_discussions', 'discussions', 'document', 'dropped',
+            'The import response does not retain discussion threads.',
+          )
+        }
       }
 
       const response: DocxCliSuccessResponse = {
@@ -182,9 +199,12 @@ export async function handleExchangeCliRequest(rawJson: string): Promise<string>
         profile,
         blocked: result.blocked,
         source_sha256: sha256Hex(bytes),
-        document: tiptap.document,
-        sections_count: tiptap.sections.length,
-        discussions_count: tiptap.discussions.length,
+        document: tiptap ? tiptap.document : extracted.document,
+        sections: extracted.sections,
+        discussions: extracted.discussions,
+        revisions: extracted.revisions,
+        sections_count: extracted.sections.length,
+        discussions_count: extracted.discussions.length,
         report: report.build(profile, result.report.source_marker),
         semantic: result.semantic,
       }
@@ -196,9 +216,13 @@ export async function handleExchangeCliRequest(rawJson: string): Promise<string>
         throw new DocxCliInputError('invalid_request', 'Missing TipTap document for export operation.')
       }
 
+      const effectiveDoc = Array.isArray(parsed.revisions) && parsed.revisions.length > 0
+        ? decorateDocumentForExport(parsed.document, parsed.revisions, parsed.projection ?? 'original')
+        : parsed.document
+
       const result = await exportDocx(
         {
-          document: parsed.document,
+          document: effectiveDoc,
           sections: parsed.sections,
           discussions: parsed.discussions,
           sourceMarker: parsed.source_marker ?? null,

@@ -155,7 +155,7 @@ export function getAttr(node: XmlElementNode, ...candidates: string[]): string |
 }
 
 export function escapeXml(text: string): string {
-  return text
+  return String(text ?? '')
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')

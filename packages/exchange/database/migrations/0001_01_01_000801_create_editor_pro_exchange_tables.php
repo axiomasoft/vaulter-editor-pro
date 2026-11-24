@@ -10,17 +10,11 @@ return new class extends VaulterMigration
 {
     public function up(): void
     {
-        $schema = Container::getInstance()->make(ExchangeSchema::class);
-        foreach ($schema->entities() as $entity) {
-            $schema->create($entity);
-        }
+        Container::getInstance()->make(ExchangeSchema::class)->create('document_exchange_jobs');
     }
 
     public function down(): void
     {
-        $schema = Container::getInstance()->make(ExchangeSchema::class);
-        foreach (array_reverse($schema->entities()) as $entity) {
-            $schema->drop($entity);
-        }
+        Container::getInstance()->make(ExchangeSchema::class)->drop('document_exchange_jobs');
     }
 };

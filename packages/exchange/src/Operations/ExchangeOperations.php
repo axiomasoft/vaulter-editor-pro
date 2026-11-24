@@ -52,6 +52,7 @@ use Vaulter\EditorPro\Exchange\Idempotency\ExchangeJobReplayAuthorizer;
 use Vaulter\EditorPro\Exchange\Jobs\RunDocxExchangeJob;
 use Vaulter\EditorPro\Exchange\Repositories\ExchangeJobRepository;
 use Vaulter\EditorPro\Exchange\Repositories\ExchangeLookup;
+use Vaulter\EditorPro\Exchange\Repositories\ExchangeReviewStateStore;
 use Vaulter\EditorPro\Exchange\Runtime\CanonicalJson;
 use Vaulter\Idempotency\IdempotentWrite;
 use Vaulter\Media\Contracts\Cas\BlobStore;
@@ -85,6 +86,7 @@ final readonly class ExchangeOperations implements DriveExtension
         private ExchangeJobRepository $jobs,
         private ExchangeJobProcessor $processor,
         private ExchangeLookup $lookup,
+        private ExchangeReviewStateStore $reviewState,
         private ExchangeOptions $options,
         private Container $container,
     ) {}
@@ -177,6 +179,16 @@ final readonly class ExchangeOperations implements DriveExtension
                 throw ExchangeException::unsupportedDocument('unsupported_document_type');
             }
 
+            $sections = is_array($input->options['sections'] ?? null)
+                ? array_values(array_filter($input->options['sections'], is_array(...)))
+                : $this->reviewState->loadSections($docMeta['id'], $sourceGeneration);
+            $discussions = is_array($input->options['discussions'] ?? null)
+                ? array_values(array_filter($input->options['discussions'], is_array(...)))
+                : $this->reviewState->loadDiscussions($drive, $nodeSnap->id, $docMeta['id'], $sourceGeneration);
+            $revisions = $sourceRevisionId === null
+                ? $this->reviewState->loadOpenSuggestions($docMeta['id'], $sourceGeneration)
+                : [];
+
             $snapshotEnvelope = CanonicalJson::encode([
                 'document' => $targetSnap->content->toArray(),
                 'source_marker' => [
@@ -189,7 +201,9 @@ final readonly class ExchangeOperations implements DriveExtension
                     'contentHash' => $targetSnap->content->contentHash(),
                     'projection' => is_string($input->options['projection'] ?? null) ? $input->options['projection'] : 'original',
                 ],
-                'discussions' => [],
+                'sections' => $sections,
+                'discussions' => $discussions,
+                'revisions' => $revisions,
                 'options' => $input->options,
             ]);
             $sourceBlobId = $this->commitBlobBytes($snapshotEnvelope);
@@ -201,6 +215,9 @@ final readonly class ExchangeOperations implements DriveExtension
                 'source_generation' => $sourceGeneration,
                 'source_position' => $sourcePosition,
                 'content_hash' => $targetSnap->content->contentHash(),
+                ...($sections !== [] ? ['sections_hash' => CanonicalJson::sha256Hex($sections)] : []),
+                ...($discussions !== [] ? ['discussions_hash' => CanonicalJson::sha256Hex($discussions)] : []),
+                ...($revisions !== [] ? ['revisions_hash' => CanonicalJson::sha256Hex($revisions)] : []),
                 'options' => $input->options,
             ];
             $requiredAbility = Ability::Download;
@@ -454,20 +471,22 @@ final readonly class ExchangeOperations implements DriveExtension
         $normalizedDoc = $this->normalizeTipTapArray(self::stringMap($rawDoc));
 
         if ($docMeta['write_mode'] === 'journal') {
-            return $this->applyViaJournal($nodeSnap->id, $docMeta, $job, $applyCommandId, $normalizedDoc, $input);
+            return $this->applyViaJournal($nodeSnap->id, $docMeta, $job, $applyCommandId, $normalizedDoc, $preview, $input);
         }
 
-        return $this->applyViaSnapshotMutation($nodeSnap->id, $job, $applyCommandId, $normalizedDoc, $input);
+        return $this->applyViaSnapshotMutation($nodeSnap->id, $job, $applyCommandId, $normalizedDoc, $preview, $input);
     }
 
     /**
      * @param  array<string, mixed>  $normalizedDoc
+     * @param  array<string, mixed>  $preview
      */
     private function applyViaSnapshotMutation(
         string $nodeId,
         ExchangeJobData $initialJob,
         string $applyCommandId,
         array $normalizedDoc,
+        array $preview,
         ApplyExchangeImportInput $input,
     ): ApplyExchangeReceiptData {
         /** @var ApplyExchangeReceiptData $receipt */
@@ -475,7 +494,9 @@ final readonly class ExchangeOperations implements DriveExtension
             $initialJob,
             $applyCommandId,
             $normalizedDoc,
+            $preview,
             $input,
+            $nodeId,
         ): ApplyExchangeReceiptData {
             $state = $locked->snapshot();
             $lockedJob = $this->jobs->lockForApply($locked->connection(), $initialJob->id, $state->documentId);
@@ -519,6 +540,18 @@ final readonly class ExchangeOperations implements DriveExtension
                 $receiptId,
             );
 
+            $this->reviewState->persistImportedStateOnConnection(
+                conn: $locked->connection(),
+                context: $this->context,
+                documentId: $state->documentId,
+                nodeId: $nodeId,
+                jobId: $lockedJob->id,
+                generation: $next->generation,
+                position: $next->position,
+                schemaVersion: $next->schemaVersion,
+                previewPayload: $preview,
+            );
+
             return new ApplyExchangeReceiptData(
                 job: $updatedJob,
                 applyCommandId: $applyCommandId,
@@ -546,6 +579,7 @@ final readonly class ExchangeOperations implements DriveExtension
     /**
      * @param  array{id: int|string, node_id: int|string, tenant_id: int|string, type: string, collab_epoch: int, state_version: int, schema_version: int, write_mode: string}  $docMeta
      * @param  array<string, mixed>  $normalizedDoc
+     * @param  array<string, mixed>  $preview
      */
     private function applyViaJournal(
         string $nodeId,
@@ -553,6 +587,7 @@ final readonly class ExchangeOperations implements DriveExtension
         ExchangeJobData $job,
         string $applyCommandId,
         array $normalizedDoc,
+        array $preview,
         ApplyExchangeImportInput $input,
     ): ApplyExchangeReceiptData {
         $journal = $this->resolveCommandJournal();
@@ -563,7 +598,7 @@ final readonly class ExchangeOperations implements DriveExtension
 
         try {
             return $this->database->transaction(function (Connection $conn) use (
-                $journal, $actor, $nodeId, $job, $input, $applyCommandId, $normalizedDoc,
+                $journal, $actor, $nodeId, $job, $input, $applyCommandId, $normalizedDoc, $preview,
             ): ApplyExchangeReceiptData {
                 // Status locks document authority first, matching journal and snapshot lock order.
                 $record = $journal->status($actor, $applyCommandId);
@@ -662,9 +697,24 @@ final readonly class ExchangeOperations implements DriveExtension
 
                 $receiptId = $record['receipt_id'] ?? null;
                 $committed = $journalState === 'committed' && is_string($receiptId);
-                $updatedJob = $committed
-                    ? $this->jobs->markAppliedOnConnection($conn, $lockedJob->id, $applyCommandId, $receiptId)
-                    : $this->jobs->recordPendingJournalApply($conn, $lockedJob, $applyCommandId);
+                if ($committed) {
+                    $updatedJob = $this->jobs->markAppliedOnConnection($conn, $lockedJob->id, $applyCommandId, $receiptId);
+                    $settledGen = is_int($record['generation'] ?? null) ? $record['generation'] : $generation;
+                    $settledPos = is_int($record['to_seq'] ?? null) ? $record['to_seq'] : $meta['state_version'];
+                    $this->reviewState->persistImportedStateOnConnection(
+                        conn: $conn,
+                        context: $this->context,
+                        documentId: $lockedJob->documentId,
+                        nodeId: $nodeId,
+                        jobId: $lockedJob->id,
+                        generation: $settledGen,
+                        position: $settledPos,
+                        schemaVersion: $meta['schema_version'],
+                        previewPayload: $preview,
+                    );
+                } else {
+                    $updatedJob = $this->jobs->recordPendingJournalApply($conn, $lockedJob, $applyCommandId);
+                }
 
                 return new ApplyExchangeReceiptData(
                     job: $updatedJob,
@@ -711,14 +761,34 @@ final readonly class ExchangeOperations implements DriveExtension
 
         $receiptId = $record['receipt_id'];
         $applyCommandId = $job->applyCommandId;
+        $preview = $job->outputBlobId !== null ? $this->readImportPreviewArtifact($job->outputBlobId) : [];
+        $settledGen = is_int($record['generation'] ?? null) ? $record['generation'] : $docMeta['collab_epoch'];
+        $settledPos = is_int($record['to_seq'] ?? null) ? $record['to_seq'] : $docMeta['state_version'];
 
-        return $this->database->transaction(function (Connection $conn) use ($job, $applyCommandId, $receiptId): ExchangeJobData {
+        return $this->database->transaction(function (Connection $conn) use (
+            $job, $applyCommandId, $receiptId, $preview, $nodeId, $settledGen, $settledPos, $docMeta,
+        ): ExchangeJobData {
             $locked = $this->jobs->lockForApply($conn, $job->id, $job->documentId);
             if ($locked->state === ExchangeJobState::Applied) {
                 return $locked;
             }
 
-            return $this->jobs->markAppliedOnConnection($conn, $job->id, $applyCommandId, $receiptId);
+            $applied = $this->jobs->markAppliedOnConnection($conn, $job->id, $applyCommandId, $receiptId);
+            if ($preview !== []) {
+                $this->reviewState->persistImportedStateOnConnection(
+                    conn: $conn,
+                    context: $this->context,
+                    documentId: $job->documentId,
+                    nodeId: $nodeId,
+                    jobId: $job->id,
+                    generation: $settledGen,
+                    position: $settledPos,
+                    schemaVersion: $docMeta['schema_version'],
+                    previewPayload: $preview,
+                );
+            }
+
+            return $applied;
         });
     }
 

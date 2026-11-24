@@ -69,6 +69,7 @@ final class NodeDocxExchangeRuntime implements DocxExchangeRuntime
                 throw ExchangeException::runtimeFailed('temp_file_failed', 'Failed to write temporary DOCX input file.');
             }
 
+            $effectiveOptions = $options + ['stripSectionAndReviewMetadata' => true];
             $payload = [
                 'version' => 1,
                 'request_id' => $requestId,
@@ -82,7 +83,7 @@ final class NodeDocxExchangeRuntime implements DocxExchangeRuntime
                     'maxCompressionRatio' => $this->options->zipMaxRatio,
                 ],
                 ...($sourceMarker !== null ? ['source_marker' => $sourceMarker] : []),
-                ...($options !== [] ? ['options' => $options] : []),
+                'options' => $effectiveOptions,
             ];
 
             $response = $this->invoke($payload, $requestId);
@@ -110,6 +111,9 @@ final class NodeDocxExchangeRuntime implements DocxExchangeRuntime
             document: $docMap,
             report: $reportMap,
             semantic: is_array($rawSemantic) ? self::stringKeyMap($rawSemantic) : null,
+            sections: self::listOfStringMaps($response['sections'] ?? null),
+            discussions: self::listOfStringMaps($response['discussions'] ?? null),
+            revisions: self::listOfStringMaps($response['revisions'] ?? null),
         );
     }
 
@@ -119,6 +123,8 @@ final class NodeDocxExchangeRuntime implements DocxExchangeRuntime
         ?array $sourceMarker = null,
         array $discussions = [],
         array $options = [],
+        array $sections = [],
+        array $revisions = [],
     ): ExchangeRuntimeExportResult {
         $requestId = (string) Str::uuid();
         $projection = is_string($options['projection'] ?? null) ? $options['projection'] : null;
@@ -137,7 +143,9 @@ final class NodeDocxExchangeRuntime implements DocxExchangeRuntime
                 'document' => $document,
                 ...($projection !== null ? ['projection' => $projection] : []),
                 ...($sourceMarker !== null ? ['source_marker' => $sourceMarker] : []),
+                ...($sections !== [] ? ['sections' => $sections] : []),
                 ...($discussions !== [] ? ['discussions' => $discussions] : []),
+                ...($revisions !== [] ? ['revisions' => $revisions] : []),
                 ...($title !== null ? ['title' => $title] : []),
                 ...($creator !== null ? ['creator' => $creator] : []),
                 ...($options !== [] ? ['options' => $options] : []),
@@ -403,6 +411,22 @@ final class NodeDocxExchangeRuntime implements DocxExchangeRuntime
         $out = [];
         foreach ($raw as $k => $v) {
             $out[(string) $k] = $v;
+        }
+
+        return $out;
+    }
+
+    /** @return list<array<string, mixed>> */
+    private static function listOfStringMaps(mixed $raw): array
+    {
+        if (! is_array($raw)) {
+            return [];
+        }
+        $out = [];
+        foreach ($raw as $item) {
+            if (is_array($item)) {
+                $out[] = self::stringKeyMap($item);
+            }
         }
 
         return $out;

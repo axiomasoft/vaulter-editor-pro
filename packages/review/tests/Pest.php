@@ -7,5 +7,5 @@ use Illuminate\Foundation\Testing\RefreshDatabase;
 use Vaulter\EditorPro\Review\Tests\TestCase;
 
 uses(TestCase::class)->in(__DIR__);
-uses(RefreshDatabase::class)->in('Arch', 'Feature');
-uses(DatabaseMigrations::class)->in('Integration');
+uses(RefreshDatabase::class)->in(__DIR__.'/Arch', __DIR__.'/Feature');
+uses(DatabaseMigrations::class)->in(__DIR__.'/Integration');

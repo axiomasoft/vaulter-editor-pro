@@ -29,6 +29,8 @@ interface DocxExchangeRuntime
      * @param  array<string, mixed>|null  $sourceMarker
      * @param  list<array<string, mixed>>  $discussions
      * @param  array<string, mixed>  $options
+     * @param  list<array<string, mixed>>  $sections
+     * @param  list<array<string, mixed>>  $revisions
      */
     public function exportDocx(
         array $document,
@@ -36,5 +38,7 @@ interface DocxExchangeRuntime
         ?array $sourceMarker = null,
         array $discussions = [],
         array $options = [],
+        array $sections = [],
+        array $revisions = [],
     ): ExchangeRuntimeExportResult;
 }

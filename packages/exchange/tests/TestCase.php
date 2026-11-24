@@ -12,6 +12,7 @@ use Vaulter\Collaboration\VaulterCollaborationServiceProvider;
 use Vaulter\Documents\VaulterDocumentsServiceProvider;
 use Vaulter\Drive\VaulterDriveServiceProvider;
 use Vaulter\EditorPro\Exchange\EditorProExchangeServiceProvider;
+use Vaulter\EditorPro\Review\EditorProReviewServiceProvider;
 use Vaulter\Media\VaulterMediaServiceProvider;
 use Vaulter\Testing\Concerns\RefreshesDatabaseForSchemaVariant;
 use Vaulter\Testing\Concerns\UsesSuiteDatabase;
@@ -32,6 +33,7 @@ abstract class TestCase extends OrchestraTestCase
             VaulterMediaServiceProvider::class,
             VaulterDocumentsServiceProvider::class,
             VaulterCollaborationServiceProvider::class,
+            EditorProReviewServiceProvider::class,
             EditorProExchangeServiceProvider::class,
         ];
     }

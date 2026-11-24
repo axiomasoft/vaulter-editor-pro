@@ -30,20 +30,70 @@ describe('@vaulter/editor-pro-docx exchange CLI bridge', () => {
   })
 
   it.each([
-    ['d2-sections.docx', 'body_only_sections'],
-    ['d3-discussions.docx', 'body_only_discussions'],
-  ])('reports metadata discarded from %s by the body-only import response', async (filename, code) => {
+    ['d2-sections.docx', 'sections', 2],
+    ['d3-discussions.docx', 'discussions', 3],
+  ])('retains full %s metadata on import without body_only warnings', async (filename, field, expectedCount) => {
     const payload = readFileSync(resolve(__dirname, '../../../tests/corpus/docx', filename))
     const response = JSON.parse(await handleExchangeCliRequest(JSON.stringify({
       version: 1,
-      request_id: 'cli-import-loss',
+      request_id: 'cli-import-metadata',
       operation: 'import',
       profile_id: 'discussions',
+      options: { stripSectionAndReviewMetadata: true },
       docx_b64: payload.toString('base64'),
     })))
 
     expect(response).toMatchObject({ ok: true, blocked: false })
-    expect(response.report.diagnostics).toContainEqual(expect.objectContaining({ code, action: 'dropped' }))
+    expect(response[field]).toHaveLength(expectedCount)
+    expect(response.report.diagnostics.some((d: { code: string }) => d.code === 'body_only_sections' || d.code === 'body_only_discussions')).toBe(false)
+  })
+
+  it('extracts D4 tracked changes against clean baseline and re-exports original/proposed/review projections', async () => {
+    const payload = readFileSync(resolve(__dirname, '../../../tests/corpus/docx/d4-revisions.docx'))
+    const impRes = JSON.parse(await handleExchangeCliRequest(JSON.stringify({
+      version: 1,
+      request_id: 'cli-d4-imp',
+      operation: 'import',
+      profile_id: 'revisions',
+      options: { stripSectionAndReviewMetadata: true },
+      docx_b64: payload.toString('base64'),
+    })))
+
+    expect(impRes).toMatchObject({ ok: true, blocked: false })
+    expect(impRes.revisions).toHaveLength(5)
+    expect(JSON.stringify(impRes.document)).not.toContain('added clause')
+    expect(JSON.stringify(impRes.document)).not.toContain('"suggestion"')
+
+    const blockIds = ['blk_0', 'blk_1']
+    const docWithIds = {
+      ...impRes.document,
+      content: impRes.document.content.map((n: Record<string, unknown>, idx: number) => ({
+        ...n,
+        attrs: { ...(n.attrs as Record<string, unknown> | undefined), blockId: blockIds[idx] },
+      })),
+    }
+    const revisions = impRes.revisions.map((r: Record<string, unknown>) => ({
+      ...r,
+      target_block_id: blockIds[r.block_index as number],
+      ...(typeof r.second_block_index === 'number'
+        ? { payload: { ...(r.payload as Record<string, unknown> | undefined), second_block_id: blockIds[r.second_block_index] } }
+        : {}),
+    }))
+
+    const reviewExp = JSON.parse(await handleExchangeCliRequest(JSON.stringify({
+      version: 1,
+      request_id: 'cli-d4-review',
+      operation: 'export',
+      profile_id: 'revisions',
+      projection: 'review',
+      document: docWithIds,
+      revisions,
+    })))
+    expect(reviewExp).toMatchObject({ ok: true, blocked: false })
+    const docXml = strFromU8(unzipSync(Buffer.from(reviewExp.docx_b64, 'base64'))['word/document.xml'])
+    expect(docXml).toMatch(/<w:ins\b/)
+    expect(docXml).toMatch(/<w:del\b/)
+    expect(docXml).toMatch(/<w:rPrChange\b/)
   })
 
   it('roundtrips export -> import via handleExchangeCliRequest preserving D1 table merges and links', async () => {
