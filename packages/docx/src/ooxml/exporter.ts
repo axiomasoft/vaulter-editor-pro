@@ -1,14 +1,21 @@
 import {
   AlignmentType,
+  BookmarkEnd,
+  BookmarkStart,
+  BorderStyle,
   CommentRangeEnd,
   CommentRangeStart,
   CommentReference,
   Document,
+  EndnoteReferenceRun,
   ExternalHyperlink,
   Footer,
+  FootnoteReferenceRun,
   Header,
   HeadingLevel,
+  ImageRun,
   InsertedTextRun,
+  InternalHyperlink,
   DeletedTextRun,
   LevelFormat,
   Packer,
@@ -22,29 +29,43 @@ import {
   UnderlineType as DocxUnderlineType,
   VerticalAlign,
   WidthType,
+  type IBorderOptions,
   type ICommentOptions,
   type IParagraphOptions,
+  type IParagraphStyleOptions,
   type IRunOptions,
   type ISectionOptions,
+  type ITableBordersOptions,
+  type ITableCellBorders,
   type ParagraphChild,
 } from 'docx'
 import { fflateUnzipRaw, fflateZipRaw } from './zipHelpers'
 import {
   VAULTER_DOCX_CUSTOM_XML_NS,
+  type BorderSpec,
+  type CellMarginsDxa,
   type DocxProfileId,
   type HeaderFooterContent,
   type IntermediateBlock,
   type IntermediateDiscussion,
   type IntermediateDocument,
   type IntermediateInline,
+  type IntermediateMark,
   type IntermediateSection,
   type ParagraphAttrs,
   type TextAlignment,
 } from '../model/types'
 import { getProfileCapabilities, type ProfileFeatureOptions } from '../model/profiles'
 import { LossReportBuilder } from '../model/lossReport'
+import { parseAndValidateImageDataUri } from '../zip/guard'
 import { OoxmlIdAllocator } from './ids'
-import { isSafeHyperlinkUrl, lineHeightToOoxml } from './units'
+import {
+  isSafeHyperlinkUrl,
+  lineHeightToOoxml,
+  normalizeHexColor,
+  parseFontSizeToHalfPt,
+  parseInternalAnchorHref,
+} from './units'
 import { decodeUtf8, encodeUtf8, escapeXml, findChild, findChildren, getAttr, parseXmlPart } from './xmlParser'
 
 export interface ExportOoxmlOptions extends ProfileFeatureOptions {
@@ -171,6 +192,69 @@ function buildRunStyleOptions(inline: Extract<IntermediateInline, { type: 'text'
   return opts as IRunOptions
 }
 
+const TRANSPARENT_1X1_PNG = new Uint8Array([
+  0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
+  0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1f, 0x15, 0xc4,
+  0x89, 0x00, 0x00, 0x00, 0x0a, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9c, 0x63, 0x00, 0x01, 0x00, 0x00,
+  0x05, 0x00, 0x01, 0x0d, 0x0a, 0x2d, 0xb4, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae,
+  0x42, 0x60, 0x82,
+])
+
+function buildPreviousRunMarks(
+  currentMarks: readonly IntermediateMark[],
+  fc: NonNullable<Extract<IntermediateInline, { type: 'text' }>['formattingChange']>,
+): IntermediateMark[] {
+  let prev = [...currentMarks]
+  const changes = fc.markChanges ?? []
+  for (const ch of changes) {
+    if (ch.operation === 'added') {
+      prev = prev.filter((m) => m.type !== ch.markName)
+    } else if (ch.operation === 'removed') {
+      const attrs = ch.markAttrs ?? {}
+      switch (ch.markName) {
+        case 'bold':
+          prev.push({ type: 'bold' })
+          break
+        case 'italic':
+          prev.push({ type: 'italic' })
+          break
+        case 'strike':
+          prev.push({ type: 'strike' })
+          break
+        case 'code':
+          prev.push({ type: 'code' })
+          break
+        case 'superscript':
+          prev.push({ type: 'superscript' })
+          break
+        case 'subscript':
+          prev.push({ type: 'subscript' })
+          break
+        case 'underline':
+          prev.push({
+            type: 'underline',
+            underlineType: typeof attrs.underlineType === 'string' ? (attrs.underlineType as 'single') : 'single',
+          })
+          break
+        case 'highlight': {
+          const colorHex = normalizeHexColor(attrs.color) ?? 'FFFF00'
+          prev.push({ type: 'highlight', colorHex })
+          break
+        }
+        case 'textStyle':
+          prev.push({
+            type: 'textStyle',
+            fontFamily: typeof attrs.fontFamily === 'string' ? attrs.fontFamily : null,
+            fontSizeHalfPt: parseFontSizeToHalfPt(attrs.fontSize),
+            colorHex: normalizeHexColor(attrs.color),
+          })
+          break
+      }
+    }
+  }
+  return prev
+}
+
 function buildParagraphChildren(
   inlines: readonly IntermediateInline[],
   commentWIdByDiscussionId: ReadonlyMap<string, number[]>,
@@ -246,11 +330,70 @@ function buildParagraphChildren(
     }
 
     if (inline.type === 'bookmark') {
-      // Bookmark anchors represented via text fallback if needed, or skipped cleanly.
+      const bmId = allocator.allocateBookmarkId()
+      const bmName = inline.name || inline.id
+      children.push(new BookmarkStart(bmName, bmId) as unknown as ParagraphChild)
+      children.push(new BookmarkEnd(bmId) as unknown as ParagraphChild)
+      continue
+    }
+
+    if (inline.type === 'footnoteRef') {
+      children.push(new FootnoteReferenceRun(inline.id))
+      continue
+    }
+
+    if (inline.type === 'endnoteRef') {
+      children.push(new EndnoteReferenceRun(inline.id))
       continue
     }
 
     if (inline.type === 'image') {
+      if (inline.src.startsWith('data:')) {
+        const asset = parseAndValidateImageDataUri(inline.src)
+        const width = inline.widthPx && inline.widthPx > 0 ? Math.round(inline.widthPx) : (asset.widthPx ?? 200)
+        const height = inline.heightPx && inline.heightPx > 0 ? Math.round(inline.heightPx) : (asset.heightPx ?? 200)
+        const cropOpts = inline.crop
+          ? {
+              ...(typeof inline.crop.left === 'number' && Number.isFinite(inline.crop.left) ? { left: inline.crop.left } : {}),
+              ...(typeof inline.crop.top === 'number' && Number.isFinite(inline.crop.top) ? { top: inline.crop.top } : {}),
+              ...(typeof inline.crop.right === 'number' && Number.isFinite(inline.crop.right) ? { right: inline.crop.right } : {}),
+              ...(typeof inline.crop.bottom === 'number' && Number.isFinite(inline.crop.bottom) ? { bottom: inline.crop.bottom } : {}),
+            }
+          : undefined
+        const hasCrop = cropOpts && Object.keys(cropOpts).length > 0
+        const altText =
+          inline.alt || inline.title
+            ? {
+                ...(inline.alt ? { name: inline.alt, description: inline.alt } : {}),
+                ...(inline.title ? { title: inline.title } : {}),
+              }
+            : undefined
+
+        if (asset.format === 'svg') {
+          children.push(
+            new ImageRun({
+              type: 'svg',
+              data: asset.bytes,
+              fallback: { type: 'png', data: TRANSPARENT_1X1_PNG },
+              transformation: { width, height },
+              ...(altText ? { altText } : {}),
+              ...(hasCrop ? { crop: cropOpts } : {}),
+            }),
+          )
+        } else {
+          children.push(
+            new ImageRun({
+              type: asset.format,
+              data: asset.bytes,
+              transformation: { width, height },
+              ...(altText ? { altText } : {}),
+              ...(hasCrop ? { crop: cropOpts } : {}),
+            }),
+          )
+        }
+        continue
+      }
+
       diagnostics.warn(
         'IMAGE_EXPORT_PLACEHOLDER',
         'image',
@@ -267,7 +410,11 @@ function buildParagraphChildren(
 
     if (enableRevisions && inline.formattingChange) {
       const fcRevId = allocator.allocateRevisionId(inline.formattingChange.ooxmlId)
+      const prevMarks = buildPreviousRunMarks(inline.marks, inline.formattingChange)
+      const prevRunOpts = buildRunStyleOptions({ type: 'text', text: '', marks: prevMarks })
+      const { text: _unusedText, ...prevPropsOnly } = prevRunOpts as Record<string, unknown>
       ;(baseOpts as Record<string, unknown>).revision = {
+        ...prevPropsOnly,
         id: fcRevId,
         author: inline.formattingChange.author,
         date: inline.formattingChange.date,
@@ -301,7 +448,15 @@ function buildParagraphChildren(
     }
 
     if (linkMark) {
-      if (!isSafeHyperlinkUrl(linkMark.href)) {
+      const internalAnchor = linkMark.anchor ?? parseInternalAnchorHref(linkMark.href)
+      if (internalAnchor) {
+        children.push(
+          new InternalHyperlink({
+            anchor: internalAnchor,
+            children: [runNode],
+          }),
+        )
+      } else if (!isSafeHyperlinkUrl(linkMark.href)) {
         diagnostics.block(
           'UNSAFE_HYPERLINK_TARGET',
           'link.href',
@@ -399,8 +554,93 @@ function buildParagraphOptions(
   if (joinDeletion) {
     opts.run = { deletion: joinDeletion }
   }
+  if (enableRevisions && attrs.formattingChange) {
+    const fcRevId = allocator.allocateRevisionId(attrs.formattingChange.ooxmlId)
+    const prevAttrs: ParagraphAttrs = {
+      ...attrs,
+      ...(attrs.formattingChange.previousParagraphProps ?? {}),
+    }
+    const prevIndent: Record<string, number> = {}
+    if (prevAttrs.indentLeftDxa != null) prevIndent.left = prevAttrs.indentLeftDxa
+    if (prevAttrs.indentRightDxa != null) prevIndent.right = prevAttrs.indentRightDxa
+    if (prevAttrs.indentFirstLineDxa != null) {
+      if (prevAttrs.indentFirstLineDxa >= 0) prevIndent.firstLine = prevAttrs.indentFirstLineDxa
+      else prevIndent.hanging = Math.abs(prevAttrs.indentFirstLineDxa)
+    }
+    const prevSpacing: Record<string, unknown> = {}
+    if (prevAttrs.spacingBeforeDxa != null) prevSpacing.before = prevAttrs.spacingBeforeDxa
+    if (prevAttrs.spacingAfterDxa != null) prevSpacing.after = prevAttrs.spacingAfterDxa
+    if (prevAttrs.lineSpacing != null) {
+      const lineInfo = lineHeightToOoxml(prevAttrs.lineSpacing, prevAttrs.lineRule ?? 'auto')
+      prevSpacing.line = lineInfo.line
+      prevSpacing.lineRule = lineInfo.lineRule
+    }
+    const prevAlignment = mapAlignment(prevAttrs.textAlign)
+    opts.revision = {
+      id: fcRevId,
+      author: attrs.formattingChange.author,
+      date: attrs.formattingChange.date,
+      ...(prevAlignment ? { alignment: prevAlignment } : {}),
+      ...(Object.keys(prevIndent).length > 0 ? { indent: prevIndent } : {}),
+      ...(Object.keys(prevSpacing).length > 0 ? { spacing: prevSpacing } : {}),
+      ...(prevAttrs.contextualSpacing != null ? { contextualSpacing: prevAttrs.contextualSpacing } : {}),
+      ...(prevAttrs.keepNext != null ? { keepNext: prevAttrs.keepNext } : {}),
+      ...(prevAttrs.keepLines != null ? { keepLines: prevAttrs.keepLines } : {}),
+    }
+  }
 
   return opts as IParagraphOptions
+}
+
+const VALID_BORDER_STYLES = new Set<string>(Object.values(BorderStyle))
+
+function mapBorderStyle(style: string): (typeof BorderStyle)[keyof typeof BorderStyle] {
+  return VALID_BORDER_STYLES.has(style)
+    ? (style as (typeof BorderStyle)[keyof typeof BorderStyle])
+    : BorderStyle.SINGLE
+}
+
+function toDocxBorder(spec: BorderSpec | null | undefined): IBorderOptions | undefined {
+  if (!spec) return undefined
+  return {
+    style: mapBorderStyle(spec.style),
+    size: spec.sizeEighthPt,
+    color: spec.colorHex ?? 'auto',
+  }
+}
+
+function toDocxMargins(margins: CellMarginsDxa | null | undefined) {
+  if (!margins) return undefined
+  const out: Record<string, unknown> = {
+    marginUnitType: WidthType.DXA,
+    ...(margins.topDxa != null ? { top: margins.topDxa } : {}),
+    ...(margins.rightDxa != null ? { right: margins.rightDxa } : {}),
+    ...(margins.bottomDxa != null ? { bottom: margins.bottomDxa } : {}),
+    ...(margins.leftDxa != null ? { left: margins.leftDxa } : {}),
+  }
+  return Object.keys(out).length > 1 ? out : undefined
+}
+
+function mapLevelFormat(format: string, kind: 'bullet' | 'ordered'): (typeof LevelFormat)[keyof typeof LevelFormat] {
+  if (kind === 'bullet' || format === 'bullet') {
+    return LevelFormat.BULLET
+  }
+  switch (format) {
+    case 'lowerLetter':
+      return LevelFormat.LOWER_LETTER
+    case 'upperLetter':
+      return LevelFormat.UPPER_LETTER
+    case 'lowerRoman':
+      return LevelFormat.LOWER_ROMAN
+    case 'upperRoman':
+      return LevelFormat.UPPER_ROMAN
+    case 'decimalZero':
+      return LevelFormat.DECIMAL_ZERO
+    case 'ordinal':
+      return LevelFormat.ORDINAL
+    default:
+      return LevelFormat.DECIMAL
+  }
 }
 
 function convertBlocksToDocx(
@@ -411,6 +651,8 @@ function convertBlocksToDocx(
   enableRevisions: boolean,
   location: string,
   diagnostics: LossReportBuilder,
+  codeStyleByLang: ReadonlyMap<string, string> = new Map(),
+  overrideParagraphStyleId?: string,
 ): (Paragraph | Table)[] {
   const out: (Paragraph | Table)[] = []
 
@@ -428,9 +670,13 @@ function convertBlocksToDocx(
         loc,
         diagnostics,
       )
+      const effectiveAttrs =
+        overrideParagraphStyleId && !block.attrs.styleId
+          ? { ...block.attrs, styleId: overrideParagraphStyleId }
+          : block.attrs
       out.push(
         new Paragraph(
-          buildParagraphOptions(block.attrs, children, allocator, revisionIdMap, enableRevisions),
+          buildParagraphOptions(effectiveAttrs, children, allocator, revisionIdMap, enableRevisions),
         ),
       )
     } else if (block.type === 'heading') {
@@ -453,9 +699,10 @@ function convertBlocksToDocx(
     } else if (block.type === 'horizontalRule') {
       out.push(new Paragraph({ thematicBreak: true }))
     } else if (block.type === 'codeBlock') {
+      const styleId = block.language ? (codeStyleByLang.get(block.language) ?? 'CodeBlock') : 'CodeBlock'
       const lines = block.text.split(/\r?\n/)
       for (const line of lines) {
-        out.push(new Paragraph({ children: [new TextRun({ text: line, font: 'Courier New' })] }))
+        out.push(new Paragraph({ style: styleId, children: [new TextRun({ text: line })] }))
       }
     } else if (block.type === 'blockquote') {
       const inner = convertBlocksToDocx(
@@ -466,6 +713,8 @@ function convertBlocksToDocx(
         enableRevisions,
         loc,
         diagnostics,
+        codeStyleByLang,
+        'Quote',
       )
       out.push(...inner)
     } else if (block.type === 'table') {
@@ -479,12 +728,22 @@ function convertBlocksToDocx(
             enableRevisions,
             `${loc}.row[${rIdx}].cell[${cIdx}]`,
             diagnostics,
+            codeStyleByLang,
           )
           const cellWidth =
             cell.width ??
             (cell.colwidthDxa && cell.colwidthDxa.length > 0
               ? { unit: 'dxa' as const, value: cell.colwidthDxa.reduce((a, b) => a + b, 0) }
               : undefined)
+          const cellBorders: ITableCellBorders | undefined = cell.borders
+            ? {
+                ...(cell.borders.top ? { top: toDocxBorder(cell.borders.top) } : {}),
+                ...(cell.borders.bottom ? { bottom: toDocxBorder(cell.borders.bottom) } : {}),
+                ...(cell.borders.left ? { left: toDocxBorder(cell.borders.left) } : {}),
+                ...(cell.borders.right ? { right: toDocxBorder(cell.borders.right) } : {}),
+              }
+            : undefined
+          const cellMargins = toDocxMargins(cell.margins)
 
           return new TableCell({
             children: cellChildren.length > 0 ? cellChildren : [new Paragraph({})],
@@ -498,6 +757,8 @@ function convertBlocksToDocx(
                   },
                 }
               : {}),
+            ...(cellBorders && Object.keys(cellBorders).length > 0 ? { borders: cellBorders } : {}),
+            ...(cellMargins ? { margins: cellMargins } : {}),
             ...(cell.backgroundHex
               ? {
                   shading: {
@@ -546,6 +807,23 @@ function convertBlocksToDocx(
       }
       if (block.indentDxa != null) {
         tableOpts.indent = { size: block.indentDxa, type: WidthType.DXA }
+      }
+      if (block.borders) {
+        const tblBorders: ITableBordersOptions = {
+          ...(block.borders.top ? { top: toDocxBorder(block.borders.top) } : {}),
+          ...(block.borders.bottom ? { bottom: toDocxBorder(block.borders.bottom) } : {}),
+          ...(block.borders.left ? { left: toDocxBorder(block.borders.left) } : {}),
+          ...(block.borders.right ? { right: toDocxBorder(block.borders.right) } : {}),
+          ...(block.borders.insideH ? { insideHorizontal: toDocxBorder(block.borders.insideH) } : {}),
+          ...(block.borders.insideV ? { insideVertical: toDocxBorder(block.borders.insideV) } : {}),
+        }
+        if (Object.keys(tblBorders).length > 0) {
+          tableOpts.borders = tblBorders
+        }
+      }
+      const tblMargins = toDocxMargins(block.margins)
+      if (tblMargins) {
+        tableOpts.margins = tblMargins
       }
       out.push(new Table(tableOpts as ConstructorParameters<typeof Table>[0]))
     } else if (block.type === 'unsupportedBlock') {
@@ -950,6 +1228,36 @@ export async function exportIntermediateToDocx(
     ? prepareComments(model.discussions, capabilities.threadedComments, allocator, diagnostics)
     : { allocated: [], commentWIdByDiscussionId: new Map<string, number[]>(), docxComments: [] }
 
+  const codeStyleByLang = new Map<string, string>()
+  let hasBlockquote = false
+  let hasCodeBlock = false
+  const scanStructuralStyles = (blocks: readonly IntermediateBlock[]) => {
+    for (const b of blocks) {
+      if (b.type === 'blockquote') {
+        hasBlockquote = true
+        scanStructuralStyles(b.blocks)
+      } else if (b.type === 'codeBlock') {
+        hasCodeBlock = true
+        if (b.language && !codeStyleByLang.has(b.language)) {
+          codeStyleByLang.set(b.language, `CodeBlock_${codeStyleByLang.size}`)
+        }
+      } else if (b.type === 'table') {
+        for (const r of b.rows) {
+          for (const c of r.cells) scanStructuralStyles(c.blocks)
+        }
+      }
+    }
+  }
+  for (const sec of model.sections) {
+    scanStructuralStyles(sec.blocks)
+  }
+  for (const fn of model.footnotes ?? []) {
+    scanStructuralStyles(fn.blocks)
+  }
+  for (const en of model.endnotes ?? []) {
+    scanStructuralStyles(en.blocks)
+  }
+
   const sections: ISectionOptions[] = model.sections.map((sec: IntermediateSection, secIdx: number) => {
     const loc = `section[${secIdx}]`
     const children = convertBlocksToDocx(
@@ -960,6 +1268,7 @@ export async function exportIntermediateToDocx(
       capabilities.revisionsEnabled,
       loc,
       diagnostics,
+      codeStyleByLang,
     )
 
     const hdrDefault = buildHeaderFooterPart(
@@ -1065,21 +1374,100 @@ export async function exportIntermediateToDocx(
 
   const numberingConfig = model.numbering.map((def) => ({
     reference: `vaulter-list-${def.numId}`,
-    levels: Array.from({ length: 9 }, (_, level) => ({
-      level,
-      format:
-        def.kind === 'bullet'
-          ? LevelFormat.BULLET
-          : def.format === 'lowerLetter'
-            ? LevelFormat.LOWER_LETTER
-            : def.format === 'upperRoman'
-              ? LevelFormat.UPPER_ROMAN
-              : LevelFormat.DECIMAL,
-      text: def.kind === 'bullet' ? '•' : `%${level + 1}.`,
-      alignment: AlignmentType.LEFT,
-      start: level === 0 ? def.start : 1,
-    })),
+    levels: Array.from({ length: 9 }, (_, level) => {
+      const lvlDef = def.levels?.find((l) => l.level === level)
+      const lvlKind = lvlDef?.kind ?? def.kind
+      const lvlFormat = lvlDef?.format ?? def.format
+      const lvlStart = lvlDef?.start ?? (level === 0 ? def.start : 1)
+      return {
+        level,
+        format: mapLevelFormat(lvlFormat, lvlKind),
+        text: lvlKind === 'bullet' ? '•' : `%${level + 1}.`,
+        alignment: AlignmentType.LEFT,
+        start: lvlStart,
+      }
+    }),
   }))
+
+  const paragraphStyles: IParagraphStyleOptions[] = []
+  if (hasBlockquote) {
+    paragraphStyles.push({
+      id: 'Quote',
+      name: 'Quote',
+      basedOn: 'Normal',
+      paragraph: {
+        indent: { left: 720, right: 360 },
+        spacing: { before: 120, after: 120 },
+        border: {
+          left: { style: BorderStyle.SINGLE, size: 18, color: 'CBD5E1', space: 12 },
+        },
+        contextualSpacing: true,
+      },
+    })
+  }
+  if (hasCodeBlock) {
+    paragraphStyles.push({
+      id: 'CodeBlock',
+      name: 'Code Block',
+      basedOn: 'Normal',
+      paragraph: {
+        spacing: { before: 0, after: 0 },
+        contextualSpacing: true,
+        shading: { fill: 'F1F5F9', type: ShadingType.CLEAR, color: 'auto' },
+        border: {
+          top: { style: BorderStyle.SINGLE, size: 4, color: 'CBD5E1', space: 4 },
+          bottom: { style: BorderStyle.SINGLE, size: 4, color: 'CBD5E1', space: 4 },
+          left: { style: BorderStyle.SINGLE, size: 4, color: 'CBD5E1', space: 8 },
+          right: { style: BorderStyle.SINGLE, size: 4, color: 'CBD5E1', space: 8 },
+        },
+      },
+      run: {
+        font: 'Courier New',
+        size: 20,
+      },
+    })
+    for (const [lang, styleId] of codeStyleByLang.entries()) {
+      paragraphStyles.push({
+        id: styleId,
+        name: `Code Block (${lang})`,
+        basedOn: 'CodeBlock',
+      })
+    }
+  }
+
+  const footnotesRecord: Record<string, { children: Paragraph[] }> = {}
+  for (const fn of model.footnotes ?? []) {
+    const converted = convertBlocksToDocx(
+      fn.blocks,
+      new Map(),
+      allocator,
+      revisionIdMap,
+      capabilities.revisionsEnabled,
+      `footnote#${fn.id}`,
+      diagnostics,
+      codeStyleByLang,
+    ).filter((b): b is Paragraph => b instanceof Paragraph)
+    footnotesRecord[String(fn.id)] = {
+      children: converted.length > 0 ? converted : [new Paragraph({})],
+    }
+  }
+
+  const endnotesRecord: Record<string, { children: Paragraph[] }> = {}
+  for (const en of model.endnotes ?? []) {
+    const converted = convertBlocksToDocx(
+      en.blocks,
+      new Map(),
+      allocator,
+      revisionIdMap,
+      capabilities.revisionsEnabled,
+      `endnote#${en.id}`,
+      diagnostics,
+      codeStyleByLang,
+    ).filter((b): b is Paragraph => b instanceof Paragraph)
+    endnotesRecord[String(en.id)] = {
+      children: converted.length > 0 ? converted : [new Paragraph({})],
+    }
+  }
 
   const hasEvenHeadersOrFooters =
     model.metadata.evenAndOddHeaders ||
@@ -1092,6 +1480,9 @@ export async function exportIntermediateToDocx(
     evenAndOddHeaderAndFooters: hasEvenHeadersOrFooters,
     features: { trackRevisions: capabilities.revisionsEnabled },
     numbering: { config: numberingConfig },
+    ...(paragraphStyles.length > 0 ? { styles: { paragraphStyles } } : {}),
+    ...(Object.keys(footnotesRecord).length > 0 ? { footnotes: footnotesRecord } : {}),
+    ...(Object.keys(endnotesRecord).length > 0 ? { endnotes: endnotesRecord } : {}),
     ...(docxComments.length > 0 ? { comments: { children: docxComments } } : {}),
     sections,
   })

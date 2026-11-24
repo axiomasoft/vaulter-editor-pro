@@ -6,7 +6,7 @@ import type {
 } from '../../../packages/docx/src/model/types'
 
 export interface CorpusFixtureSpec {
-  id: 'D1' | 'D2' | 'D3' | 'D4'
+  id: 'D1' | 'D2' | 'D3' | 'D4' | 'D5'
   title: string
   document: TipTapDoc
   sections?: DocxSectionInput[]
@@ -426,9 +426,167 @@ export const CORPUS_D4: CorpusFixtureSpec = {
   },
 }
 
+/**
+ * D5: Rich layout corpus — embedded image + crop, footnote, table/cell borders & margins,
+ * bookmark + internal anchor link, blockquote, codeBlock, nested orderedList, and rPrChange.
+ */
+const D5_PNG_DATA_URI =
+  'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII='
+
+export const CORPUS_D5: CorpusFixtureSpec = {
+  id: 'D5',
+  title: 'Rich Layout Images Footnotes Borders Bookmarks CodeBlock and Multilevel Lists',
+  sourceMarker: {
+    nodeId: 'corpus-d5',
+    generation: 1,
+    position: 50,
+    schemaVersion: 2,
+    contentHash: 'corpus-d5-v1',
+  },
+  document: {
+    type: 'doc',
+    content: [
+      {
+        type: 'heading',
+        attrs: { level: 1, blockId: 'd5_h1' },
+        content: [
+          { type: 'bookmark', attrs: { id: 'bm_1', name: 'd5_target' } },
+          text('D5 Rich Layout Section'),
+        ],
+      },
+      {
+        type: 'paragraph',
+        attrs: { blockId: 'd5_p_link_fn' },
+        content: [
+          text('Jump to '),
+          text('target heading', [{ type: 'link', attrs: { href: '#d5_target' } }]),
+          text(' with note'),
+          {
+            type: 'footnote',
+            attrs: { id: 1 },
+            content: [paragraph('Footnote body text', { blockId: 'd5_fn_1' })],
+          },
+          text('.'),
+        ],
+      },
+      {
+        type: 'paragraph',
+        attrs: { blockId: 'd5_p_img' },
+        content: [
+          {
+            type: 'image',
+            attrs: {
+              src: D5_PNG_DATA_URI,
+              alt: 'Tiny PNG',
+              title: 'Sample',
+              width: 120,
+              height: 80,
+              crop: { top: 10, right: 10, bottom: 10, left: 10 },
+            },
+          },
+        ],
+      },
+      {
+        type: 'table',
+        attrs: {
+          blockId: 'd5_tbl',
+          gridColsDxa: [3000, 3000],
+          borders: {
+            top: { style: 'single', sizeEighthPt: 8, colorHex: '112233' },
+            bottom: { style: 'single', sizeEighthPt: 8, colorHex: '112233' },
+            left: { style: 'single', sizeEighthPt: 8, colorHex: '112233' },
+            right: { style: 'single', sizeEighthPt: 8, colorHex: '112233' },
+            insideH: { style: 'single', sizeEighthPt: 4, colorHex: 'AABBCC' },
+            insideV: { style: 'single', sizeEighthPt: 4, colorHex: 'AABBCC' },
+          },
+          margins: { topDxa: 100, bottomDxa: 100, leftDxa: 140, rightDxa: 140 },
+        },
+        content: [
+          {
+            type: 'tableRow',
+            content: [
+              {
+                type: 'tableCell',
+                attrs: {
+                  colspan: 1,
+                  rowspan: 1,
+                  colwidth: [200],
+                  borders: {
+                    top: { style: 'double', sizeEighthPt: 6, colorHex: '445566' },
+                  },
+                  margins: { topDxa: 80, bottomDxa: 80, leftDxa: 120, rightDxa: 120 },
+                },
+                content: [paragraph('Bordered Cell A', { blockId: 'd5_c1' })],
+              },
+              {
+                type: 'tableCell',
+                attrs: { colspan: 1, rowspan: 1, colwidth: [200] },
+                content: [paragraph('Bordered Cell B', { blockId: 'd5_c2' })],
+              },
+            ],
+          },
+        ],
+      },
+      {
+        type: 'blockquote',
+        attrs: { blockId: 'd5_bq' },
+        content: [paragraph('Quoted paragraph inside blockquote.', { blockId: 'd5_bq_p' })],
+      },
+      {
+        type: 'codeBlock',
+        attrs: { blockId: 'd5_cb', language: 'typescript' },
+        content: [text('const answer = 42;')],
+      },
+      {
+        type: 'orderedList',
+        attrs: { start: 3 },
+        content: [
+          {
+            type: 'listItem',
+            content: [
+              paragraph('Level 0 item', { blockId: 'd5_l0' }),
+              {
+                type: 'orderedList',
+                attrs: { start: 2, type: 'lowerLetter' },
+                content: [
+                  {
+                    type: 'listItem',
+                    content: [paragraph('Level 1 nested item', { blockId: 'd5_l1' })],
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+      },
+      {
+        type: 'paragraph',
+        attrs: { blockId: 'd5_p_rev' },
+        content: [
+          text('Italic formatting proposal', [
+            { type: 'italic' },
+            {
+              type: 'suggestion',
+              attrs: {
+                id: 'rev-fmt-italic',
+                type: 'markChange',
+                userId: 'editor-2',
+                createdAt: '2026-11-24T10:00:00Z',
+                userMetadata: { name: 'Synthetic Editor' },
+                markChanges: [{ operation: 'added', markName: 'italic', markAttrs: {} }],
+              },
+            },
+          ]),
+        ],
+      },
+    ],
+  },
+}
+
 export const ALL_DOCX_CORPUS_FIXTURES: readonly CorpusFixtureSpec[] = [
   CORPUS_D1,
   CORPUS_D2,
   CORPUS_D3,
   CORPUS_D4,
+  CORPUS_D5,
 ]

@@ -23,6 +23,7 @@ import {
   CORPUS_D2,
   CORPUS_D3,
   CORPUS_D4,
+  CORPUS_D5,
 } from '../../../tests/corpus/docx/corpus'
 
 describe('DOCX Corpus D1–D4 Roundtrip & Loss Report (10.1-A)', () => {
@@ -524,5 +525,186 @@ describe('DOCX Corpus D1–D4 Roundtrip & Loss Report (10.1-A)', () => {
     const idEl = findChildren(idsXml, 'commentId')[0]
     expect(getAttr(idEl, 'w16cid:paraId', 'paraId')).toBe(lastParaId)
     expect(isValidOoxmlHexId(getAttr(idEl, 'w16cid:durableId', 'durableId'))).toBe(true)
+  })
+
+  it('D5: roundtrips embedded images+crop, footnotes, table/cell borders+margins, bookmarks+internal links, blockquote, codeBlock, multilevel lists, and rPrChange', async () => {
+    const exported = await exportDocx(
+      { document: CORPUS_D5.document, sourceMarker: CORPUS_D5.sourceMarker },
+      { profile: 'revisions', projection: 'review', enableRevisions: true },
+    )
+    expect(exported.blocked).toBe(false)
+    expect(exported.binary).not.toBeNull()
+    expect(exported.report.summary.error).toBe(0)
+    expect(exported.report.diagnostics.map((d) => d.code)).toEqual(['NATIVE_FORMATTING_REVISION'])
+
+    const zip = unzipSync(exported.binary!)
+    expect(Object.keys(zip).some((k) => /^word\/media\/.+\.png$/i.test(k))).toBe(true)
+    expect(zip['word/footnotes.xml']).toBeDefined()
+    const docRaw = decodeUtf8(zip['word/document.xml'])
+    expect(docRaw).toContain('<a:srcRect')
+    expect(docRaw).toContain('<wp:extent')
+    expect(docRaw).toContain('<w:bookmarkStart')
+    expect(docRaw).toContain('w:anchor="d5_target"')
+    expect(docRaw).toContain('w:val="Quote"')
+    expect(docRaw).toContain('CodeBlock')
+    expect(docRaw).toContain('<w:rPrChange')
+    const numRaw = decodeUtf8(zip['word/numbering.xml'])
+    expect(numRaw).toContain('lowerLetter')
+
+    const rt = await roundtripDocx(exported.binary!, {
+      profile: 'revisions',
+      projection: 'review',
+      enableRevisions: true,
+    })
+    expect(rt.firstImport?.blocked).toBe(false)
+    expect(rt.secondImport?.blocked).toBe(false)
+    expect(compareSemanticReports(rt.firstImport!.semantic, rt.secondImport!.semantic)).toEqual({
+      equal: true,
+      differences: [],
+    })
+
+    const tiptapRoundtrip = fromIntermediate(rt.firstImport!.model)
+    const reexported = await exportDocx(tiptapRoundtrip.document, {
+      profile: 'revisions',
+      projection: 'review',
+      enableRevisions: true,
+      sourceMarker: CORPUS_D5.sourceMarker,
+    })
+    expect(reexported.blocked).toBe(false)
+    const reimported = await importDocx(reexported.binary!, { profile: 'revisions' })
+    expect(compareSemanticReports(rt.firstImport!.semantic, reimported.semantic)).toEqual({
+      equal: true,
+      differences: [],
+    })
+
+    const sem = rt.firstImport!.semantic
+    expect(sem.images).toHaveLength(1)
+    expect(sem.images[0]).toMatchObject({
+      alt: 'Tiny PNG',
+      widthPx: 120,
+      heightPx: 80,
+      crop: { left: 10, top: 10, right: 10, bottom: 10 },
+    })
+    expect(sem.footnotes).toEqual([{ id: 1, text: 'Footnote body text' }])
+    expect(sem.bookmarks).toEqual([{ id: 'd5_target', name: 'd5_target' }])
+    expect(sem.blockquotes).toBe(1)
+    expect(sem.codeBlocks).toEqual([{ language: 'typescript', text: 'const answer = 42;' }])
+    expect(sem.lists).toEqual([
+      { kind: 'ordered', level: 0, start: 3, format: 'decimal', text: 'Level 0 item' },
+      { kind: 'ordered', level: 1, start: 2, format: 'lowerLetter', text: 'Level 1 nested item' },
+    ])
+    expect(sem.tables[0].borders).toMatchObject({
+      top: { style: 'single', sizeEighthPt: 8, colorHex: '112233' },
+      insideH: { style: 'single', sizeEighthPt: 4, colorHex: 'AABBCC' },
+    })
+    expect(sem.tables[0].margins).toEqual({ topDxa: 100, rightDxa: 140, bottomDxa: 100, leftDxa: 140 })
+    expect(sem.tables[0].cells[0].borders).toMatchObject({
+      top: { style: 'double', sizeEighthPt: 6, colorHex: '445566' },
+    })
+    expect(sem.tables[0].cells[0].margins).toEqual({ topDxa: 80, rightDxa: 120, bottomDxa: 80, leftDxa: 120 })
+    expect(sem.revisions.formattingRevisions).toBe(1)
+
+    // On-disk d5-rich-layout.docx & d5-rich-layout.tiptap.json parity
+    const diskDocx = readFileSync(resolve(__dirname, '../../../tests/corpus/docx/d5-rich-layout.docx'))
+    const diskJson = JSON.parse(readFileSync(resolve(__dirname, '../../../tests/corpus/docx/d5-rich-layout.tiptap.json'), 'utf8'))
+    const diskImport = await importDocx(diskDocx, { profile: 'revisions' })
+    const jsonExport = await exportDocx(
+      { document: diskJson, sourceMarker: CORPUS_D5.sourceMarker },
+      { profile: 'revisions', projection: 'review', enableRevisions: true },
+    )
+    const jsonImport = await importDocx(jsonExport.binary!, { profile: 'revisions' })
+    expect(compareSemanticReports(diskImport.semantic, jsonImport.semantic)).toEqual({
+      equal: true,
+      differences: [],
+    })
+  })
+
+  it('D5 edge cases: endnotes, SVG images, VML <w:pict> images, removed rPrChange, and pPrChange roundtrip', async () => {
+    const svgDataUri =
+      'data:image/svg+xml;base64,' +
+      Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" width="40" height="20"><rect width="40" height="20" fill="#123456"/></svg>').toString('base64')
+
+    const doc = {
+      type: 'doc' as const,
+      content: [
+        {
+          type: 'paragraph',
+          attrs: {
+            textAlign: 'center',
+            formattingChange: {
+              id: 'ppr-1',
+              targetType: 'paragraph',
+              author: 'Editor',
+              date: '2026-11-24T10:00:00Z',
+              summary: 'changed:textAlign',
+              previousParagraphProps: { textAlign: 'left' },
+            },
+          },
+          content: [
+            {
+              type: 'text',
+              text: 'Endnote ref',
+              marks: [
+                {
+                  type: 'suggestion',
+                  attrs: {
+                    id: 'rev-rem-bold',
+                    type: 'markChange',
+                    userId: 'editor-1',
+                    createdAt: '2026-11-24T10:00:00Z',
+                    userMetadata: { name: 'Editor' },
+                    markChanges: [{ operation: 'removed', markName: 'bold', markAttrs: {} }],
+                  },
+                },
+              ],
+            },
+            {
+              type: 'endnote',
+              attrs: { id: 1 },
+              content: [{ type: 'paragraph', content: [{ type: 'text', text: 'Endnote body' }] }],
+            },
+            {
+              type: 'image',
+              attrs: { src: svgDataUri, alt: 'Vector SVG', width: 40, height: 20 },
+            },
+          ],
+        },
+      ],
+    }
+
+    const strictBlocked = await exportDocx(doc, { profile: 'strict-ooxml', enableRevisions: true })
+    expect(strictBlocked.blocked).toBe(true)
+    expect(strictBlocked.report.diagnostics.some((d) => d.code === 'NATIVE_FORMATTING_REVISION_UNSUPPORTED')).toBe(true)
+
+    const exp = await exportDocx(doc, { profile: 'revisions', projection: 'review', enableRevisions: true })
+    expect(exp.blocked).toBe(false)
+    const zip = unzipSync(exp.binary!)
+    expect(zip['word/endnotes.xml']).toBeDefined()
+    expect(decodeUtf8(zip['word/document.xml'])).toContain('<w:pPrChange')
+
+    const imp = await importDocx(exp.binary!, { profile: 'revisions' })
+    expect(imp.semantic.endnotes).toEqual([{ id: 1, text: 'Endnote body' }])
+    expect(imp.semantic.images).toHaveLength(1)
+    expect(imp.semantic.images[0].alt).toBe('Vector SVG')
+    expect(imp.semantic.revisions.formattingRevisions).toBe(2)
+
+    // VML <w:pict><v:imagedata> legacy image import
+    const pngBytes = Buffer.from(
+      'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',
+      'base64',
+    )
+    const vmlZip = zipSync({
+      'word/document.xml': encodeUtf8(
+        '<?xml version="1.0" encoding="UTF-8"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:v="urn:schemas-microsoft-com:vml" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:body><w:p><w:r><w:pict><v:shape style="width:60pt;height:30pt" alt="Legacy VML"><v:imagedata r:id="rIdVml"/></v:shape></w:pict></w:r></w:p></w:body></w:document>',
+      ),
+      'word/_rels/document.xml.rels': encodeUtf8(
+        '<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdVml" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/vml.png"/></Relationships>',
+      ),
+      'word/media/vml.png': pngBytes,
+    })
+    const vmlImport = await importDocx(vmlZip, { profile: 'standard' })
+    expect(vmlImport.blocked).toBe(false)
+    expect(vmlImport.semantic.images).toHaveLength(1)
+    expect(vmlImport.semantic.images[0]).toMatchObject({ alt: 'Legacy VML', widthPx: 80, heightPx: 40 })
   })
 })

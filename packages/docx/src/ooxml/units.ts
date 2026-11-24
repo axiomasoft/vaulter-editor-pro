@@ -197,3 +197,63 @@ export function isSafeHyperlinkUrl(raw: unknown): boolean {
     return false
   }
 }
+
+export function parseInternalAnchorHref(raw: unknown): string | null {
+  if (typeof raw !== 'string') {
+    return null
+  }
+  // eslint-disable-next-line no-control-regex
+  const cleaned = raw.replace(/[\u0000-\u001f\u007f]+/g, '').trim()
+  if (!cleaned.startsWith('#') || cleaned.length <= 1) {
+    return null
+  }
+  const anchor = cleaned.slice(1).trim()
+  if (
+    anchor.length === 0 ||
+    anchor.includes(':') ||
+    anchor.includes('/') ||
+    anchor.includes('\\') ||
+    anchor.includes('?')
+  ) {
+    return null
+  }
+  return anchor
+}
+
+export function ooxmlCropToPercent(raw: string | number | undefined): number | null {
+  if (raw === undefined || raw === null) {
+    return null
+  }
+  const n = typeof raw === 'number' ? raw : Number.parseFloat(String(raw))
+  if (!Number.isFinite(n)) {
+    return null
+  }
+  const pct = Math.max(0, Math.min(100, n / 1000))
+  return Math.round(pct * 1000) / 1000
+}
+
+export function percentToOoxmlCrop(pct: number): number {
+  const clamped = Math.max(0, Math.min(100, pct))
+  return Math.round(clamped * 1000)
+}
+
+export function normalizeNumberingFormat(raw: unknown): string {
+  if (typeof raw !== 'string' || raw.trim() === '') {
+    return 'decimal'
+  }
+  const val = raw.trim()
+  switch (val) {
+    case '1':
+      return 'decimal'
+    case 'a':
+      return 'lowerLetter'
+    case 'A':
+      return 'upperLetter'
+    case 'i':
+      return 'lowerRoman'
+    case 'I':
+      return 'upperRoman'
+    default:
+      return val
+  }
+}

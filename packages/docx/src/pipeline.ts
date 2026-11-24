@@ -47,6 +47,8 @@ export interface ExportDocxOptions extends ProfileFeatureOptions {
   sourceMarker?: SourceMarker | null
   sections?: DocxSectionInput[]
   discussions?: ToIntermediateOptions['discussions']
+  footnotes?: ToIntermediateOptions['footnotes']
+  endnotes?: ToIntermediateOptions['endnotes']
   throwOnBlocked?: boolean
 }
 
@@ -100,6 +102,8 @@ function buildIntermediateForExport(
     sourceMarker: options.sourceMarker ?? wrapped?.sourceMarker ?? null,
     sections: options.sections ?? wrapped?.sections,
     discussions: options.discussions ?? wrapped?.discussions,
+    footnotes: options.footnotes,
+    endnotes: options.endnotes,
     replacementGroups: wrapped?.replacementGroups,
     title: wrapped?.title,
     creator: wrapped?.creator,

@@ -41,6 +41,7 @@ export class OoxmlIdAllocator {
   private readonly usedRevisionIds = new Set<number>()
   private nextCommentId = 1
   private nextRevisionId = 1
+  private nextBookmarkId = 1
 
   allocateCommentId(preferred?: number | null): number {
     if (
@@ -93,6 +94,12 @@ export class OoxmlIdAllocator {
     const id = this.nextRevisionId
     this.nextRevisionId += 1
     this.usedRevisionIds.add(id)
+    return id
+  }
+
+  allocateBookmarkId(): number {
+    const id = this.nextBookmarkId
+    this.nextBookmarkId += 1
     return id
   }
 

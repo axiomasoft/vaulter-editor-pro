@@ -39,6 +39,7 @@ export type ParagraphStyleProperties = Partial<Omit<ResolvedParagraphStyle, 'run
 
 interface RawStyleDef {
   id: string
+  name: string | null
   type: string
   basedOn: string | null
   pPr: ParagraphStyleProperties
@@ -271,11 +272,13 @@ export class StyleRegistry {
         continue
       }
       const type = getAttr(styleEl, 'w:type', 'type') ?? 'paragraph'
+      const nameEl = findChild(styleEl, 'name')
+      const name = nameEl ? getAttr(nameEl, 'w:val', 'val') ?? null : null
       const basedOnEl = findChild(styleEl, 'basedOn')
       const basedOn = basedOnEl ? getAttr(basedOnEl, 'w:val', 'val') ?? null : null
       const pPr = extractParagraphProps(findChild(styleEl, 'pPr'))
       const rPr = extractRunProps(findChild(styleEl, 'rPr'))
-      this.stylesById.set(id, { id, type, basedOn, pPr, rPr })
+      this.stylesById.set(id, { id, name, type, basedOn, pPr, rPr })
     }
   }
 
@@ -307,6 +310,7 @@ export class StyleRegistry {
     pStyleId?: string | null
     numPrProps?: ParagraphStyleProperties
     inlinePPr?: ParagraphStyleProperties
+    ignoreStyleIds?: ReadonlySet<string>
   }): ResolvedParagraphStyle {
     let acc: ResolvedParagraphStyle = {
       ...EMPTY_PARAGRAPH_STYLE,
@@ -321,11 +325,68 @@ export class StyleRegistry {
     }
 
     for (const def of this.resolveStyleChain(options.pStyleId)) {
+      if (options.ignoreStyleIds?.has(def.id)) {
+        continue
+      }
       acc = mergeParagraphStyle(acc, def.pPr)
       acc.run = mergeDefined(acc.run, def.rPr)
     }
 
     return mergeParagraphStyle(mergeParagraphStyle(acc, options.numPrProps), options.inlinePPr)
+  }
+
+  isQuoteStyle(pStyleId: string | null | undefined): boolean {
+    if (!pStyleId) {
+      return false
+    }
+    const isQuoteName = (val: string | null | undefined) =>
+      Boolean(val && /^(?:quote|blockquote|intensequote|block quote)$/i.test(val.trim()))
+    if (isQuoteName(pStyleId)) {
+      return true
+    }
+    for (const def of this.resolveStyleChain(pStyleId)) {
+      if (isQuoteName(def.id) || isQuoteName(def.name)) {
+        return true
+      }
+    }
+    return false
+  }
+
+  codeBlockInfoForStyle(pStyleId: string | null | undefined): { isCodeBlock: boolean; language: string | null } {
+    if (!pStyleId) {
+      return { isCodeBlock: false, language: null }
+    }
+    const check = (id: string, name: string | null): { isCodeBlock: boolean; language: string | null } | null => {
+      if (name) {
+        const nameLang = /^Code Block\s*\((.+)\)$/i.exec(name.trim())
+        if (nameLang) {
+          return { isCodeBlock: true, language: nameLang[1].trim() || null }
+        }
+        if (/^Code Block$/i.test(name.trim())) {
+          return { isCodeBlock: true, language: null }
+        }
+      }
+      const idMatch = /^CodeBlock(?:_(.+))?$/i.exec(id.trim())
+      if (idMatch) {
+        return { isCodeBlock: true, language: idMatch[1] ?? null }
+      }
+      if (/^(?:SourceCode|Code|Verbatim|MacroText)$/i.test(id.trim())) {
+        return { isCodeBlock: true, language: null }
+      }
+      return null
+    }
+
+    const direct = check(pStyleId, this.stylesById.get(pStyleId)?.name ?? null)
+    if (direct) {
+      return direct
+    }
+    for (const def of this.resolveStyleChain(pStyleId)) {
+      const hit = check(def.id, def.name)
+      if (hit) {
+        return hit
+      }
+    }
+    return { isCodeBlock: false, language: null }
   }
 
   resolveRun(options: {

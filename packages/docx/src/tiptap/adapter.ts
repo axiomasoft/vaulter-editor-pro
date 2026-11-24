@@ -1,7 +1,11 @@
 import {
   DOCX_MODEL_SCHEMA,
   type AnchoredCommentLike,
+  type BorderSpec,
+  type CellBordersSpec,
+  type CellMarginsDxa,
   type DocxDiscussionInput,
+  type DocxNoteInput,
   type DocxProfileId,
   type DocxProjectionMode,
   type DocxSectionInput,
@@ -15,6 +19,7 @@ import {
   type IntermediateDocument,
   type IntermediateInline,
   type IntermediateMark,
+  type IntermediateNote,
   type IntermediateSection,
   type IntermediateTableBlock,
   type IntermediateTableCell,
@@ -25,6 +30,7 @@ import {
   type ParagraphAttrs,
   type ReplacementGroupMetadata,
   type SourceMarker,
+  type TableBordersSpec,
   type TextAlignment,
   type TipTapDoc,
   type TipTapMark,
@@ -33,13 +39,17 @@ import {
 } from '../model/types'
 import { getProfileCapabilities, type ProfileFeatureOptions } from '../model/profiles'
 import { LossReportBuilder } from '../model/lossReport'
+import { parseAndValidateImageDataUri } from '../zip/guard'
 import {
   halfPointsToPt,
   isSafeHyperlinkUrl,
   normalizeHexColor,
+  normalizeNumberingFormat,
   parseFontSizeToHalfPt,
+  parseInternalAnchorHref,
   parseOoxmlWidth,
   pixelsToTwips,
+  ptToEighthPoints,
   ptToHalfPoints,
   twipsToPixels,
 } from '../ooxml/units'
@@ -52,6 +62,8 @@ export interface ToIntermediateOptions extends ProfileFeatureOptions {
   sourceMarker?: SourceMarker | null
   sections?: DocxSectionInput[]
   discussions?: DiscussionInput[]
+  footnotes?: DocxNoteInput[]
+  endnotes?: DocxNoteInput[]
   replacementGroups?: ReplacementGroupMetadata[]
   title?: string | null
   creator?: string | null
@@ -217,6 +229,17 @@ function parseMarks(
       }
       case 'link': {
         const href = typeof attrs.href === 'string' ? attrs.href.trim() : ''
+        const explicitAnchor = typeof attrs.anchor === 'string' ? parseInternalAnchorHref(`#${attrs.anchor}`) : null
+        const internalAnchor = explicitAnchor ?? parseInternalAnchorHref(href)
+        if (internalAnchor) {
+          marks.push({
+            type: 'link',
+            href: `#${internalAnchor}`,
+            anchor: internalAnchor,
+            title: typeof attrs.title === 'string' ? attrs.title : null,
+          })
+          break
+        }
         if (!isSafeHyperlinkUrl(href)) {
           diagnostics.block(
             'UNSAFE_HYPERLINK_TARGET',
@@ -375,6 +398,25 @@ function parseParagraphAttrs(node: TipTapNode, listBinding: ParagraphAttrs['list
       }
     : null
 
+  const rawFc = attrs.formattingChange as Record<string, unknown> | undefined
+  const formattingChange: FormattingChangeMeta | null =
+    rawFc && typeof rawFc === 'object'
+      ? {
+          id: String(rawFc.id ?? 'ppr_change'),
+          targetType: 'paragraph',
+          author: String(rawFc.author ?? 'Unknown Author'),
+          date: String(rawFc.date ?? '1970-01-01T00:00:00Z'),
+          summary: String(rawFc.summary ?? 'paragraph formatting change'),
+          ...(typeof rawFc.ooxmlId === 'number' ? { ooxmlId: rawFc.ooxmlId } : {}),
+          ...(Array.isArray(rawFc.propertyChanges)
+            ? { propertyChanges: rawFc.propertyChanges as FormattingChangeMeta['propertyChanges'] }
+            : {}),
+          ...(rawFc.previousParagraphProps && typeof rawFc.previousParagraphProps === 'object'
+            ? { previousParagraphProps: rawFc.previousParagraphProps as Partial<ParagraphAttrs> }
+            : {}),
+        }
+      : null
+
   return {
     styleId: typeof attrs.styleId === 'string' ? attrs.styleId : null,
     textAlign: normalizeAlignment(attrs.textAlign),
@@ -390,7 +432,7 @@ function parseParagraphAttrs(node: TipTapNode, listBinding: ParagraphAttrs['list
     keepLines: typeof attrs.keepLines === 'boolean' ? attrs.keepLines : null,
     list: listBinding,
     blockJoinDeletion,
-    formattingChange: null,
+    formattingChange,
   }
 }
 
@@ -398,8 +440,9 @@ function parseInlines(
   content: readonly TipTapNode[] | undefined,
   location: string,
   diagnostics: LossReportBuilder,
-  projection: DocxProjectionMode,
+  tracker: ConversionState,
 ): IntermediateInline[] {
+  const projection = tracker.projection
   if (!content) {
     return []
   }
@@ -426,11 +469,72 @@ function parseInlines(
         ...(parsed.revision ? { revision: parsed.revision } : {}),
       })
     } else if (child.type === 'bookmark') {
-      const id = String(child.attrs?.id ?? `bm_${i}`)
-      result.push({ type: 'bookmark', id, name: id })
+      const name = String(child.attrs?.name ?? child.attrs?.id ?? `bm_${i}`)
+      const id = String(child.attrs?.id ?? name)
+      result.push({ type: 'bookmark', id, name })
+    } else if (child.type === 'footnote' || child.type === 'footnoteReference') {
+      const rawId = Number(child.attrs?.id)
+      let noteId = Number.isInteger(rawId) && rawId > 0 && !tracker.usedFootnoteIds.has(rawId)
+        ? rawId
+        : tracker.nextFootnoteId++
+      while (tracker.usedFootnoteIds.has(noteId)) {
+        noteId = tracker.nextFootnoteId++
+      }
+      tracker.usedFootnoteIds.add(noteId)
+      const noteBlocks: IntermediateBlock[] = []
+      if (Array.isArray(child.content) && child.content.length > 0) {
+        for (let b = 0; b < child.content.length; b += 1) {
+          noteBlocks.push(...convertBlockNode(child.content[b], `${childLoc}.fn[${b}]`, diagnostics, tracker))
+        }
+      } else if (typeof child.attrs?.text === 'string') {
+        noteBlocks.push({
+          type: 'paragraph',
+          id: null,
+          attrs: {},
+          inlines: [{ type: 'text', text: child.attrs.text, marks: [] }],
+        })
+      } else {
+        const fromOpt = tracker.inputFootnotes.get(String(child.attrs?.id ?? noteId))
+        if (fromOpt) {
+          noteBlocks.push(...fromOpt)
+        }
+      }
+      tracker.footnotes.push({ id: noteId, blocks: noteBlocks })
+      result.push({ type: 'footnoteRef', id: noteId })
+    } else if (child.type === 'endnote' || child.type === 'endnoteReference') {
+      const rawId = Number(child.attrs?.id)
+      let noteId = Number.isInteger(rawId) && rawId > 0 && !tracker.usedEndnoteIds.has(rawId)
+        ? rawId
+        : tracker.nextEndnoteId++
+      while (tracker.usedEndnoteIds.has(noteId)) {
+        noteId = tracker.nextEndnoteId++
+      }
+      tracker.usedEndnoteIds.add(noteId)
+      const noteBlocks: IntermediateBlock[] = []
+      if (Array.isArray(child.content) && child.content.length > 0) {
+        for (let b = 0; b < child.content.length; b += 1) {
+          noteBlocks.push(...convertBlockNode(child.content[b], `${childLoc}.en[${b}]`, diagnostics, tracker))
+        }
+      } else if (typeof child.attrs?.text === 'string') {
+        noteBlocks.push({
+          type: 'paragraph',
+          id: null,
+          attrs: {},
+          inlines: [{ type: 'text', text: child.attrs.text, marks: [] }],
+        })
+      } else {
+        const fromOpt = tracker.inputEndnotes.get(String(child.attrs?.id ?? noteId))
+        if (fromOpt) {
+          noteBlocks.push(...fromOpt)
+        }
+      }
+      tracker.endnotes.push({ id: noteId, blocks: noteBlocks })
+      result.push({ type: 'endnoteRef', id: noteId })
     } else if (child.type === 'image') {
       const src = typeof child.attrs?.src === 'string' ? child.attrs.src : ''
-      if (!isSafeHyperlinkUrl(src) && !src.startsWith('data:image/')) {
+      if (src.startsWith('data:')) {
+        parseAndValidateImageDataUri(src)
+      } else if (!isSafeHyperlinkUrl(src)) {
         diagnostics.warn(
           'IMAGE_ASSET_UNRESOLVED',
           'image',
@@ -439,6 +543,13 @@ function parseInlines(
           `Image "${src}" cannot be fetched offline during local conversion.`,
         )
       }
+      const rawCrop = child.attrs?.crop as Record<string, unknown> | undefined
+      const cropTop = typeof rawCrop?.top === 'number' ? rawCrop.top : typeof child.attrs?.cropTop === 'number' ? child.attrs.cropTop : null
+      const cropBottom = typeof rawCrop?.bottom === 'number' ? rawCrop.bottom : typeof child.attrs?.cropBottom === 'number' ? child.attrs.cropBottom : null
+      const cropLeft = typeof rawCrop?.left === 'number' ? rawCrop.left : typeof child.attrs?.cropLeft === 'number' ? child.attrs.cropLeft : null
+      const cropRight = typeof rawCrop?.right === 'number' ? rawCrop.right : typeof child.attrs?.cropRight === 'number' ? child.attrs.cropRight : null
+      const hasCrop = cropTop !== null || cropBottom !== null || cropLeft !== null || cropRight !== null
+
       result.push({
         type: 'image',
         src,
@@ -446,6 +557,16 @@ function parseInlines(
         title: typeof child.attrs?.title === 'string' ? child.attrs.title : null,
         widthPx: typeof child.attrs?.width === 'number' ? child.attrs.width : null,
         heightPx: typeof child.attrs?.height === 'number' ? child.attrs.height : null,
+        ...(hasCrop
+          ? {
+              crop: {
+                ...(cropTop !== null ? { top: cropTop } : {}),
+                ...(cropBottom !== null ? { bottom: cropBottom } : {}),
+                ...(cropLeft !== null ? { left: cropLeft } : {}),
+                ...(cropRight !== null ? { right: cropRight } : {}),
+              },
+            }
+          : {}),
       })
     } else {
       diagnostics.block(
@@ -469,6 +590,14 @@ interface ConversionState {
   nextNumId: number
   definitions: NumberingDefinition[]
   projection: DocxProjectionMode
+  nextFootnoteId: number
+  usedFootnoteIds: Set<number>
+  footnotes: IntermediateNote[]
+  inputFootnotes: Map<string, IntermediateBlock[]>
+  nextEndnoteId: number
+  usedEndnoteIds: Set<number>
+  endnotes: IntermediateNote[]
+  inputEndnotes: Map<string, IntermediateBlock[]>
 }
 
 function convertListNode(
@@ -485,12 +614,18 @@ function convertListNode(
   const format =
     kind === 'bullet'
       ? 'bullet'
-      : typeof listNode.attrs?.type === 'string' && listNode.attrs.type !== ''
-        ? listNode.attrs.type
-        : 'decimal'
+      : normalizeNumberingFormat(listNode.attrs?.type ?? listNode.attrs?.numberingFormat)
 
-  if (level === 0) {
-    tracker.definitions.push({ numId, kind, start, format })
+  let def = tracker.definitions.find((d) => d.numId === numId)
+  if (!def) {
+    def = { numId, kind, start, format, levels: [] }
+    tracker.definitions.push(def)
+  }
+  if (!def.levels) {
+    def.levels = []
+  }
+  if (!def.levels.some((l) => l.level === level)) {
+    def.levels.push({ level, kind, start, format })
   }
 
   const items = listNode.content ?? []
@@ -513,7 +648,7 @@ function convertListNode(
             child,
             firstParagraphInItem ? { kind, level, numId, start, format } : null,
           ),
-          inlines: parseInlines(child.content, `${itemLoc}.p[${j}]`, diagnostics, tracker.projection),
+          inlines: parseInlines(child.content, `${itemLoc}.p[${j}]`, diagnostics, tracker),
         })
         firstParagraphInItem = false
       } else if (child.type === 'bulletList' || child.type === 'orderedList') {
@@ -535,6 +670,83 @@ function convertListNode(
   }
 
   return blocks
+}
+
+function parseBorderInput(raw: unknown): BorderSpec | null {
+  if (!raw || typeof raw !== 'object') return null
+  const obj = raw as Record<string, unknown>
+  const style = typeof obj.style === 'string' && obj.style.trim() !== '' ? obj.style.trim() : 'single'
+  let sizeEighthPt = style === 'none' || style === 'nil' ? 0 : 4
+  if (typeof obj.sizeEighthPt === 'number' && Number.isFinite(obj.sizeEighthPt)) {
+    sizeEighthPt = Math.round(obj.sizeEighthPt)
+  } else if (typeof obj.widthPt === 'number' && Number.isFinite(obj.widthPt)) {
+    sizeEighthPt = ptToEighthPoints(obj.widthPt)
+  } else if (typeof obj.size === 'number' && Number.isFinite(obj.size)) {
+    sizeEighthPt = Math.round(obj.size)
+  }
+  const colorHex = normalizeHexColor(obj.colorHex ?? obj.color)
+  return { style, sizeEighthPt, colorHex }
+}
+
+function parseTableBordersInput(raw: unknown): TableBordersSpec | null {
+  if (!raw || typeof raw !== 'object') return null
+  const obj = raw as Record<string, unknown>
+  const top = parseBorderInput(obj.top)
+  const bottom = parseBorderInput(obj.bottom)
+  const left = parseBorderInput(obj.left)
+  const right = parseBorderInput(obj.right)
+  const insideH = parseBorderInput(obj.insideH ?? obj.insideHorizontal)
+  const insideV = parseBorderInput(obj.insideV ?? obj.insideVertical)
+  if (!top && !bottom && !left && !right && !insideH && !insideV) return null
+  return {
+    ...(top ? { top } : {}),
+    ...(bottom ? { bottom } : {}),
+    ...(left ? { left } : {}),
+    ...(right ? { right } : {}),
+    ...(insideH ? { insideH } : {}),
+    ...(insideV ? { insideV } : {}),
+  }
+}
+
+function parseCellBordersInput(raw: unknown): CellBordersSpec | null {
+  if (!raw || typeof raw !== 'object') return null
+  const obj = raw as Record<string, unknown>
+  const top = parseBorderInput(obj.top)
+  const bottom = parseBorderInput(obj.bottom)
+  const left = parseBorderInput(obj.left)
+  const right = parseBorderInput(obj.right)
+  if (!top && !bottom && !left && !right) return null
+  return {
+    ...(top ? { top } : {}),
+    ...(bottom ? { bottom } : {}),
+    ...(left ? { left } : {}),
+    ...(right ? { right } : {}),
+  }
+}
+
+function parseCellMarginsInput(raw: unknown): CellMarginsDxa | null {
+  if (!raw || typeof raw !== 'object') return null
+  const obj = raw as Record<string, unknown>
+  const readSide = (dxaKey: string, pxKey: string): number | null => {
+    if (typeof obj[dxaKey] === 'number' && Number.isFinite(obj[dxaKey] as number)) {
+      return Math.round(obj[dxaKey] as number)
+    }
+    if (typeof obj[pxKey] === 'number' && Number.isFinite(obj[pxKey] as number)) {
+      return pixelsToTwips(obj[pxKey] as number)
+    }
+    return null
+  }
+  const topDxa = readSide('topDxa', 'top')
+  const rightDxa = readSide('rightDxa', 'right')
+  const bottomDxa = readSide('bottomDxa', 'bottom')
+  const leftDxa = readSide('leftDxa', 'left')
+  if (topDxa === null && rightDxa === null && bottomDxa === null && leftDxa === null) return null
+  return {
+    ...(topDxa !== null ? { topDxa } : {}),
+    ...(rightDxa !== null ? { rightDxa } : {}),
+    ...(bottomDxa !== null ? { bottomDxa } : {}),
+    ...(leftDxa !== null ? { leftDxa } : {}),
+  }
 }
 
 function convertTableNode(
@@ -643,6 +855,9 @@ function convertTableNode(
               ? 'top'
               : null
 
+      const cellBorders = parseCellBordersInput(cellAttrs.borders)
+      const cellMargins = parseCellMarginsInput(cellAttrs.margins ?? cellAttrs.cellMargins)
+
       cells.push({
         colspan,
         rowspan,
@@ -650,6 +865,8 @@ function convertTableNode(
         width: cellWidth,
         backgroundHex: normalizeHexColor(cellAttrs.background),
         verticalAlign,
+        ...(cellBorders ? { borders: cellBorders } : {}),
+        ...(cellMargins ? { margins: cellMargins } : {}),
         blocks: cellBlocks,
       })
 
@@ -699,6 +916,9 @@ function convertTableNode(
     gridColsDxa.push(explicitGrid?.[i] ?? inferredGridCols[i] ?? fallbackColWidth)
   }
 
+  const tableBorders = parseTableBordersInput(attrs.borders)
+  const tableMargins = parseCellMarginsInput(attrs.margins ?? attrs.cellMargins)
+
   return {
     type: 'table',
     id: typeof attrs.blockId === 'string' ? attrs.blockId : null,
@@ -706,6 +926,8 @@ function convertTableNode(
     indentDxa:
       typeof attrs.indent === 'number' && Number.isFinite(attrs.indent) ? pixelsToTwips(attrs.indent) : null,
     gridColsDxa,
+    ...(tableBorders ? { borders: tableBorders } : {}),
+    ...(tableMargins ? { margins: tableMargins } : {}),
     rows,
   }
 }
@@ -726,7 +948,7 @@ function convertBlockNode(
           type: 'paragraph',
           id: blockId,
           attrs: parseParagraphAttrs(node),
-          inlines: parseInlines(node.content, location, diagnostics, tracker.projection),
+          inlines: parseInlines(node.content, location, diagnostics, tracker),
         },
       ]
     case 'heading': {
@@ -738,7 +960,7 @@ function convertBlockNode(
           id: blockId,
           level,
           attrs: parseParagraphAttrs(node),
-          inlines: parseInlines(node.content, location, diagnostics, tracker.projection),
+          inlines: parseInlines(node.content, location, diagnostics, tracker),
         },
       ]
     }
@@ -903,6 +1125,8 @@ function attachSnapshotAnchorsToBlocks(
           attachSnapshotAnchorsToBlocks(cell.blocks, discussions)
         }
       }
+    } else if (block.type === 'blockquote') {
+      attachSnapshotAnchorsToBlocks(block.blocks, discussions)
     }
   }
 }
@@ -1026,6 +1250,8 @@ function collectFormattingRevisions(
             scanBlocks(block.rows[r].cells[c].blocks, `${loc}.row[${r}].cell[${c}]`)
           }
         }
+      } else if (block.type === 'blockquote') {
+        scanBlocks(block.blocks, `${loc}.bq`)
       }
     }
   }
@@ -1154,7 +1380,19 @@ export function toIntermediate(
   const projection = options.projection ?? capabilities.defaultProjection
   const effectiveProjection: DocxProjectionMode = capabilities.revisionsEnabled ? projection : 'original'
   const diagnostics = new LossReportBuilder()
-  const tracker: ConversionState = { nextNumId: 1, definitions: [], projection: effectiveProjection }
+  const tracker: ConversionState = {
+    nextNumId: 1,
+    definitions: [],
+    projection: effectiveProjection,
+    nextFootnoteId: 1,
+    usedFootnoteIds: new Set<number>(),
+    footnotes: [],
+    inputFootnotes: new Map((options.footnotes ?? []).map((note) => [String(note.id), note.blocks as IntermediateBlock[]])),
+    nextEndnoteId: 1,
+    usedEndnoteIds: new Set<number>(),
+    endnotes: [],
+    inputEndnotes: new Map((options.endnotes ?? []).map((note) => [String(note.id), note.blocks as IntermediateBlock[]])),
+  }
 
   const rawContent = document.content ?? []
   const sectionNodes = rawContent.filter((n) => n.type === 'section')
@@ -1321,6 +1559,8 @@ export function toIntermediate(
           for (const r of b.rows) {
             for (const c of r.cells) visitInlines(c.blocks)
           }
+        } else if (b.type === 'blockquote') {
+          visitInlines(b.blocks)
         }
       }
     }
@@ -1355,6 +1595,8 @@ export function toIntermediate(
     },
     numbering: tracker.definitions,
     sections,
+    footnotes: tracker.footnotes,
+    endnotes: tracker.endnotes,
     discussions: capabilities.discussionsEnabled ? discussions : [],
     replacementGroups,
     formattingRevisions,
@@ -1487,7 +1729,11 @@ function marksToTipTap(inline: IntermediateTextInline): TipTapMark[] {
   return marks
 }
 
-function inlinesToTipTap(inlines: readonly IntermediateInline[]): TipTapNode[] {
+function inlinesToTipTap(
+  inlines: readonly IntermediateInline[],
+  footnotesById?: Map<number, IntermediateBlock[]>,
+  endnotesById?: Map<number, IntermediateBlock[]>,
+): TipTapNode[] {
   const nodes: TipTapNode[] = []
   for (const inline of inlines) {
     if (inline.type === 'text') {
@@ -1503,7 +1749,21 @@ function inlinesToTipTap(inlines: readonly IntermediateInline[]): TipTapNode[] {
     } else if (inline.type === 'hardBreak') {
       nodes.push({ type: 'hardBreak' })
     } else if (inline.type === 'bookmark') {
-      nodes.push({ type: 'bookmark', attrs: { id: inline.id } })
+      nodes.push({ type: 'bookmark', attrs: { id: inline.id, ...(inline.name ? { name: inline.name } : {}) } })
+    } else if (inline.type === 'footnoteRef') {
+      const noteBlocks = footnotesById?.get(inline.id) ?? []
+      nodes.push({
+        type: 'footnote',
+        attrs: { id: inline.id },
+        content: blocksToTipTap(noteBlocks, footnotesById, endnotesById),
+      })
+    } else if (inline.type === 'endnoteRef') {
+      const noteBlocks = endnotesById?.get(inline.id) ?? []
+      nodes.push({
+        type: 'endnote',
+        attrs: { id: inline.id },
+        content: blocksToTipTap(noteBlocks, footnotesById, endnotesById),
+      })
     } else if (inline.type === 'image') {
       nodes.push({
         type: 'image',
@@ -1513,6 +1773,7 @@ function inlinesToTipTap(inlines: readonly IntermediateInline[]): TipTapNode[] {
           title: inline.title ?? null,
           width: inline.widthPx ?? null,
           height: inline.heightPx ?? null,
+          ...(inline.crop ? { crop: inline.crop } : {}),
         },
       })
     }
@@ -1533,55 +1794,95 @@ function paragraphAttrsToTipTap(attrs: ParagraphAttrs): Record<string, unknown> 
   if (attrs.keepNext != null) out.keepNext = attrs.keepNext
   if (attrs.keepLines != null) out.keepLines = attrs.keepLines
   if (attrs.blockJoinDeletion) out.blockJoinDeletion = attrs.blockJoinDeletion
+  if (attrs.formattingChange) out.formattingChange = attrs.formattingChange
   return out
 }
 
-function blocksToTipTap(blocks: readonly IntermediateBlock[]): TipTapNode[] {
+function blocksToTipTap(
+  blocks: readonly IntermediateBlock[],
+  footnotesById?: Map<number, IntermediateBlock[]>,
+  endnotesById?: Map<number, IntermediateBlock[]>,
+): TipTapNode[] {
   const result: TipTapNode[] = []
   let i = 0
 
-  while (i < blocks.length) {
-    const block = blocks[i]
-    if ((block.type === 'paragraph' || block.type === 'heading') && block.attrs.list) {
-      const listKind = block.attrs.list.kind
-      const numId = block.attrs.list.numId
-      const start = block.attrs.list.start ?? 1
-      const items: TipTapNode[] = []
+  const consumeListAtLevel = (targetLevel: number): TipTapNode => {
+    const first = blocks[i] as { attrs: ParagraphAttrs }
+    const listKind = first.attrs.list!.kind
+    const numId = first.attrs.list!.numId
+    const start = first.attrs.list!.start ?? 1
+    const format = first.attrs.list!.format
+    const items: TipTapNode[] = []
 
+    while (
+      i < blocks.length &&
+      (blocks[i].type === 'paragraph' || blocks[i].type === 'heading') &&
+      (blocks[i] as { attrs: ParagraphAttrs }).attrs.list?.numId === numId &&
+      (blocks[i] as { attrs: ParagraphAttrs }).attrs.list?.kind === listKind
+    ) {
+      const cur = blocks[i] as { id: string | null; attrs: ParagraphAttrs; inlines: IntermediateInline[] }
+      const curLevel = cur.attrs.list?.level ?? 0
+      if (curLevel < targetLevel) break
+      if (curLevel > targetLevel) {
+        const nested = consumeListAtLevel(curLevel)
+        const lastItem = items[items.length - 1]
+        if (lastItem) {
+          lastItem.content = [...(lastItem.content ?? []), nested]
+        } else {
+          items.push({ type: 'listItem', content: [nested] })
+        }
+        continue
+      }
+
+      i += 1
+      const pAttrs = paragraphAttrsToTipTap(cur.attrs)
+      if (cur.id) pAttrs.blockId = cur.id
+      const itemContent: TipTapNode[] = [
+        {
+          type: 'paragraph',
+          ...(Object.keys(pAttrs).length > 0 ? { attrs: pAttrs } : {}),
+          content: inlinesToTipTap(cur.inlines, footnotesById, endnotesById),
+        },
+      ]
       while (
         i < blocks.length &&
         (blocks[i].type === 'paragraph' || blocks[i].type === 'heading') &&
         (blocks[i] as { attrs: ParagraphAttrs }).attrs.list?.numId === numId &&
-        (blocks[i] as { attrs: ParagraphAttrs }).attrs.list?.kind === listKind
+        (blocks[i] as { attrs: ParagraphAttrs }).attrs.list?.kind === listKind &&
+        ((blocks[i] as { attrs: ParagraphAttrs }).attrs.list?.level ?? 0) > targetLevel
       ) {
-        const listBlock = blocks[i] as { id: string | null; attrs: ParagraphAttrs; inlines: IntermediateInline[] }
-        const pAttrs = paragraphAttrsToTipTap(listBlock.attrs)
-        if (listBlock.id) pAttrs.blockId = listBlock.id
-        items.push({
-          type: 'listItem',
-          content: [
-            {
-              type: 'paragraph',
-              ...(Object.keys(pAttrs).length > 0 ? { attrs: pAttrs } : {}),
-              content: inlinesToTipTap(listBlock.inlines),
-            },
-          ],
-        })
-        i += 1
+        const nextLevel = (blocks[i] as { attrs: ParagraphAttrs }).attrs.list?.level ?? 0
+        itemContent.push(consumeListAtLevel(nextLevel))
       }
-
-      result.push({
-        type: listKind === 'bullet' ? 'bulletList' : 'orderedList',
-        ...(listKind === 'ordered' && start !== 1 ? { attrs: { start } } : {}),
-        content: items,
+      items.push({
+        type: 'listItem',
+        content: itemContent,
       })
+    }
+
+    const listAttrs: Record<string, unknown> = {}
+    if (listKind === 'ordered') {
+      if (start !== 1) listAttrs.start = start
+      if (format && format !== 'decimal') listAttrs.type = format
+    }
+    return {
+      type: listKind === 'bullet' ? 'bulletList' : 'orderedList',
+      ...(Object.keys(listAttrs).length > 0 ? { attrs: listAttrs } : {}),
+      content: items,
+    }
+  }
+
+  while (i < blocks.length) {
+    const block = blocks[i]
+    if ((block.type === 'paragraph' || block.type === 'heading') && block.attrs.list) {
+      result.push(consumeListAtLevel(block.attrs.list.level ?? 0))
       continue
     }
 
     if (block.type === 'paragraph') {
       const attrs = paragraphAttrsToTipTap(block.attrs)
       if (block.id) attrs.blockId = block.id
-      const content = inlinesToTipTap(block.inlines)
+      const content = inlinesToTipTap(block.inlines, footnotesById, endnotesById)
       result.push({
         type: 'paragraph',
         ...(Object.keys(attrs).length > 0 ? { attrs } : {}),
@@ -1596,7 +1897,7 @@ function blocksToTipTap(blocks: readonly IntermediateBlock[]): TipTapNode[] {
       result.push({
         type: 'heading',
         attrs,
-        content: inlinesToTipTap(block.inlines),
+        content: inlinesToTipTap(block.inlines, footnotesById, endnotesById),
       })
     } else if (block.type === 'table') {
       result.push({
@@ -1605,6 +1906,8 @@ function blocksToTipTap(blocks: readonly IntermediateBlock[]): TipTapNode[] {
           ...(block.id ? { blockId: block.id } : {}),
           ...(block.width?.unit === 'dxa' ? { width: twipsToPixels(block.width.value) } : {}),
           gridColsDxa: block.gridColsDxa,
+          ...(block.borders ? { borders: block.borders } : {}),
+          ...(block.margins ? { margins: block.margins } : {}),
         },
         content: block.rows.map((row) => ({
           type: 'tableRow',
@@ -1620,8 +1923,10 @@ function blocksToTipTap(blocks: readonly IntermediateBlock[]): TipTapNode[] {
               ...(cell.colwidthDxa ? { colwidth: cell.colwidthDxa.map((d) => twipsToPixels(d)) } : {}),
               ...(cell.backgroundHex ? { background: `#${cell.backgroundHex.toLowerCase()}` } : {}),
               ...(cell.verticalAlign ? { verticalAlign: cell.verticalAlign === 'center' ? 'middle' : cell.verticalAlign } : {}),
+              ...(cell.borders ? { borders: cell.borders } : {}),
+              ...(cell.margins ? { margins: cell.margins } : {}),
             },
-            content: blocksToTipTap(cell.blocks),
+            content: blocksToTipTap(cell.blocks, footnotesById, endnotesById),
           })),
         })),
       })
@@ -1629,7 +1934,7 @@ function blocksToTipTap(blocks: readonly IntermediateBlock[]): TipTapNode[] {
       result.push({
         type: 'blockquote',
         ...(block.id ? { attrs: { blockId: block.id } } : {}),
-        content: blocksToTipTap(block.blocks),
+        content: blocksToTipTap(block.blocks, footnotesById, endnotesById),
       })
     } else if (block.type === 'codeBlock') {
       result.push({
@@ -1658,6 +1963,12 @@ export function fromIntermediate(
 ): FromIntermediateResult {
   const preserveSections = options.preserveSectionNodes ?? false
   const content: TipTapNode[] = []
+  const footnotesById = new Map<number, IntermediateBlock[]>(
+    (model.footnotes ?? []).map((note) => [note.id, note.blocks]),
+  )
+  const endnotesById = new Map<number, IntermediateBlock[]>(
+    (model.endnotes ?? []).map((note) => [note.id, note.blocks]),
+  )
 
   if (preserveSections && model.sections.length > 0) {
     for (const sec of model.sections) {
@@ -1668,12 +1979,12 @@ export function fromIntermediate(
           type: sec.type,
           titlePg: sec.titlePg,
         },
-        content: blocksToTipTap(sec.blocks),
+        content: blocksToTipTap(sec.blocks, footnotesById, endnotesById),
       })
     }
   } else {
     for (let s = 0; s < model.sections.length; s += 1) {
-      content.push(...blocksToTipTap(model.sections[s].blocks))
+      content.push(...blocksToTipTap(model.sections[s].blocks, footnotesById, endnotesById))
       if (s < model.sections.length - 1) {
         content.push({
           type: 'sectionBreak',
@@ -1738,6 +2049,11 @@ function cloneMarksForBaseline(inline: IntermediateTextInline): IntermediateMark
     for (const change of parseFormattingSummary(inline.formattingChange)) {
       if (change.operation === 'added') {
         marks = marks.filter((m) => m.type !== change.markName)
+      } else if (change.operation === 'removed') {
+        const exists = marks.some((m) => m.type === change.markName)
+        if (!exists) {
+          marks.push({ type: change.markName } as IntermediateMark)
+        }
       }
     }
   }
@@ -1761,7 +2077,7 @@ function baselineInlinesFromBlock(inlines: readonly IntermediateInline[]): Inter
         continue
       }
       out.push({ type: 'hardBreak' })
-    } else if (inline.type === 'image') {
+    } else if (inline.type === 'image' || inline.type === 'bookmark' || inline.type === 'footnoteRef' || inline.type === 'endnoteRef') {
       out.push(inline)
     }
   }

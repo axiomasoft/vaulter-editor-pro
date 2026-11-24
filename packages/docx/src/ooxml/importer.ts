@@ -1,6 +1,9 @@
 import {
   DOCX_MODEL_SCHEMA,
   VAULTER_DOCX_CUSTOM_XML_NS,
+  type BorderSpec,
+  type CellBordersSpec,
+  type CellMarginsDxa,
   type DocxProfileId,
   type FormattingRevisionRecord,
   type HeaderFooterContent,
@@ -11,6 +14,7 @@ import {
   type IntermediateDocument,
   type IntermediateInline,
   type IntermediateMark,
+  type IntermediateNote,
   type IntermediateSection,
   type IntermediateTableCell,
   type IntermediateTableRow,
@@ -18,14 +22,31 @@ import {
   type ParagraphAttrs,
   type ReplacementGroupMetadata,
   type SourceMarker,
+  type TableBordersSpec,
   type UnderlineType,
 } from '../model/types'
 import { getProfileCapabilities, type ProfileFeatureOptions } from '../model/profiles'
 import { LossReportBuilder } from '../model/lossReport'
-import { DocxSecurityError, type ZipQuotas, type ZipReader } from '../zip/guard'
+import {
+  DocxSecurityError,
+  encodeBase64Bytes,
+  validateArchiveMediaEntries,
+  validateMediaAsset,
+  type ValidatedMediaAsset,
+  type ZipQuotas,
+  type ZipReader,
+} from '../zip/guard'
 import { isValidOoxmlHexId } from './ids'
 import { extractParagraphProps, extractRunProps, StyleRegistry, type ParagraphStyleProperties } from './styles'
-import { isSafeHyperlinkUrl, normalizeHexColor, parseOoxmlWidth } from './units'
+import {
+  emuToPixels,
+  isSafeHyperlinkUrl,
+  normalizeHexColor,
+  ooxmlCropToPercent,
+  parseInternalAnchorHref,
+  parseOoxmlWidth,
+  pointsToTwips,
+} from './units'
 import {
   decodeUtf8,
   findAllDescendants,
@@ -209,8 +230,16 @@ function parseNumbering(xmlNode: XmlElementNode | null): Map<number, ParsedNumbe
     }
     const { kind = 'ordered', start = 1, format = 'decimal' } =
       levels.get(0) ?? levels.values().next().value ?? {}
+    const levelDefs = Array.from(levels.entries())
+      .sort((a, b) => a[0] - b[0])
+      .map(([level, lvl]) => ({
+        level,
+        kind: lvl.kind,
+        start: lvl.start,
+        format: lvl.format,
+      }))
     numMap.set(numId, {
-      definition: { numId, kind, start, format },
+      definition: { numId, kind, start, format, levels: levelDefs },
       levels,
     })
   }
@@ -532,6 +561,9 @@ interface ParseContext {
   styles: StyleRegistry
   numbering: Map<number, ParsedNumbering>
   rels: ReadonlyMap<string, ParsedRelationship>
+  entries: Record<string, Uint8Array>
+  validatedMedia: Map<string, ValidatedMediaAsset>
+  quotas?: ZipQuotas
   diagnostics: LossReportBuilder
   formattingRevisions: FormattingRevisionRecord[]
   activeCommentWIds: Set<number>
@@ -542,10 +574,221 @@ interface ParseContext {
   requireFormattingRevisions: boolean
 }
 
+function resolveImageAssetFromRelId(
+  rId: string,
+  ctx: ParseContext,
+  location: string,
+): ValidatedMediaAsset | null {
+  if (!rId) {
+    return null
+  }
+  const rel = ctx.rels.get(rId)
+  if (!rel) {
+    ctx.diagnostics.warn(
+      'IMAGE_RELATIONSHIP_MISSING',
+      'image',
+      location,
+      'degraded',
+      `Image relationship "${rId}" was not found.`,
+    )
+    return null
+  }
+  if (rel.external || !rel.resolvedPath) {
+    throw new DocxSecurityError(
+      'external_rel_forbidden',
+      `External image relationship "${rId}" is forbidden.`,
+    )
+  }
+  const existing = ctx.validatedMedia.get(rel.resolvedPath)
+  if (existing) {
+    return existing
+  }
+  const rawBytes = ctx.entries[rel.resolvedPath]
+  if (!rawBytes) {
+    ctx.diagnostics.warn(
+      'IMAGE_ASSET_MISSING',
+      'image',
+      location,
+      'degraded',
+      `Image asset "${rel.resolvedPath}" is missing from archive.`,
+    )
+    return null
+  }
+  const asset = validateMediaAsset(rawBytes, {
+    fileName: rel.resolvedPath,
+    quotas: ctx.quotas,
+  })
+  ctx.validatedMedia.set(rel.resolvedPath, asset)
+  return asset
+}
+
+function parseCssLengthPx(raw: string | undefined): number | null {
+  if (!raw) return null
+  const m = /^([\d.]+)\s*(pt|px|in)?$/i.exec(raw.trim())
+  if (!m) return null
+  const val = Number.parseFloat(m[1])
+  if (!Number.isFinite(val) || val <= 0) return null
+  const unit = (m[2] ?? 'px').toLowerCase()
+  if (unit === 'pt') return Math.round(pointsToTwips(val) / 15)
+  if (unit === 'in') return Math.round(val * 96)
+  return Math.round(val)
+}
+
+function parseDrawingElement(
+  drawingNode: XmlElementNode,
+  ctx: ParseContext,
+  location: string,
+): IntermediateInline | null {
+  const container =
+    findChild(drawingNode, 'inline') ??
+    findChild(drawingNode, 'anchor') ??
+    drawingNode
+  const extent = findChild(container, 'extent')
+  const cxRaw = extent ? Number.parseInt(getAttr(extent, 'cx') ?? '', 10) : Number.NaN
+  const cyRaw = extent ? Number.parseInt(getAttr(extent, 'cy') ?? '', 10) : Number.NaN
+  const widthPx = Number.isFinite(cxRaw) && cxRaw > 0 ? emuToPixels(cxRaw) : null
+  const heightPx = Number.isFinite(cyRaw) && cyRaw > 0 ? emuToPixels(cyRaw) : null
+
+  const docPr = findChild(container, 'docPr')
+  const descr = docPr ? getAttr(docPr, 'descr') : undefined
+  const name = docPr ? getAttr(docPr, 'name') : undefined
+  const title = docPr ? getAttr(docPr, 'title') ?? null : null
+  const alt = descr && descr !== '' ? descr : name && name !== '' ? name : null
+
+  const svgBlip = findAllDescendants(container, 'svgBlip')[0]
+  const blip = svgBlip ?? findAllDescendants(container, 'blip')[0]
+  if (!blip) {
+    return null
+  }
+  const linkRelId = getAttr(blip, 'r:link', 'link')
+  if (linkRelId) {
+    resolveImageAssetFromRelId(linkRelId, ctx, location)
+  }
+  const embedRelId = getAttr(blip, 'r:embed', 'embed') ?? ''
+  const asset = resolveImageAssetFromRelId(embedRelId, ctx, location)
+  if (!asset) {
+    return null
+  }
+
+  const srcRect = findAllDescendants(container, 'srcRect')[0]
+  let crop: { top?: number | null; bottom?: number | null; left?: number | null; right?: number | null } | null = null
+  if (srcRect) {
+    const left = ooxmlCropToPercent(getAttr(srcRect, 'l'))
+    const top = ooxmlCropToPercent(getAttr(srcRect, 't'))
+    const right = ooxmlCropToPercent(getAttr(srcRect, 'r'))
+    const bottom = ooxmlCropToPercent(getAttr(srcRect, 'b'))
+    if (left !== null || top !== null || right !== null || bottom !== null) {
+      crop = {
+        ...(left !== null ? { left } : {}),
+        ...(top !== null ? { top } : {}),
+        ...(right !== null ? { right } : {}),
+        ...(bottom !== null ? { bottom } : {}),
+      }
+    }
+  }
+
+  return {
+    type: 'image',
+    src: `data:${asset.mimeType};base64,${encodeBase64Bytes(asset.bytes)}`,
+    alt,
+    title,
+    widthPx: widthPx ?? asset.widthPx ?? null,
+    heightPx: heightPx ?? asset.heightPx ?? null,
+    ...(crop ? { crop } : {}),
+  }
+}
+
+function parsePictElement(
+  pictNode: XmlElementNode,
+  ctx: ParseContext,
+  location: string,
+): IntermediateInline | null {
+  const imageData = findAllDescendants(pictNode, 'imagedata')[0]
+  if (!imageData) return null
+  const rId = getAttr(imageData, 'r:id', 'id', 'o:relid', 'relid') ?? ''
+  const asset = resolveImageAssetFromRelId(rId, ctx, location)
+  if (!asset) return null
+
+  const shape = findChild(pictNode, 'shape')
+  const style = shape ? getAttr(shape, 'style') ?? '' : ''
+  const wMatch = /width\s*:\s*([^;]+)/i.exec(style)
+  const hMatch = /height\s*:\s*([^;]+)/i.exec(style)
+  const widthPx = parseCssLengthPx(wMatch?.[1]) ?? asset.widthPx ?? null
+  const heightPx = parseCssLengthPx(hMatch?.[1]) ?? asset.heightPx ?? null
+  const alt = (shape ? getAttr(shape, 'alt') : undefined) ?? getAttr(imageData, 'o:title', 'title') ?? null
+
+  return {
+    type: 'image',
+    src: `data:${asset.mimeType};base64,${encodeBase64Bytes(asset.bytes)}`,
+    alt,
+    title: null,
+    widthPx,
+    heightPx,
+  }
+}
+
+function diffRunFormattingChanges(
+  prev: ReturnType<StyleRegistry['resolveRun']>,
+  curr: ReturnType<StyleRegistry['resolveRun']>,
+): Array<{ operation: 'added' | 'removed'; markName: string; markAttrs?: Record<string, unknown> }> {
+  const changes: Array<{ operation: 'added' | 'removed'; markName: string; markAttrs?: Record<string, unknown> }> = []
+  const checkBool = (prevVal: boolean | null, currVal: boolean | null, markName: string) => {
+    if (Boolean(currVal) && !prevVal) changes.push({ operation: 'added', markName, markAttrs: {} })
+    else if (!currVal && Boolean(prevVal)) changes.push({ operation: 'removed', markName, markAttrs: {} })
+  }
+  checkBool(prev.bold, curr.bold, 'bold')
+  checkBool(prev.italic, curr.italic, 'italic')
+  checkBool(prev.strike, curr.strike, 'strike')
+  checkBool(prev.superscript, curr.superscript, 'superscript')
+  checkBool(prev.subscript, curr.subscript, 'subscript')
+
+  const prevUnd = prev.underline && prev.underline !== 'none' ? prev.underline : null
+  const currUnd = curr.underline && curr.underline !== 'none' ? curr.underline : null
+  if (currUnd && !prevUnd) changes.push({ operation: 'added', markName: 'underline', markAttrs: { underlineType: currUnd } })
+  else if (!currUnd && prevUnd) changes.push({ operation: 'removed', markName: 'underline', markAttrs: { underlineType: prevUnd } })
+
+  if (curr.highlightHex && curr.highlightHex !== prev.highlightHex) {
+    changes.push({ operation: 'added', markName: 'highlight', markAttrs: { color: `#${curr.highlightHex}` } })
+  } else if (!curr.highlightHex && prev.highlightHex) {
+    changes.push({ operation: 'removed', markName: 'highlight', markAttrs: { color: `#${prev.highlightHex}` } })
+  }
+
+  if (
+    curr.fontFamily !== prev.fontFamily ||
+    curr.fontSizeHalfPt !== prev.fontSizeHalfPt ||
+    curr.colorHex !== prev.colorHex
+  ) {
+    if (prev.fontFamily || prev.fontSizeHalfPt || prev.colorHex) {
+      changes.push({
+        operation: 'removed',
+        markName: 'textStyle',
+        markAttrs: {
+          ...(prev.fontFamily ? { fontFamily: prev.fontFamily } : {}),
+          ...(prev.fontSizeHalfPt ? { fontSize: `${prev.fontSizeHalfPt / 2}pt` } : {}),
+          ...(prev.colorHex ? { color: `#${prev.colorHex}` } : {}),
+        },
+      })
+    }
+    if (curr.fontFamily || curr.fontSizeHalfPt || curr.colorHex) {
+      changes.push({
+        operation: 'added',
+        markName: 'textStyle',
+        markAttrs: {
+          ...(curr.fontFamily ? { fontFamily: curr.fontFamily } : {}),
+          ...(curr.fontSizeHalfPt ? { fontSize: `${curr.fontSizeHalfPt / 2}pt` } : {}),
+          ...(curr.colorHex ? { color: `#${curr.colorHex}` } : {}),
+        },
+      })
+    }
+  }
+  return changes
+}
+
 function parseRunElement(
   rNode: XmlElementNode,
   paragraphStyle: ReturnType<StyleRegistry['resolveParagraph']>,
   linkHref: string | null,
+  linkAnchor: string | null,
   revision: InlineRevisionMeta | null,
   ctx: ParseContext,
   location: string,
@@ -562,12 +805,20 @@ function parseRunElement(
     const fcId = getAttr(rPrChange, 'w:id', 'id') ?? `rpr_${location}`
     const fcAuthor = getAttr(rPrChange, 'w:author', 'author') ?? 'Unknown'
     const fcDate = getAttr(rPrChange, 'w:date', 'date') ?? '1970-01-01T00:00:00Z'
-    const prevProps = extractRunProps(findChild(rPrChange, 'rPr'))
-    const summaryParts: string[] = []
-    if (resolved.bold && !prevProps.bold) summaryParts.push('added:bold')
-    if (resolved.italic && !prevProps.italic) summaryParts.push('added:italic')
-    if (summaryParts.length === 0) summaryParts.push('run formatting change')
-    const summary = summaryParts.join(', ')
+    const prevRPrNode = findChild(rPrChange, 'rPr')
+    const prevRStyleEl = prevRPrNode ? findChild(prevRPrNode, 'rStyle') : undefined
+    const prevRStyleId = prevRStyleEl ? getAttr(prevRStyleEl, 'w:val', 'val') ?? null : null
+    const prevProps = extractRunProps(prevRPrNode)
+    const prevResolved = ctx.styles.resolveRun({
+      paragraphStyle,
+      rStyleId: prevRStyleId ?? rStyleId,
+      inlineRPr: prevProps,
+    })
+    const markChanges = diffRunFormattingChanges(prevResolved, resolved)
+    const summary =
+      markChanges.length > 0
+        ? markChanges.map((m) => `${m.operation}:${m.markName}`).join(', ')
+        : 'run formatting change'
 
     ctx.formattingRevisions.push({
       id: fcId,
@@ -602,6 +853,7 @@ function parseRunElement(
       date: fcDate,
       summary,
       ooxmlId: Number.parseInt(fcId, 10) || undefined,
+      ...(markChanges.length > 0 ? { markChanges } : {}),
     }
   }
 
@@ -624,7 +876,7 @@ function parseRunElement(
     })
   }
   if (linkHref) {
-    marks.push({ type: 'link', href: linkHref })
+    marks.push({ type: 'link', href: linkHref, ...(linkAnchor ? { anchor: linkAnchor } : {}) })
   }
 
   const out: IntermediateInline[] = []
@@ -649,6 +901,35 @@ function parseRunElement(
           ...(revision ? { revision } : {}),
         })
       }
+    } else if (child.localName === 'drawing') {
+      const img = parseDrawingElement(child, ctx, location)
+      if (img) out.push(img)
+    } else if (child.localName === 'pict') {
+      const img = parsePictElement(child, ctx, location)
+      if (img) out.push(img)
+    } else if (child.localName === 'footnoteReference') {
+      const id = Number.parseInt(getAttr(child, 'w:id', 'id') ?? '', 10)
+      if (Number.isFinite(id) && id > 0) {
+        out.push({
+          type: 'footnoteRef',
+          id,
+          ...(commentIds.length > 0 ? { commentIds } : {}),
+          ...(revision ? { revision } : {}),
+        })
+      }
+    } else if (child.localName === 'endnoteReference') {
+      const id = Number.parseInt(getAttr(child, 'w:id', 'id') ?? '', 10)
+      if (Number.isFinite(id) && id > 0) {
+        out.push({
+          type: 'endnoteRef',
+          id,
+          ...(commentIds.length > 0 ? { commentIds } : {}),
+          ...(revision ? { revision } : {}),
+        })
+      }
+    } else if (child.localName === 'footnoteRef' || child.localName === 'endnoteRef') {
+      // Automatic marker inside footnotes.xml / endnotes.xml
+      continue
     } else if (child.localName === 'oleObject' || child.localName === 'object') {
       ctx.diagnostics.block(
         'UNSUPPORTED_MANDATORY_ELEMENT',
@@ -702,7 +983,14 @@ function parseParagraph(
       }
     }
   }
-  const resolvedP = ctx.styles.resolveParagraph({ tblStyleId, pStyleId, numPrProps, inlinePPr })
+  const isQuote = ctx.styles.isQuoteStyle(pStyleId)
+  const resolvedP = ctx.styles.resolveParagraph({
+    tblStyleId,
+    pStyleId,
+    numPrProps,
+    inlinePPr,
+    ...(isQuote && pStyleId ? { ignoreStyleIds: new Set([pStyleId]) } : {}),
+  })
 
   // block_join deletion in <w:pPr><w:rPr><w:del .../></w:rPr></w:pPr>
   let blockJoinDeletion: ParagraphAttrs['blockJoinDeletion'] = null
@@ -725,13 +1013,52 @@ function parseParagraph(
     const fcId = getAttr(pPrChange, 'w:id', 'id') ?? `ppr_${location}`
     const fcAuthor = getAttr(pPrChange, 'w:author', 'author') ?? 'Unknown'
     const fcDate = getAttr(pPrChange, 'w:date', 'date') ?? '1970-01-01T00:00:00Z'
+    const prevPPrNode = findChild(pPrChange, 'pPr')
+    const prevStyleEl = prevPPrNode ? findChild(prevPPrNode, 'pStyle') : undefined
+    const prevPStyleId = prevStyleEl ? getAttr(prevStyleEl, 'w:val', 'val') ?? null : null
+    const prevInlinePPr = extractParagraphProps(prevPPrNode)
+    const prevResolvedP = ctx.styles.resolveParagraph({
+      tblStyleId,
+      pStyleId: prevPStyleId ?? pStyleId,
+      numPrProps,
+      inlinePPr: prevInlinePPr,
+    })
+
+    const propKeys: Array<keyof ParagraphAttrs> = [
+      'textAlign',
+      'indentLeftDxa',
+      'indentFirstLineDxa',
+      'indentRightDxa',
+      'spacingBeforeDxa',
+      'spacingAfterDxa',
+      'lineSpacing',
+      'lineRule',
+      'contextualSpacing',
+      'keepNext',
+      'keepLines',
+    ]
+    const propertyChanges: Array<{ property: string; previousValue: unknown; currentValue: unknown }> = []
+    const previousParagraphProps: Partial<ParagraphAttrs> = {}
+    for (const key of propKeys) {
+      const prevVal = prevResolvedP[key as keyof typeof prevResolvedP] ?? null
+      const currVal = resolvedP[key as keyof typeof resolvedP] ?? null
+      if (prevVal !== currVal) {
+        propertyChanges.push({ property: key, previousValue: prevVal, currentValue: currVal })
+        ;(previousParagraphProps as Record<string, unknown>)[key] = prevVal
+      }
+    }
+    const summary =
+      propertyChanges.length > 0
+        ? `changed:${propertyChanges.map((p) => p.property).join(', ')}`
+        : 'paragraph formatting change'
+
     ctx.formattingRevisions.push({
       id: fcId,
       targetType: 'paragraph',
       location,
       author: fcAuthor,
       date: fcDate,
-      summary: 'paragraph formatting change',
+      summary,
     })
     if (ctx.requireFormattingRevisions) {
       ctx.diagnostics.block(
@@ -754,8 +1081,9 @@ function parseParagraph(
       targetType: 'paragraph',
       author: fcAuthor,
       date: fcDate,
-      summary: 'paragraph formatting change',
+      summary,
       ooxmlId: Number.parseInt(fcId, 10) || undefined,
+      ...(propertyChanges.length > 0 ? { propertyChanges, previousParagraphProps } : {}),
     }
   }
 
@@ -782,15 +1110,33 @@ function parseParagraph(
       if (Number.isFinite(wId)) {
         ctx.activeCommentWIds.delete(wId)
       }
+    } else if (child.localName === 'bookmarkStart') {
+      const bmName = getAttr(child, 'w:name', 'name')
+      if (bmName && bmName !== '_GoBack') {
+        inlines.push({ type: 'bookmark', id: bmName, name: bmName })
+      }
+    } else if (child.localName === 'bookmarkEnd') {
+      // Paired end marker; anchor is recorded at bookmarkStart.
     } else if (child.localName === 'r') {
-      inlines.push(...parseRunElement(child, resolvedP, null, null, ctx, childLoc))
+      inlines.push(...parseRunElement(child, resolvedP, null, null, null, ctx, childLoc))
     } else if (child.localName === 'hyperlink') {
       const rId = getAttr(child, 'r:id', 'id') ?? ''
-      const rel = ctx.rels.get(rId)
-      const href = rel?.external ? rel.target : null
+      const wAnchor = getAttr(child, 'w:anchor', 'anchor') ?? ''
+      const rel = rId ? ctx.rels.get(rId) : undefined
+      let href: string | null = null
+      let anchor: string | null = null
+      if (rel?.external) {
+        href = wAnchor && !rel.target.includes('#') ? `${rel.target}#${wAnchor}` : rel.target
+      } else if (wAnchor) {
+        const safeAnchor = parseInternalAnchorHref(`#${wAnchor}`)
+        if (safeAnchor) {
+          href = `#${safeAnchor}`
+          anchor = safeAnchor
+        }
+      }
       for (const hChild of child.children) {
         if (hChild.localName === 'r') {
-          inlines.push(...parseRunElement(hChild, resolvedP, href, null, ctx, childLoc))
+          inlines.push(...parseRunElement(hChild, resolvedP, href, anchor, null, ctx, childLoc))
         }
       }
     } else if (child.localName === 'ins' || child.localName === 'del') {
@@ -832,12 +1178,23 @@ function parseParagraph(
       for (const revChild of child.children) {
         if (revChild.localName === 'r') {
           inlines.push(
-            ...parseRunElement(revChild, resolvedP, null, ctx.revisionsEnabled ? rev : null, ctx, childLoc),
+            ...parseRunElement(revChild, resolvedP, null, null, ctx.revisionsEnabled ? rev : null, ctx, childLoc),
           )
         } else if (revChild.localName === 'hyperlink') {
           const rId = getAttr(revChild, 'r:id', 'id') ?? ''
-          const rel = ctx.rels.get(rId)
-          const href = rel?.external ? rel.target : null
+          const wAnchor = getAttr(revChild, 'w:anchor', 'anchor') ?? ''
+          const rel = rId ? ctx.rels.get(rId) : undefined
+          let href: string | null = null
+          let anchor: string | null = null
+          if (rel?.external) {
+            href = wAnchor && !rel.target.includes('#') ? `${rel.target}#${wAnchor}` : rel.target
+          } else if (wAnchor) {
+            const safeAnchor = parseInternalAnchorHref(`#${wAnchor}`)
+            if (safeAnchor) {
+              href = `#${safeAnchor}`
+              anchor = safeAnchor
+            }
+          }
           for (const hChild of revChild.children) {
             if (hChild.localName === 'r') {
               inlines.push(
@@ -845,6 +1202,7 @@ function parseParagraph(
                   hChild,
                   resolvedP,
                   href,
+                  anchor,
                   ctx.revisionsEnabled ? rev : null,
                   ctx,
                   childLoc,
@@ -915,6 +1273,124 @@ function parseParagraph(
   return { blocks, sectionEl }
 }
 
+function parseBorderEl(el: XmlElementNode | undefined): BorderSpec | null {
+  if (!el) return null
+  const style = getAttr(el, 'w:val', 'val') ?? 'single'
+  const szRaw = Number.parseInt(getAttr(el, 'w:sz', 'sz') ?? '', 10)
+  const sizeEighthPt =
+    style === 'none' || style === 'nil'
+      ? (Number.isFinite(szRaw) ? szRaw : 0)
+      : (Number.isFinite(szRaw) && szRaw >= 0 ? szRaw : 4)
+  const colorHex = normalizeHexColor(getAttr(el, 'w:color', 'color'))
+  return { style, sizeEighthPt, colorHex }
+}
+
+function parseTableBorders(tblPr: XmlElementNode | undefined): TableBordersSpec | null {
+  const tblBorders = tblPr ? findChild(tblPr, 'tblBorders') : undefined
+  if (!tblBorders) return null
+  const top = parseBorderEl(findChild(tblBorders, 'top'))
+  const bottom = parseBorderEl(findChild(tblBorders, 'bottom'))
+  const left = parseBorderEl(findChild(tblBorders, 'left') ?? findChild(tblBorders, 'start'))
+  const right = parseBorderEl(findChild(tblBorders, 'right') ?? findChild(tblBorders, 'end'))
+  const insideH = parseBorderEl(findChild(tblBorders, 'insideH'))
+  const insideV = parseBorderEl(findChild(tblBorders, 'insideV'))
+  if (!top && !bottom && !left && !right && !insideH && !insideV) return null
+  return {
+    ...(top ? { top } : {}),
+    ...(bottom ? { bottom } : {}),
+    ...(left ? { left } : {}),
+    ...(right ? { right } : {}),
+    ...(insideH ? { insideH } : {}),
+    ...(insideV ? { insideV } : {}),
+  }
+}
+
+function parseCellBorders(tcPr: XmlElementNode | undefined): CellBordersSpec | null {
+  const tcBorders = tcPr ? findChild(tcPr, 'tcBorders') : undefined
+  if (!tcBorders) return null
+  const top = parseBorderEl(findChild(tcBorders, 'top'))
+  const bottom = parseBorderEl(findChild(tcBorders, 'bottom'))
+  const left = parseBorderEl(findChild(tcBorders, 'left') ?? findChild(tcBorders, 'start'))
+  const right = parseBorderEl(findChild(tcBorders, 'right') ?? findChild(tcBorders, 'end'))
+  if (!top && !bottom && !left && !right) return null
+  return {
+    ...(top ? { top } : {}),
+    ...(bottom ? { bottom } : {}),
+    ...(left ? { left } : {}),
+    ...(right ? { right } : {}),
+  }
+}
+
+function parseCellMargins(container: XmlElementNode | undefined, tagName: 'tblCellMar' | 'tcMar'): CellMarginsDxa | null {
+  const marEl = container ? findChild(container, tagName) : undefined
+  if (!marEl) return null
+  const readSide = (el: XmlElementNode | undefined): number | null => {
+    if (!el) return null
+    const val = Number.parseInt(getAttr(el, 'w:w', 'w') ?? '', 10)
+    return Number.isFinite(val) ? val : null
+  }
+  const topDxa = readSide(findChild(marEl, 'top'))
+  const rightDxa = readSide(findChild(marEl, 'right') ?? findChild(marEl, 'end'))
+  const bottomDxa = readSide(findChild(marEl, 'bottom'))
+  const leftDxa = readSide(findChild(marEl, 'left') ?? findChild(marEl, 'start'))
+  if (topDxa === null && rightDxa === null && bottomDxa === null && leftDxa === null) return null
+  return {
+    ...(topDxa !== null ? { topDxa } : {}),
+    ...(rightDxa !== null ? { rightDxa } : {}),
+    ...(bottomDxa !== null ? { bottomDxa } : {}),
+    ...(leftDxa !== null ? { leftDxa } : {}),
+  }
+}
+
+function groupStructuralBlocks(
+  rawBlocks: readonly IntermediateBlock[],
+  styles: StyleRegistry,
+): IntermediateBlock[] {
+  const out: IntermediateBlock[] = []
+  for (const block of rawBlocks) {
+    if (block.type === 'paragraph') {
+      const codeInfo = styles.codeBlockInfoForStyle(block.attrs.styleId)
+      if (codeInfo.isCodeBlock) {
+        const lineText = block.inlines
+          .map((inl) => (inl.type === 'text' ? inl.text : inl.type === 'hardBreak' ? '\n' : ''))
+          .join('')
+        const prev = out[out.length - 1]
+        if (prev && prev.type === 'codeBlock' && (prev.language ?? null) === (codeInfo.language ?? null)) {
+          prev.text = `${prev.text}\n${lineText}`
+        } else {
+          out.push({
+            type: 'codeBlock',
+            id: block.id,
+            language: codeInfo.language,
+            text: lineText,
+          })
+        }
+        continue
+      }
+
+      if (styles.isQuoteStyle(block.attrs.styleId)) {
+        const normalizedInner: IntermediateBlock = {
+          ...block,
+          attrs: { ...block.attrs, styleId: null },
+        }
+        const prev = out[out.length - 1]
+        if (prev && prev.type === 'blockquote') {
+          prev.blocks.push(normalizedInner)
+        } else {
+          out.push({
+            type: 'blockquote',
+            id: null,
+            blocks: [normalizedInner],
+          })
+        }
+        continue
+      }
+    }
+    out.push(block)
+  }
+  return out
+}
+
 function parseTable(
   tblNode: XmlElementNode,
   ctx: ParseContext,
@@ -930,6 +1406,8 @@ function parseTable(
   const tblIndEl = tblPr ? findChild(tblPr, 'tblInd') : undefined
   const indentRaw = tblIndEl ? Number.parseInt(getAttr(tblIndEl, 'w:w', 'w') ?? '', 10) : Number.NaN
   const indentDxa = Number.isFinite(indentRaw) ? indentRaw : null
+  const tableBorders = parseTableBorders(tblPr)
+  const tableMargins = parseCellMargins(tblPr, 'tblCellMar')
 
   const tblGrid = findChild(tblNode, 'tblGrid')
   const gridColsDxa = tblGrid
@@ -1032,6 +1510,9 @@ function parseTable(
             ? [tcWidth.value]
             : null
 
+      const cellBorders = parseCellBorders(tcPr)
+      const cellMargins = parseCellMargins(tcPr, 'tcMar')
+
       const cellModel: IntermediateTableCell = {
         colspan,
         rowspan: 1,
@@ -1039,7 +1520,9 @@ function parseTable(
         width: tcWidth,
         backgroundHex,
         verticalAlign,
-        blocks: cellBlocks,
+        ...(cellBorders ? { borders: cellBorders } : {}),
+        ...(cellMargins ? { margins: cellMargins } : {}),
+        blocks: groupStructuralBlocks(cellBlocks, ctx.styles),
       }
 
       if (vMergeVal === 'restart') {
@@ -1070,6 +1553,8 @@ function parseTable(
     width,
     indentDxa,
     gridColsDxa,
+    ...(tableBorders ? { borders: tableBorders } : {}),
+    ...(tableMargins ? { margins: tableMargins } : {}),
     rows,
   }
 }
@@ -1104,7 +1589,56 @@ function parseHeaderFooterPart(
       blocks.push(parseTable(child, localCtx, loc))
     }
   }
-  return { blocks }
+  return { blocks: groupStructuralBlocks(blocks, baseCtx.styles) }
+}
+
+function parseNotesPart(
+  entries: Record<string, Uint8Array>,
+  partPath: string,
+  noteTag: 'footnote' | 'endnote',
+  baseCtx: ParseContext,
+): IntermediateNote[] {
+  if (!entries[partPath]) {
+    return []
+  }
+  const relsPath = partPath.replace(/^word\/([^/]+)$/, 'word/_rels/$1.rels')
+  let partRels = baseCtx.rels
+  if (entries[relsPath]) {
+    partRels = parseRelationships(decodeUtf8(entries[relsPath]), 'word', relsPath)
+  }
+  const root = parseXmlPart(decodeUtf8(entries[partPath]), partPath)
+  const localCtx: ParseContext = {
+    ...baseCtx,
+    rels: partRels,
+    activeCommentWIds: new Set(),
+    anchorOrderWIds: [],
+  }
+  const notes: IntermediateNote[] = []
+  for (const noteEl of findChildren(root, noteTag)) {
+    const id = Number.parseInt(getAttr(noteEl, 'w:id', 'id') ?? '', 10)
+    const noteType = (getAttr(noteEl, 'w:type', 'type') ?? '').toLowerCase()
+    if (
+      !Number.isFinite(id) ||
+      id <= 0 ||
+      noteType === 'separator' ||
+      noteType === 'continuationseparator' ||
+      noteType === 'continuationnotice'
+    ) {
+      continue
+    }
+    const blocks: IntermediateBlock[] = []
+    let idx = 0
+    for (const child of noteEl.children) {
+      const loc = `${partPath}#${id}.b[${idx++}]`
+      if (child.localName === 'p') {
+        blocks.push(...parseParagraph(child, null, localCtx, loc).blocks)
+      } else if (child.localName === 'tbl') {
+        blocks.push(parseTable(child, localCtx, loc))
+      }
+    }
+    notes.push({ id, blocks: groupStructuralBlocks(blocks, baseCtx.styles) })
+  }
+  return notes
 }
 
 function parseSectionNode(
@@ -1253,11 +1787,14 @@ export async function importOoxmlToIntermediate(
   const relsByPart = new Map<string, Map<string, ParsedRelationship>>()
   for (const [entryName, entryBytes] of Object.entries(entries)) {
     if (entryName.endsWith('.rels')) {
-      const baseDir = entryName.startsWith('word/_rels/') ? 'word' : ''
+      const relsIdx = entryName.indexOf('/_rels/')
+      const baseDir = relsIdx === -1 ? '' : entryName.slice(0, relsIdx)
       const parsedRels = parseRelationships(decodeUtf8(entryBytes), baseDir, entryName)
       relsByPart.set(entryName, parsedRels)
     }
   }
+
+  const validatedMedia = validateArchiveMediaEntries(entries, options.quotas)
 
   const docRels = relsByPart.get('word/_rels/document.xml.rels') ?? new Map<string, ParsedRelationship>()
 
@@ -1301,6 +1838,9 @@ export async function importOoxmlToIntermediate(
     styles,
     numbering,
     rels: docRels,
+    entries,
+    validatedMedia,
+    quotas: options.quotas,
     diagnostics,
     formattingRevisions,
     activeCommentWIds: new Set<number>(),
@@ -1312,17 +1852,30 @@ export async function importOoxmlToIntermediate(
 
   const sections: IntermediateSection[] = []
   let currentBlocks: IntermediateBlock[] = []
+  let pendingBodyBookmarks: IntermediateInline[] = []
   let trailingSectPr: XmlElementNode | null = null
   let bodyIndex = 0
 
   for (const child of bodyEl.children) {
     const loc = `body[${bodyIndex++}]`
-    if (child.localName === 'p') {
+    if (child.localName === 'bookmarkStart') {
+      const bmName = getAttr(child, 'w:name', 'name')
+      if (bmName && bmName !== '_GoBack') {
+        pendingBodyBookmarks.push({ type: 'bookmark', id: bmName, name: bmName })
+      }
+    } else if (child.localName === 'p') {
       const parsed = parseParagraph(child, null, ctx, loc)
+      if (pendingBodyBookmarks.length > 0 && parsed.blocks.length > 0) {
+        const first = parsed.blocks[0]
+        if (first.type === 'paragraph' || first.type === 'heading') {
+          first.inlines = [...pendingBodyBookmarks, ...first.inlines]
+          pendingBodyBookmarks = []
+        }
+      }
       currentBlocks.push(...parsed.blocks)
       if (parsed.sectionEl) {
         sections.push(
-          parseSectionNode(parsed.sectionEl, sections.length, currentBlocks, entries, docRels, ctx),
+          parseSectionNode(parsed.sectionEl, sections.length, groupStructuralBlocks(currentBlocks, styles), entries, docRels, ctx),
         )
         currentBlocks = []
       }
@@ -1341,9 +1894,10 @@ export async function importOoxmlToIntermediate(
   }
 
   if (trailingSectPr || currentBlocks.length > 0 || sections.length === 0) {
+    const groupedBlocks = groupStructuralBlocks(currentBlocks, styles)
     if (trailingSectPr) {
       sections.push(
-        parseSectionNode(trailingSectPr, sections.length, currentBlocks, entries, docRels, ctx),
+        parseSectionNode(trailingSectPr, sections.length, groupedBlocks, entries, docRels, ctx),
       )
     } else {
       sections.push({
@@ -1353,10 +1907,13 @@ export async function importOoxmlToIntermediate(
         titlePg: false,
         headers: {},
         footers: {},
-        blocks: currentBlocks,
+        blocks: groupedBlocks,
       })
     }
   }
+
+  const footnotes = parseNotesPart(entries, 'word/footnotes.xml', 'footnote', ctx)
+  const endnotes = parseNotesPart(entries, 'word/endnotes.xml', 'endnote', ctx)
 
   // Parse comments and reconcile discussion IDs onto anchored inline commentIds.
   const { discussions, discussionIdByWId } = parseCommentsParts(
@@ -1387,11 +1944,19 @@ export async function importOoxmlToIntermediate(
             remapDiscussionIds(cell.blocks)
           }
         }
+      } else if (block.type === 'blockquote') {
+        remapDiscussionIds(block.blocks)
       }
     }
   }
   for (const sec of sections) {
     remapDiscussionIds(sec.blocks)
+  }
+  for (const fn of footnotes) {
+    remapDiscussionIds(fn.blocks)
+  }
+  for (const en of endnotes) {
+    remapDiscussionIds(en.blocks)
   }
 
   // Reconstruct replacementGroups: check customXml metadata first, or warn if paired ins/del exist without group metadata.
@@ -1414,6 +1979,8 @@ export async function importOoxmlToIntermediate(
         for (const r of block.rows) {
           for (const c of r.cells) scanRevisions(c.blocks)
         }
+      } else if (block.type === 'blockquote') {
+        scanRevisions(block.blocks)
       }
     }
   }
@@ -1455,6 +2022,8 @@ export async function importOoxmlToIntermediate(
     },
     numbering: numberingList,
     sections,
+    footnotes,
+    endnotes,
     discussions,
     replacementGroups,
     formattingRevisions,

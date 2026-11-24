@@ -1,0 +1,337 @@
+{
+  "type": "doc",
+  "content": [
+    {
+      "type": "heading",
+      "attrs": {
+        "level": 1,
+        "blockId": "d5_h1"
+      },
+      "content": [
+        {
+          "type": "bookmark",
+          "attrs": {
+            "id": "bm_1",
+            "name": "d5_target"
+          }
+        },
+        {
+          "type": "text",
+          "text": "D5 Rich Layout Section"
+        }
+      ]
+    },
+    {
+      "type": "paragraph",
+      "attrs": {
+        "blockId": "d5_p_link_fn"
+      },
+      "content": [
+        {
+          "type": "text",
+          "text": "Jump to "
+        },
+        {
+          "type": "text",
+          "text": "target heading",
+          "marks": [
+            {
+              "type": "link",
+              "attrs": {
+                "href": "#d5_target"
+              }
+            }
+          ]
+        },
+        {
+          "type": "text",
+          "text": " with note"
+        },
+        {
+          "type": "footnote",
+          "attrs": {
+            "id": 1
+          },
+          "content": [
+            {
+              "type": "paragraph",
+              "attrs": {
+                "blockId": "d5_fn_1"
+              },
+              "content": [
+                {
+                  "type": "text",
+                  "text": "Footnote body text"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "text",
+          "text": "."
+        }
+      ]
+    },
+    {
+      "type": "paragraph",
+      "attrs": {
+        "blockId": "d5_p_img"
+      },
+      "content": [
+        {
+          "type": "image",
+          "attrs": {
+            "src": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+            "alt": "Tiny PNG",
+            "title": "Sample",
+            "width": 120,
+            "height": 80,
+            "crop": {
+              "top": 10,
+              "right": 10,
+              "bottom": 10,
+              "left": 10
+            }
+          }
+        }
+      ]
+    },
+    {
+      "type": "table",
+      "attrs": {
+        "blockId": "d5_tbl",
+        "gridColsDxa": [
+          3000,
+          3000
+        ],
+        "borders": {
+          "top": {
+            "style": "single",
+            "sizeEighthPt": 8,
+            "colorHex": "112233"
+          },
+          "bottom": {
+            "style": "single",
+            "sizeEighthPt": 8,
+            "colorHex": "112233"
+          },
+          "left": {
+            "style": "single",
+            "sizeEighthPt": 8,
+            "colorHex": "112233"
+          },
+          "right": {
+            "style": "single",
+            "sizeEighthPt": 8,
+            "colorHex": "112233"
+          },
+          "insideH": {
+            "style": "single",
+            "sizeEighthPt": 4,
+            "colorHex": "AABBCC"
+          },
+          "insideV": {
+            "style": "single",
+            "sizeEighthPt": 4,
+            "colorHex": "AABBCC"
+          }
+        },
+        "margins": {
+          "topDxa": 100,
+          "bottomDxa": 100,
+          "leftDxa": 140,
+          "rightDxa": 140
+        }
+      },
+      "content": [
+        {
+          "type": "tableRow",
+          "content": [
+            {
+              "type": "tableCell",
+              "attrs": {
+                "colspan": 1,
+                "rowspan": 1,
+                "colwidth": [
+                  200
+                ],
+                "borders": {
+                  "top": {
+                    "style": "double",
+                    "sizeEighthPt": 6,
+                    "colorHex": "445566"
+                  }
+                },
+                "margins": {
+                  "topDxa": 80,
+                  "bottomDxa": 80,
+                  "leftDxa": 120,
+                  "rightDxa": 120
+                }
+              },
+              "content": [
+                {
+                  "type": "paragraph",
+                  "attrs": {
+                    "blockId": "d5_c1"
+                  },
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "Bordered Cell A"
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "tableCell",
+              "attrs": {
+                "colspan": 1,
+                "rowspan": 1,
+                "colwidth": [
+                  200
+                ]
+              },
+              "content": [
+                {
+                  "type": "paragraph",
+                  "attrs": {
+                    "blockId": "d5_c2"
+                  },
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "Bordered Cell B"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "type": "blockquote",
+      "attrs": {
+        "blockId": "d5_bq"
+      },
+      "content": [
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "d5_bq_p"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Quoted paragraph inside blockquote."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "type": "codeBlock",
+      "attrs": {
+        "blockId": "d5_cb",
+        "language": "typescript"
+      },
+      "content": [
+        {
+          "type": "text",
+          "text": "const answer = 42;"
+        }
+      ]
+    },
+    {
+      "type": "orderedList",
+      "attrs": {
+        "start": 3
+      },
+      "content": [
+        {
+          "type": "listItem",
+          "content": [
+            {
+              "type": "paragraph",
+              "attrs": {
+                "blockId": "d5_l0"
+              },
+              "content": [
+                {
+                  "type": "text",
+                  "text": "Level 0 item"
+                }
+              ]
+            },
+            {
+              "type": "orderedList",
+              "attrs": {
+                "start": 2,
+                "type": "lowerLetter"
+              },
+              "content": [
+                {
+                  "type": "listItem",
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "attrs": {
+                        "blockId": "d5_l1"
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "Level 1 nested item"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "type": "paragraph",
+      "attrs": {
+        "blockId": "d5_p_rev"
+      },
+      "content": [
+        {
+          "type": "text",
+          "text": "Italic formatting proposal",
+          "marks": [
+            {
+              "type": "italic"
+            },
+            {
+              "type": "suggestion",
+              "attrs": {
+                "id": "rev-fmt-italic",
+                "type": "markChange",
+                "userId": "editor-2",
+                "createdAt": "2026-11-24T10:00:00Z",
+                "userMetadata": {
+                  "name": "Synthetic Editor"
+                },
+                "markChanges": [
+                  {
+                    "operation": "added",
+                    "markName": "italic",
+                    "markAttrs": {}
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

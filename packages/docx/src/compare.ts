@@ -11,6 +11,8 @@ export interface SemanticTableSummary {
   cols: number
   gridColsDxa: number[]
   headerRows: number
+  borders?: unknown
+  margins?: unknown
   cells: Array<{
     text: string
     colspan: number
@@ -19,6 +21,8 @@ export interface SemanticTableSummary {
     links: string[]
     backgroundHex: string | null
     verticalAlign: string | null
+    borders?: unknown
+    margins?: unknown
   }>
 }
 
@@ -33,7 +37,13 @@ export interface SemanticReport {
   tables: SemanticTableSummary[]
   paragraphs: string[]
   headings: Array<{ level: number; text: string }>
-  lists: Array<{ kind: 'bullet' | 'ordered'; start: number; text: string }>
+  lists: Array<{ kind: 'bullet' | 'ordered'; level: number; start: number; format?: string; text: string }>
+  images: Array<{ alt: string | null; widthPx?: number | null; heightPx?: number | null; crop?: unknown }>
+  footnotes: Array<{ id: number; text: string }>
+  endnotes: Array<{ id: number; text: string }>
+  bookmarks: Array<{ id: string; name?: string }>
+  blockquotes: number
+  codeBlocks: Array<{ language: string | null; text: string }>
   discussions: Array<{
     id: string
     anchorState: string
@@ -80,7 +90,11 @@ export function extractSemanticSummary(
   const tables: SemanticTableSummary[] = []
   const paragraphs: string[] = []
   const headings: Array<{ level: number; text: string }> = []
-  const lists: Array<{ kind: 'bullet' | 'ordered'; start: number; text: string }> = []
+  const lists: Array<{ kind: 'bullet' | 'ordered'; level: number; start: number; format?: string; text: string }> = []
+  const images: Array<{ alt: string | null; widthPx?: number | null; heightPx?: number | null; crop?: unknown }> = []
+  const bookmarks: Array<{ id: string; name?: string }> = []
+  let blockquotes = 0
+  const codeBlocks: Array<{ language: string | null; text: string }> = []
   const insertions: Array<{ text: string; author: string; groupId: string | null }> = []
   const deletions: Array<{ text: string; author: string; groupId: string | null }> = []
   let blockJoinDeletions = 0
@@ -95,6 +109,15 @@ export function extractSemanticSummary(
         }
         if (inline.revision.kind === 'insert') insertions.push(entry)
         else deletions.push(entry)
+      } else if (inline.type === 'image') {
+        images.push({
+          alt: inline.alt ?? null,
+          widthPx: inline.widthPx ?? null,
+          heightPx: inline.heightPx ?? null,
+          ...(inline.crop ? { crop: inline.crop } : {}),
+        })
+      } else if (inline.type === 'bookmark') {
+        bookmarks.push({ id: inline.id, ...(inline.name ? { name: inline.name } : {}) })
       }
     }
   }
@@ -112,7 +135,9 @@ export function extractSemanticSummary(
         if (block.attrs.list) {
           lists.push({
             kind: block.attrs.list.kind,
+            level: block.attrs.list.level ?? 0,
             start: block.attrs.list.start ?? 1,
+            ...(block.attrs.list.format ? { format: block.attrs.list.format } : {}),
             text,
           })
         } else {
@@ -156,6 +181,8 @@ export function extractSemanticSummary(
               links,
               backgroundHex: cell.backgroundHex ?? null,
               verticalAlign: cell.verticalAlign ?? null,
+              ...(cell.borders ? { borders: cell.borders } : {}),
+              ...(cell.margins ? { margins: cell.margins } : {}),
             })
           }
         }
@@ -164,10 +191,15 @@ export function extractSemanticSummary(
           cols: block.gridColsDxa.length,
           gridColsDxa: block.gridColsDxa,
           headerRows,
+          ...(block.borders ? { borders: block.borders } : {}),
+          ...(block.margins ? { margins: block.margins } : {}),
           cells,
         })
       } else if (block.type === 'blockquote') {
+        blockquotes += 1
         visitBlocks(block.blocks)
+      } else if (block.type === 'codeBlock') {
+        codeBlocks.push({ language: block.language ?? null, text: block.text })
       }
     }
   }
@@ -187,6 +219,12 @@ export function extractSemanticSummary(
     })),
   }))
 
+  const noteText = (blocks: readonly IntermediateBlock[]): string =>
+    blocks
+      .map((b) => (b.type === 'paragraph' || b.type === 'heading' ? inlinePlainText(b.inlines) : ''))
+      .filter(Boolean)
+      .join('\n')
+
   return {
     sections,
     explicitPageBreaks,
@@ -194,6 +232,12 @@ export function extractSemanticSummary(
     paragraphs,
     headings,
     lists,
+    images,
+    footnotes: (model.footnotes ?? []).map((n) => ({ id: n.id, text: noteText(n.blocks) })),
+    endnotes: (model.endnotes ?? []).map((n) => ({ id: n.id, text: noteText(n.blocks) })),
+    bookmarks,
+    blockquotes,
+    codeBlocks,
     discussions,
     revisions: {
       insertions,
@@ -230,6 +274,12 @@ export function compareSemanticReports(a: SemanticReport, b: SemanticReport): {
     'paragraphs',
     'headings',
     'lists',
+    'images',
+    'footnotes',
+    'endnotes',
+    'bookmarks',
+    'blockquotes',
+    'codeBlocks',
     'discussions',
     'revisions',
     'lossReport',

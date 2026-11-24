@@ -113,7 +113,7 @@ export type IntermediateMark =
   | { type: 'superscript' }
   | { type: 'subscript' }
   | { type: 'highlight'; colorHex: string }
-  | { type: 'link'; href: string; title?: string | null }
+  | { type: 'link'; href: string; anchor?: string | null; title?: string | null }
   | {
       type: 'textStyle'
       fontFamily?: string | null
@@ -144,6 +144,12 @@ export interface FormattingChangeMeta {
     markName: string
     markAttrs?: Record<string, unknown>
   }>
+  propertyChanges?: Array<{
+    property: string
+    previousValue: unknown
+    currentValue: unknown
+  }>
+  previousParagraphProps?: Partial<ParagraphAttrs> | null
 }
 
 export interface IntermediateTextInline {
@@ -182,6 +188,20 @@ export interface IntermediateImageInline {
   } | null
 }
 
+export interface IntermediateFootnoteRefInline {
+  type: 'footnoteRef'
+  id: number
+  commentIds?: string[]
+  revision?: InlineRevisionMeta | null
+}
+
+export interface IntermediateEndnoteRefInline {
+  type: 'endnoteRef'
+  id: number
+  commentIds?: string[]
+  revision?: InlineRevisionMeta | null
+}
+
 export interface IntermediateUnsupportedInline {
   type: 'unsupportedInline'
   elementName: string
@@ -194,6 +214,8 @@ export type IntermediateInline =
   | IntermediateHardBreakInline
   | IntermediateBookmarkInline
   | IntermediateImageInline
+  | IntermediateFootnoteRefInline
+  | IntermediateEndnoteRefInline
   | IntermediateUnsupportedInline
 
 export interface ListBinding {
@@ -383,11 +405,30 @@ export interface FormattingRevisionRecord {
   summary: string
 }
 
+export interface NumberingLevelDefinition {
+  level: number
+  kind: 'bullet' | 'ordered'
+  start: number
+  format: string
+}
+
 export interface NumberingDefinition {
   numId: number
   kind: 'bullet' | 'ordered'
   start: number
   format: string
+  levels?: NumberingLevelDefinition[]
+}
+
+export interface IntermediateNote {
+  id: number
+  blocks: IntermediateBlock[]
+}
+
+export interface DocxNoteInput {
+  id: number | string
+  content?: TipTapNode[] | string
+  blocks?: IntermediateBlock[]
 }
 
 export interface IntermediateDocument {
@@ -403,6 +444,8 @@ export interface IntermediateDocument {
   }
   numbering: NumberingDefinition[]
   sections: IntermediateSection[]
+  footnotes: IntermediateNote[]
+  endnotes: IntermediateNote[]
   discussions: IntermediateDiscussion[]
   replacementGroups: ReplacementGroupMetadata[]
   formattingRevisions: FormattingRevisionRecord[]
