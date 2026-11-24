@@ -3,11 +3,13 @@ import type {
   AnchoredComment,
   ApplyExchangeImportPayload,
   ApplyExchangeReceipt,
+  BulkDecideSuggestionsPayload,
   CommentAnchorInput,
   CommentFilterStatus,
   CursorPage,
   DecideGroupSuggestionsPayload,
   DecideSuggestionPayload,
+  DocumentRevisionSummary,
   DocumentSuggestion,
   ExchangeJob,
   PinReason,
@@ -63,10 +65,16 @@ export interface ReviewClient {
   comments: {
     list(nodeId: string, query?: { status?: CommentFilterStatus; cursor?: string | null; per_page?: number }): Promise<CursorPage<AnchoredComment>>
     add(nodeId: string, input: AddAnchoredCommentPayload, idempotencyKey?: string): Promise<AnchoredComment>
+    edit?(nodeId: string, commentId: string, body: string, etag: string, idempotencyKey?: string): Promise<AnchoredComment>
+    archive?(nodeId: string, commentId: string, archived: boolean, etag: string, idempotencyKey?: string): Promise<AnchoredComment>
     resolve(nodeId: string, commentId: string, etag: string, idempotencyKey?: string): Promise<AnchoredComment>
     reopen(nodeId: string, commentId: string, etag: string, idempotencyKey?: string): Promise<AnchoredComment>
     reanchor(nodeId: string, commentId: string, anchor: CommentAnchorInput, anchorEtag: string, idempotencyKey?: string): Promise<AnchoredComment>
     remove(nodeId: string, commentId: string, etag: string): Promise<void>
+  }
+  revisions?: {
+    list(nodeId: string): Promise<DocumentRevisionSummary[]>
+    restore(nodeId: string, revisionId: string, etag?: string, idempotencyKey?: string): Promise<void>
   }
   exchange: {
     register(nodeId: string, input: RegisterExchangeJobPayload | FormData, idempotencyKey?: string): Promise<ExchangeJob>
@@ -77,12 +85,14 @@ export interface ReviewClient {
   }
   suggestions?: {
     capabilities(nodeId?: string): Promise<SuggestionCapabilities>
-    list(nodeId: string, query?: { proposal_id?: string | null }): Promise<DocumentSuggestion[]>
+    list(nodeId: string, query?: { proposal_id?: string | null; include_stale_generations?: boolean }): Promise<DocumentSuggestion[]>
     save(nodeId: string, input: SaveSuggestionPayload, idempotencyKey?: string): Promise<DocumentSuggestion>
     accept(nodeId: string, suggestionId: string, payload: DecideSuggestionPayload, idempotencyKey?: string): Promise<DocumentSuggestion>
     reject(nodeId: string, suggestionId: string, payload: DecideSuggestionPayload, idempotencyKey?: string): Promise<DocumentSuggestion>
     acceptGroup(nodeId: string, groupId: string, payload: DecideGroupSuggestionsPayload, idempotencyKey?: string): Promise<DocumentSuggestion[]>
     rejectGroup(nodeId: string, groupId: string, payload: DecideGroupSuggestionsPayload, idempotencyKey?: string): Promise<DocumentSuggestion[]>
+    bulkAccept?(nodeId: string, payload: BulkDecideSuggestionsPayload, idempotencyKey?: string): Promise<DocumentSuggestion[]>
+    bulkReject?(nodeId: string, payload: BulkDecideSuggestionsPayload, idempotencyKey?: string): Promise<DocumentSuggestion[]>
   }
 }
 
@@ -191,6 +201,18 @@ export function createReviewClient(options: ReviewClientOptions = {}): ReviewCli
           json: input,
           idempotencyKey,
         })).data,
+      edit: async (nodeId, commentId, body, etag, idempotencyKey) =>
+        (await request<{ data: AnchoredComment }>('PATCH', `/review/nodes/${nodeId}/comments/${commentId}`, {
+          json: { body },
+          etag,
+          idempotencyKey,
+        })).data,
+      archive: async (nodeId, commentId, archived, etag, idempotencyKey) =>
+        (await request<{ data: AnchoredComment }>('POST', `/review/nodes/${nodeId}/comments/${commentId}/archive`, {
+          json: { archived },
+          etag,
+          idempotencyKey,
+        })).data,
       resolve: async (nodeId, commentId, etag, idempotencyKey) =>
         (await request<{ data: AnchoredComment }>('POST', `/review/nodes/${nodeId}/comments/${commentId}/resolve`, {
           etag,
@@ -209,6 +231,15 @@ export function createReviewClient(options: ReviewClientOptions = {}): ReviewCli
         })).data,
       remove: (nodeId, commentId, etag) =>
         request<void>('DELETE', `/review/nodes/${nodeId}/comments/${commentId}`, { etag }),
+    },
+    revisions: {
+      list: async (nodeId) =>
+        (await request<{ data: DocumentRevisionSummary[] }>('GET', `/documents/${nodeId}/revisions`)).data,
+      restore: (nodeId, revisionId, etag, idempotencyKey) =>
+        request<void>('POST', `/documents/${nodeId}/revisions/${revisionId}/restore`, {
+          etag,
+          idempotencyKey,
+        }),
     },
     exchange: {
       register: async (nodeId, input, idempotencyKey) => {
@@ -261,7 +292,10 @@ export function createReviewClient(options: ReviewClientOptions = {}): ReviewCli
       list: async (nodeId, query) =>
         (
           await request<{ data: DocumentSuggestion[] }>('GET', `/review/documents/${nodeId}/suggestions`, {
-            query: query?.proposal_id ? { proposal_id: query.proposal_id } : undefined,
+            query: {
+              ...(query?.proposal_id ? { proposal_id: query.proposal_id } : {}),
+              ...(query?.include_stale_generations ? { include_stale_generations: 1 } : {}),
+            },
           })
         ).data,
       save: async (nodeId, input, idempotencyKey) =>
@@ -295,6 +329,20 @@ export function createReviewClient(options: ReviewClientOptions = {}): ReviewCli
       rejectGroup: async (nodeId, groupId, payload, idempotencyKey) =>
         (
           await request<{ data: DocumentSuggestion[] }>('POST', `/review/documents/${nodeId}/suggestions/groups/${groupId}/reject`, {
+            json: payload,
+            idempotencyKey,
+          })
+        ).data,
+      bulkAccept: async (nodeId, payload, idempotencyKey) =>
+        (
+          await request<{ data: DocumentSuggestion[] }>('POST', `/review/documents/${nodeId}/suggestions/bulk/accept`, {
+            json: payload,
+            idempotencyKey,
+          })
+        ).data,
+      bulkReject: async (nodeId, payload, idempotencyKey) =>
+        (
+          await request<{ data: DocumentSuggestion[] }>('POST', `/review/documents/${nodeId}/suggestions/bulk/reject`, {
             json: payload,
             idempotencyKey,
           })

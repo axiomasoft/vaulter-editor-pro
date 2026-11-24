@@ -47,6 +47,12 @@ Route::prefix($routes->versionedPrefix())
         Route::delete('review/nodes/{node}/comments/{comment}', [AnchoredCommentController::class, 'destroy'])
             ->name('review.comments.destroy')
             ->middleware('vaulter.idempotency');
+        Route::patch('review/nodes/{node}/comments/{comment}', [AnchoredCommentController::class, 'update'])
+            ->name('review.comments.update')
+            ->middleware('vaulter.idempotency');
+        Route::post('review/nodes/{node}/comments/{comment}/archive', [AnchoredCommentController::class, 'archive'])
+            ->name('review.comments.archive')
+            ->middleware('vaulter.idempotency');
 
         Route::get('review/documents/{node}/suggestions/capabilities', [SuggestionController::class, 'capabilities'])
             ->name('review.suggestions.capabilities');
@@ -66,5 +72,11 @@ Route::prefix($routes->versionedPrefix())
             ->middleware('vaulter.idempotency');
         Route::post('review/documents/{node}/suggestions/groups/{group}/reject', [SuggestionController::class, 'rejectGroup'])
             ->name('review.suggestions.groups.reject')
+            ->middleware('vaulter.idempotency');
+        Route::post('review/documents/{node}/suggestions/bulk/accept', [SuggestionController::class, 'bulkAccept'])
+            ->name('review.suggestions.bulk.accept')
+            ->middleware('vaulter.idempotency');
+        Route::post('review/documents/{node}/suggestions/bulk/reject', [SuggestionController::class, 'bulkReject'])
+            ->name('review.suggestions.bulk.reject')
             ->middleware('vaulter.idempotency');
     });

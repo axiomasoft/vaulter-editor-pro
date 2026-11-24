@@ -14,4 +14,5 @@ enum CommentFilterStatus: string
     case Active = 'active';
     case Resolved = 'resolved';
     case Detached = 'detached';
+    case Archived = 'archived';
 }

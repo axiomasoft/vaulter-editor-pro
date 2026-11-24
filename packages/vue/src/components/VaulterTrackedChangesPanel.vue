@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import type { Editor } from '@tiptap/core'
 import { useTrackedChanges, type UseTrackedChangesOptions } from '../composables/useTrackedChanges'
 import type { TrackedProjection } from '../review/trackedProjection'
@@ -14,6 +14,9 @@ const props = withDefaults(
     initialSuggestions?: DocumentSuggestion[]
     clientOptions?: UseTrackedChangesOptions
     autoLoad?: boolean
+    selectionRange?: { from: number; to: number } | null
+    initialProposalId?: string | null
+    includeStaleGenerations?: boolean
     resolveAuthor?: (authorSubject: string) => string
   }>(),
   {
@@ -23,6 +26,9 @@ const props = withDefaults(
     initialSuggestions: undefined,
     clientOptions: undefined,
     autoLoad: true,
+    selectionRange: null,
+    initialProposalId: null,
+    includeStaleGenerations: false,
     resolveAuthor: undefined,
   },
 )
@@ -32,6 +38,7 @@ const emit = defineEmits<{
   rejected: [suggestion: DocumentSuggestion]
   groupAccepted: [suggestions: DocumentSuggestion[]]
   groupRejected: [suggestions: DocumentSuggestion[]]
+  bulkDecided: [suggestions: DocumentSuggestion[]]
   projectionChange: [mode: TrackedProjection]
 }>()
 
@@ -42,7 +49,9 @@ const {
   loading,
   error,
   openSuggestions,
+  staleGenerationSuggestions,
   conflictedSuggestions,
+  proposalFilter,
   supportsKind,
   supportsNodeTypeChange,
   supportsTableOperation,
@@ -54,12 +63,47 @@ const {
   reject,
   acceptGroup,
   rejectGroup,
+  acceptAll,
+  rejectAll,
+  acceptByUser,
+  rejectByUser,
+  acceptInRange,
+  rejectInRange,
   setProjection,
 } = useTrackedChanges(props.nodeId, {
   ...props.clientOptions,
   editor: props.editor,
   capabilities: props.capabilities ?? props.clientOptions?.capabilities,
   initialSuggestions: props.initialSuggestions ?? props.clientOptions?.initialSuggestions,
+  includeStaleGenerations: props.includeStaleGenerations || props.clientOptions?.includeStaleGenerations,
+})
+
+if (props.initialProposalId) {
+  proposalFilter.value = props.initialProposalId
+}
+
+const selectedBulkUser = ref<string>('')
+
+const availableProposals = computed(() => {
+  const ids = new Set<string>()
+  for (const s of suggestions.value) {
+    if (s.proposal_id) ids.add(s.proposal_id)
+  }
+  return Array.from(ids)
+})
+
+const availableAuthors = computed(() => {
+  const authors = new Set<string>()
+  for (const s of suggestions.value) {
+    if (s.state === 'open' && !s.generation_changed) authors.add(s.author_subject)
+  }
+  return Array.from(authors)
+})
+
+const visibleSuggestions = computed(() => {
+  const base = suggestions.value.filter(s => !s.generation_changed)
+  if (!proposalFilter.value) return base
+  return base.filter(s => s.proposal_id === proposalFilter.value)
 })
 
 function authorLabel(authorSubject: string): string {
@@ -136,13 +180,22 @@ async function handleRejectGroup(groupId: string, items: DocumentSuggestion[]): 
   }
 }
 
+async function handleBulk(action: () => Promise<DocumentSuggestion[]>): Promise<void> {
+  try {
+    const updated = await action()
+    emit('bulkDecided', updated)
+  } catch {
+    // Error ref populated
+  }
+}
+
 onMounted(() => {
   if (props.autoLoad) {
     if (!props.capabilities) {
       void loadCapabilities().catch(() => undefined)
     }
     if (!props.initialSuggestions) {
-      void list().catch(() => undefined)
+      void list(props.initialProposalId, props.includeStaleGenerations).catch(() => undefined)
     }
   }
 })
@@ -150,6 +203,9 @@ onMounted(() => {
 defineExpose({
   capabilities: activeCapabilities,
   suggestions,
+  visibleSuggestions,
+  staleGenerationSuggestions,
+  proposalFilter,
   projection,
   loading,
   error,
@@ -164,6 +220,8 @@ defineExpose({
   reject: handleReject,
   acceptGroup: handleAcceptGroup,
   rejectGroup: handleRejectGroup,
+  acceptAll: () => handleBulk(() => acceptAll(props.generation)),
+  rejectAll: () => handleBulk(() => rejectAll(props.generation)),
   setProjection: switchProjection,
 })
 </script>
@@ -212,6 +270,63 @@ defineExpose({
 
     <div v-if="loading" class="vaulter-tracked-changes__loading">Loading suggestions…</div>
 
+    <div class="vaulter-tracked-changes__toolbar">
+      <label class="vaulter-tracked-changes__proposal-filter">
+        Proposal:
+        <select v-model="proposalFilter" data-testid="proposal-filter">
+          <option :value="null">All proposals</option>
+          <option v-for="pid in availableProposals" :key="pid" :value="pid">{{ pid }}</option>
+        </select>
+      </label>
+
+      <div class="vaulter-tracked-changes__bulk-actions">
+        <button type="button" data-action="accept-all" @click="handleBulk(() => acceptAll(generation))">
+          Accept all
+        </button>
+        <button type="button" data-action="reject-all" @click="handleBulk(() => rejectAll(generation))">
+          Reject all
+        </button>
+        <template v-if="availableAuthors.length > 0">
+          <select v-model="selectedBulkUser" data-testid="bulk-user-select">
+            <option value="">Select user…</option>
+            <option v-for="u in availableAuthors" :key="u" :value="u">{{ authorLabel(u) }}</option>
+          </select>
+          <button
+            type="button"
+            data-action="accept-by-user"
+            :disabled="!selectedBulkUser"
+            @click="selectedBulkUser && handleBulk(() => acceptByUser(generation, selectedBulkUser))"
+          >
+            Accept by user
+          </button>
+          <button
+            type="button"
+            data-action="reject-by-user"
+            :disabled="!selectedBulkUser"
+            @click="selectedBulkUser && handleBulk(() => rejectByUser(generation, selectedBulkUser))"
+          >
+            Reject by user
+          </button>
+        </template>
+        <template v-if="selectionRange">
+          <button
+            type="button"
+            data-action="accept-in-range"
+            @click="handleBulk(() => acceptInRange(generation, selectionRange!.from, selectionRange!.to))"
+          >
+            Accept in range
+          </button>
+          <button
+            type="button"
+            data-action="reject-in-range"
+            @click="handleBulk(() => rejectInRange(generation, selectionRange!.from, selectionRange!.to))"
+          >
+            Reject in range
+          </button>
+        </template>
+      </div>
+    </div>
+
     <div v-if="error" class="vaulter-tracked-changes__error" role="alert">
       {{ error instanceof Error ? error.message : String(error) }}
     </div>
@@ -247,7 +362,7 @@ defineExpose({
 
     <ul class="vaulter-tracked-changes__list">
       <li
-        v-for="item in suggestions"
+        v-for="item in visibleSuggestions"
         :key="item.id"
         class="vaulter-tracked-changes__item"
         :data-suggestion-id="item.id"
@@ -268,6 +383,9 @@ defineExpose({
             </slot>
           </span>
           <span class="vaulter-tracked-changes__state">{{ item.state }}</span>
+          <span v-if="item.proposal_id" class="vaulter-tracked-changes__proposal-badge" :data-proposal-id="item.proposal_id">
+            proposal:{{ item.proposal_id }}
+          </span>
           <span v-if="item.pending_commit" class="vaulter-tracked-changes__pending" data-pending-commit="true">
             pending commit
           </span>
@@ -297,5 +415,31 @@ defineExpose({
         </div>
       </li>
     </ul>
+
+    <section
+      v-if="staleGenerationSuggestions.length > 0"
+      class="vaulter-tracked-changes__stale"
+      data-testid="stale-generation-suggestions"
+    >
+      <h4>Requires re-approval (generation_changed)</h4>
+      <ul>
+        <li
+          v-for="item in staleGenerationSuggestions"
+          :key="item.id"
+          :data-suggestion-id="item.id"
+          data-generation-changed="true"
+        >
+          <span>{{ item.kind }} ({{ authorLabel(item.author_subject) }})</span>
+          <button
+            type="button"
+            data-action="reject-stale"
+            :disabled="!canReject(item)"
+            @click="handleReject(item)"
+          >
+            Dismiss
+          </button>
+        </li>
+      </ul>
+    </section>
   </aside>
 </template>

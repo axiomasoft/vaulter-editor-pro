@@ -25,6 +25,8 @@ final class ReviewRouteLabels implements RouteLabelSource
             'vaulter.v1.review.comments.reopen' => 'comment',
             'vaulter.v1.review.comments.reanchor' => 'comment',
             'vaulter.v1.review.comments.destroy' => 'comment',
+            'vaulter.v1.review.comments.update' => 'comment',
+            'vaulter.v1.review.comments.archive' => 'comment',
             'vaulter.v1.review.suggestions.capabilities' => 'doc_read',
             'vaulter.v1.review.suggestions.index' => 'doc_read',
             'vaulter.v1.review.suggestions.store' => 'doc_write',
@@ -32,6 +34,8 @@ final class ReviewRouteLabels implements RouteLabelSource
             'vaulter.v1.review.suggestions.reject' => 'doc_write',
             'vaulter.v1.review.suggestions.groups.accept' => 'doc_write',
             'vaulter.v1.review.suggestions.groups.reject' => 'doc_write',
+            'vaulter.v1.review.suggestions.bulk.accept' => 'doc_write',
+            'vaulter.v1.review.suggestions.bulk.reject' => 'doc_write',
         ];
     }
 
@@ -43,7 +47,8 @@ final class ReviewRouteLabels implements RouteLabelSource
             ['methods' => ['GET'], 'pattern' => 'v1/review/documents/{id}/revisions/{id}/preview', 'operation' => 'doc_read'],
             ['methods' => ['GET'], 'pattern' => 'v1/review/documents/{id}/compare', 'operation' => 'doc_read'],
             ['methods' => ['GET', 'POST'], 'pattern' => 'v1/review/nodes/{id}/comments', 'operation' => 'comment'],
-            ['methods' => ['DELETE'], 'pattern' => 'v1/review/nodes/{id}/comments/{id}', 'operation' => 'comment'],
+            ['methods' => ['DELETE', 'PATCH'], 'pattern' => 'v1/review/nodes/{id}/comments/{id}', 'operation' => 'comment'],
+            ['methods' => ['POST'], 'pattern' => 'v1/review/nodes/{id}/comments/{id}/archive', 'operation' => 'comment'],
             ['methods' => ['POST'], 'pattern' => 'v1/review/nodes/{id}/comments/{id}/resolve', 'operation' => 'comment'],
             ['methods' => ['POST'], 'pattern' => 'v1/review/nodes/{id}/comments/{id}/reopen', 'operation' => 'comment'],
             ['methods' => ['POST'], 'pattern' => 'v1/review/nodes/{id}/comments/{id}/reanchor', 'operation' => 'comment'],
@@ -54,6 +59,8 @@ final class ReviewRouteLabels implements RouteLabelSource
             ['methods' => ['POST'], 'pattern' => 'v1/review/documents/{id}/suggestions/{id}/reject', 'operation' => 'doc_write'],
             ['methods' => ['POST'], 'pattern' => 'v1/review/documents/{id}/suggestions/groups/{id}/accept', 'operation' => 'doc_write'],
             ['methods' => ['POST'], 'pattern' => 'v1/review/documents/{id}/suggestions/groups/{id}/reject', 'operation' => 'doc_write'],
+            ['methods' => ['POST'], 'pattern' => 'v1/review/documents/{id}/suggestions/bulk/accept', 'operation' => 'doc_write'],
+            ['methods' => ['POST'], 'pattern' => 'v1/review/documents/{id}/suggestions/bulk/reject', 'operation' => 'doc_write'],
         ];
     }
 

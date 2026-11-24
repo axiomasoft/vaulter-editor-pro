@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Vaulter\EditorPro\Review\Data;
 
+use DateTimeImmutable;
 use Packman\Attributes\Api;
 use Vaulter\Documents\Data\Snapshots\CommentSnapshot;
 use Vaulter\EditorPro\Review\Enums\AnchorState;
@@ -16,11 +17,19 @@ final readonly class AnchoredCommentData
         public CommentSnapshot $comment,
         public ?CommentAnchorData $anchor,
         public string $etag,
+        public ?DateTimeImmutable $editedAt = null,
+        public ?DateTimeImmutable $archivedAt = null,
+        public ?string $archivedBy = null,
     ) {}
 
     public function isResolved(): bool
     {
         return $this->comment->resolvedAt !== null;
+    }
+
+    public function isArchived(): bool
+    {
+        return $this->archivedAt !== null;
     }
 
     public function isDetached(): bool
@@ -36,6 +45,6 @@ final readonly class AnchoredCommentData
 
     public function isActive(): bool
     {
-        return ! $this->isResolved() && ! $this->isDetached();
+        return ! $this->isArchived() && ! $this->isResolved() && ! $this->isDetached();
     }
 }

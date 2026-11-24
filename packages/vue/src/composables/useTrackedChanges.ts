@@ -1,4 +1,4 @@
-import { computed, ref, shallowRef, type ComputedRef, type Ref, type ShallowRef } from 'vue'
+import { computed, getCurrentScope, onScopeDispose, ref, shallowRef, type ComputedRef, type Ref, type ShallowRef } from 'vue'
 import type { Editor } from '@tiptap/core'
 import type { Node as ProseMirrorNode } from '@tiptap/pm/model'
 import { useReviewClient, type ReviewClient } from '../api/reviewClient'
@@ -10,7 +10,9 @@ import {
 } from '../review/trackedProjection'
 import {
   DEFAULT_REVIEW_CAPABILITIES,
+  type BulkDecideSuggestionsPayload,
   type DocumentSuggestion,
+  type OverlayEventsSource,
   type SaveSuggestionPayload,
   type SuggestionCapabilities,
   type SuggestionKind,
@@ -22,6 +24,8 @@ export interface UseTrackedChangesOptions {
   capabilities?: SuggestionCapabilities
   initialSuggestions?: DocumentSuggestion[]
   initialProjection?: TrackedProjection
+  overlay?: OverlayEventsSource | null
+  includeStaleGenerations?: boolean
 }
 
 export interface UseTrackedChangesReturn {
@@ -31,8 +35,11 @@ export interface UseTrackedChangesReturn {
   loading: Ref<boolean>
   error: Ref<unknown>
   openSuggestions: ComputedRef<DocumentSuggestion[]>
+  activeOpenSuggestions: ComputedRef<DocumentSuggestion[]>
+  staleGenerationSuggestions: ComputedRef<DocumentSuggestion[]>
   conflictedSuggestions: ComputedRef<DocumentSuggestion[]>
   structuralSuggestions: ComputedRef<DocumentSuggestion[]>
+  proposalFilter: Ref<string | null>
   supportsKind: (kind: SuggestionKind) => boolean
   supportsNodeTypeChange: (transition?: string) => boolean
   supportsMark: (markName: string) => boolean
@@ -41,7 +48,7 @@ export interface UseTrackedChangesReturn {
   canAccept: (suggestion: DocumentSuggestion) => boolean
   canReject: (suggestion: DocumentSuggestion) => boolean
   loadCapabilities: () => Promise<SuggestionCapabilities>
-  list: (proposalId?: string | null) => Promise<DocumentSuggestion[]>
+  list: (proposalId?: string | null, includeStaleGenerations?: boolean) => Promise<DocumentSuggestion[]>
   save: (input: SaveSuggestionPayload, idempotencyKey?: string) => Promise<DocumentSuggestion>
   accept: (
     suggestionId: string,
@@ -71,6 +78,12 @@ export interface UseTrackedChangesReturn {
     commandId?: string | null,
     idempotencyKey?: string,
   ) => Promise<DocumentSuggestion[]>
+  acceptAll: (generation: number, commandId?: string | null, idempotencyKey?: string) => Promise<DocumentSuggestion[]>
+  rejectAll: (generation: number, commandId?: string | null, idempotencyKey?: string) => Promise<DocumentSuggestion[]>
+  acceptByUser: (generation: number, authorSubject: string, commandId?: string | null, idempotencyKey?: string) => Promise<DocumentSuggestion[]>
+  rejectByUser: (generation: number, authorSubject: string, commandId?: string | null, idempotencyKey?: string) => Promise<DocumentSuggestion[]>
+  acceptInRange: (generation: number, from: number, to: number, commandId?: string | null, idempotencyKey?: string) => Promise<DocumentSuggestion[]>
+  rejectInRange: (generation: number, from: number, to: number, commandId?: string | null, idempotencyKey?: string) => Promise<DocumentSuggestion[]>
   setProjection: (mode: TrackedProjection) => void
   projectDoc: (doc: ProseMirrorNode, selection?: TrackedSuggestionSelection) => ProseMirrorNode
 }
@@ -96,10 +109,25 @@ export function useTrackedChanges(
   const error = ref<unknown>(null)
 
   let listedProposalId: string | null | undefined
+  let listedIncludeStale = options.includeStaleGenerations ?? false
+  const proposalFilter = ref<string | null>(null)
 
   const openSuggestions = computed(() => suggestions.value.filter(s => s.state === 'open'))
-  const conflictedSuggestions = computed(() => openSuggestions.value.filter(s => s.conflicted))
+  const staleGenerationSuggestions = computed(() => openSuggestions.value.filter(s => Boolean(s.generation_changed)))
+  const activeOpenSuggestions = computed(() => openSuggestions.value.filter(s => !s.generation_changed))
+  const conflictedSuggestions = computed(() => activeOpenSuggestions.value.filter(s => s.conflicted))
   const structuralSuggestions = computed(() => suggestions.value.filter(s => STRUCTURAL_KINDS.has(s.kind)))
+
+  if (options.overlay) {
+    const unsubscribe = options.overlay.overlayEvents((event) => {
+      if (event.kind === 'review') {
+        void list(listedProposalId, listedIncludeStale).catch(() => undefined)
+      }
+    })
+    if (getCurrentScope()) {
+      onScopeDispose(unsubscribe)
+    }
+  }
 
   function supportsKind(kind: SuggestionKind): boolean {
     return capabilities.value.supported_kinds.includes(kind)
@@ -127,7 +155,11 @@ export function useTrackedChanges(
   }
 
   function canAccept(suggestion: DocumentSuggestion): boolean {
-    return !loading.value && suggestion.state === 'open' && !suggestion.conflicted && !suggestion.pending_commit
+    return !loading.value
+      && suggestion.state === 'open'
+      && !suggestion.conflicted
+      && !suggestion.pending_commit
+      && !suggestion.generation_changed
   }
 
   function canReject(suggestion: DocumentSuggestion): boolean {
@@ -166,14 +198,19 @@ export function useTrackedChanges(
     }
   }
 
-  async function list(proposalId?: string | null): Promise<DocumentSuggestion[]> {
+  async function list(proposalId?: string | null, includeStaleGenerations?: boolean): Promise<DocumentSuggestion[]> {
     loading.value = true
     error.value = null
     try {
       const api = requireSuggestionsApi()
-      const loaded = await api.list(nodeId, proposalId ? { proposal_id: proposalId } : undefined)
+      const staleFlag = includeStaleGenerations ?? listedIncludeStale
+      const loaded = await api.list(nodeId, {
+        ...(proposalId ? { proposal_id: proposalId } : {}),
+        ...(staleFlag ? { include_stale_generations: true } : {}),
+      })
       suggestions.value = loaded
       listedProposalId = proposalId
+      listedIncludeStale = staleFlag
       return loaded
     } catch (caught) {
       error.value = caught
@@ -349,6 +386,75 @@ export function useTrackedChanges(
     }
   }
 
+  async function runBulk(
+    decision: 'accepted' | 'rejected',
+    payload: BulkDecideSuggestionsPayload,
+    idempotencyKey?: string,
+  ): Promise<DocumentSuggestion[]> {
+    error.value = null
+    try {
+      const api = requireSuggestionsApi()
+      const fn = decision === 'accepted' ? api.bulkAccept : api.bulkReject
+      if (!fn) {
+        throw new Error(`[Vaulter Review] ReviewClient does not configure suggestions.${decision === 'accepted' ? 'bulkAccept' : 'bulkReject'}.`)
+      }
+      const updatedList = await fn(nodeId, payload, idempotencyKey)
+      const byId = new Map(updatedList.map(s => [s.id, s]))
+      suggestions.value = suggestions.value.map(s => byId.get(s.id) ?? s)
+      options.overlay?.invalidateOverlay?.('review')
+      return updatedList
+    } catch (caught) {
+      error.value = caught
+      throw caught
+    }
+  }
+
+  function acceptAll(generation: number, commandId?: string | null, idempotencyKey?: string): Promise<DocumentSuggestion[]> {
+    return runBulk('accepted', { generation, scope: 'all', command_id: commandId ?? null }, idempotencyKey)
+  }
+
+  function rejectAll(generation: number, commandId?: string | null, idempotencyKey?: string): Promise<DocumentSuggestion[]> {
+    return runBulk('rejected', { generation, scope: 'all', command_id: commandId ?? null }, idempotencyKey)
+  }
+
+  function acceptByUser(
+    generation: number,
+    authorSubject: string,
+    commandId?: string | null,
+    idempotencyKey?: string,
+  ): Promise<DocumentSuggestion[]> {
+    return runBulk('accepted', { generation, scope: 'by_user', author_subject: authorSubject, command_id: commandId ?? null }, idempotencyKey)
+  }
+
+  function rejectByUser(
+    generation: number,
+    authorSubject: string,
+    commandId?: string | null,
+    idempotencyKey?: string,
+  ): Promise<DocumentSuggestion[]> {
+    return runBulk('rejected', { generation, scope: 'by_user', author_subject: authorSubject, command_id: commandId ?? null }, idempotencyKey)
+  }
+
+  function acceptInRange(
+    generation: number,
+    from: number,
+    to: number,
+    commandId?: string | null,
+    idempotencyKey?: string,
+  ): Promise<DocumentSuggestion[]> {
+    return runBulk('accepted', { generation, scope: 'in_range', from, to, command_id: commandId ?? null }, idempotencyKey)
+  }
+
+  function rejectInRange(
+    generation: number,
+    from: number,
+    to: number,
+    commandId?: string | null,
+    idempotencyKey?: string,
+  ): Promise<DocumentSuggestion[]> {
+    return runBulk('rejected', { generation, scope: 'in_range', from, to, command_id: commandId ?? null }, idempotencyKey)
+  }
+
   function setProjection(mode: TrackedProjection): void {
     projection.value = mode
   }
@@ -364,8 +470,11 @@ export function useTrackedChanges(
     loading,
     error,
     openSuggestions,
+    activeOpenSuggestions,
+    staleGenerationSuggestions,
     conflictedSuggestions,
     structuralSuggestions,
+    proposalFilter,
     supportsKind,
     supportsNodeTypeChange,
     supportsMark,
@@ -380,6 +489,12 @@ export function useTrackedChanges(
     reject,
     acceptGroup,
     rejectGroup,
+    acceptAll,
+    rejectAll,
+    acceptByUser,
+    rejectByUser,
+    acceptInRange,
+    rejectInRange,
     setProjection,
     projectDoc,
   }

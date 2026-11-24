@@ -204,4 +204,61 @@ describe('VaulterTrackedChangesPanel', () => {
     expect(slotted.get('[data-author-label]').text()).toBe('user:ada')
     expect(slotted.get('[data-suggestion-id="s-named"]').attributes('data-author')).toBe('user:ada')
   })
+
+  it('supports bulk accept/reject, proposal_id filter, generation_changed section, and live overlayEvents', async () => {
+    const s1 = makeSuggestion({ id: 's-1', proposal_id: 'prop-1', author_subject: 'user:1' })
+    const s2 = makeSuggestion({ id: 's-2', proposal_id: 'prop-2', author_subject: 'user:2' })
+    const stale = makeSuggestion({ id: 's-stale', generation_changed: true, author_subject: 'user:1' })
+
+    let overlayHandler: ((e: { kind: 'review' | 'comments' }) => void) | null = null
+    const overlay = {
+      overlayEvents: (fn: (e: { kind: 'review' | 'comments' }) => void) => {
+        overlayHandler = fn
+        return () => { overlayHandler = null }
+      },
+      invalidateOverlay: vi.fn(),
+    }
+
+    const client = makeMockClient([s1, s2, stale])
+    client.suggestions!.bulkAccept = vi.fn().mockResolvedValue([{ ...s1, state: 'accepted' }])
+    client.suggestions!.bulkReject = vi.fn().mockResolvedValue([{ ...s2, state: 'rejected' }])
+    client.suggestions!.reject = vi.fn().mockResolvedValue({ ...stale, state: 'rejected' })
+
+    const wrapper = mount(VaulterTrackedChangesPanel, {
+      props: {
+        nodeId: 'doc_1',
+        generation: 1,
+        selectionRange: { from: 0, to: 10 },
+        includeStaleGenerations: true,
+        clientOptions: { client, overlay },
+      },
+    })
+    await flushPromises()
+
+    expect(wrapper.find('[data-proposal-id="prop-1"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="stale-generation-suggestions"] [data-suggestion-id="s-stale"]').exists()).toBe(true)
+
+    await wrapper.get('[data-testid="proposal-filter"]').setValue('prop-1')
+    expect(wrapper.findAll('.vaulter-tracked-changes__item')).toHaveLength(1)
+
+    await wrapper.get('[data-action="accept-all"]').trigger('click')
+    await flushPromises()
+    expect(client.suggestions!.bulkAccept).toHaveBeenCalledWith('doc_1', { generation: 1, scope: 'all', command_id: null }, undefined)
+    expect(overlay.invalidateOverlay).toHaveBeenCalledWith('review')
+
+    await wrapper.get('[data-action="accept-in-range"]').trigger('click')
+    await flushPromises()
+    expect(client.suggestions!.bulkAccept).toHaveBeenCalledWith('doc_1', { generation: 1, scope: 'in_range', from: 0, to: 10, command_id: null }, undefined)
+
+    await wrapper.get('[data-action="reject-stale"]').trigger('click')
+    await flushPromises()
+    expect(client.suggestions!.reject).toHaveBeenCalledTimes(1)
+
+    const listCallsBefore = (client.suggestions!.list as ReturnType<typeof vi.fn>).mock.calls.length
+    ;(overlayHandler as ((e: { kind: 'review' | 'comments' }) => void) | null)?.({ kind: 'review' })
+    await flushPromises()
+    expect((client.suggestions!.list as ReturnType<typeof vi.fn>).mock.calls.length).toBeGreaterThan(listCallsBefore)
+
+    wrapper.unmount()
+  })
 })

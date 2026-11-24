@@ -45,6 +45,9 @@ final class AnchoredCommentReceiptCodec implements ReceiptCodec
 
         return [
             'etag' => $result->etag,
+            'edited_at' => $result->editedAt?->format(self::TIME_FORMAT),
+            'archived_at' => $result->archivedAt?->format(self::TIME_FORMAT),
+            'archived_by' => $result->archivedBy,
             'comment' => [
                 'id' => $c->id,
                 'node_id' => $c->nodeId,
@@ -135,6 +138,9 @@ final class AnchoredCommentReceiptCodec implements ReceiptCodec
             comment: $comment,
             anchor: $anchorData,
             etag: $this->requireString($body, 'etag'),
+            editedAt: $this->nullableTime($body['edited_at'] ?? null),
+            archivedAt: $this->nullableTime($body['archived_at'] ?? null),
+            archivedBy: is_string($body['archived_by'] ?? null) ? $body['archived_by'] : null,
         );
     }
 

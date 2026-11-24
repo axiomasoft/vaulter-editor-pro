@@ -1,10 +1,11 @@
-import { computed, ref, shallowRef, type ComputedRef, type Ref, type ShallowRef } from 'vue'
+import { computed, getCurrentScope, onScopeDispose, ref, shallowRef, type ComputedRef, type Ref, type ShallowRef } from 'vue'
 import { useReviewClient, type AddAnchoredCommentPayload, type ReviewClient } from '../api/reviewClient'
 import type {
   AnchorActuality,
   AnchoredComment,
   CommentAnchorInput,
   CommentFilterStatus,
+  OverlayEventsSource,
   PageMeta,
 } from '../types/review'
 import { evaluateAnchorActuality, type ActualityContext } from '../anchors/snapshotUtf16'
@@ -12,6 +13,7 @@ import { evaluateAnchorActuality, type ActualityContext } from '../anchors/snaps
 export interface UseRangeCommentsOptions {
   client?: ReviewClient
   initialFilter?: CommentFilterStatus
+  overlay?: OverlayEventsSource | null
 }
 
 export interface CommentThreadItem {
@@ -20,6 +22,7 @@ export interface CommentThreadItem {
   actuality: AnchorActuality
   resolved: boolean
   detached: boolean
+  archived: boolean
 }
 
 export interface UseRangeCommentsReturn {
@@ -34,6 +37,8 @@ export interface UseRangeCommentsReturn {
   loadMore: () => Promise<AnchoredComment[]>
   add: (input: AddAnchoredCommentPayload, idempotencyKey?: string) => Promise<AnchoredComment>
   reply: (rootCommentId: string, body: string, idempotencyKey?: string) => Promise<AnchoredComment>
+  edit: (commentId: string, body: string, etag?: string, idempotencyKey?: string) => Promise<AnchoredComment>
+  archive: (commentId: string, archived?: boolean, etag?: string, idempotencyKey?: string) => Promise<AnchoredComment>
   resolve: (commentId: string, etag?: string, idempotencyKey?: string) => Promise<AnchoredComment>
   reopen: (commentId: string, etag?: string, idempotencyKey?: string) => Promise<AnchoredComment>
   reanchor: (
@@ -46,6 +51,7 @@ export interface UseRangeCommentsReturn {
   activeCount: ComputedRef<number>
   resolvedCount: ComputedRef<number>
   detachedCount: ComputedRef<number>
+  archivedCount: ComputedRef<number>
 }
 
 export function isDetachedAnchor(comment: AnchoredComment): boolean {
@@ -62,9 +68,21 @@ export function useRangeComments(nodeId: string, options: UseRangeCommentsOption
   const error = ref<unknown>(null)
 
   const roots = computed(() => comments.value.filter((c) => c.parent_id === null))
-  const resolvedCount = computed(() => roots.value.filter((c) => c.resolved_at !== null).length)
-  const detachedCount = computed(() => roots.value.filter((c) => c.resolved_at === null && isDetachedAnchor(c)).length)
-  const activeCount = computed(() => roots.value.filter((c) => c.resolved_at === null && !isDetachedAnchor(c)).length)
+  const archivedCount = computed(() => roots.value.filter((c) => Boolean(c.archived_at)).length)
+  const resolvedCount = computed(() => roots.value.filter((c) => !c.archived_at && c.resolved_at !== null).length)
+  const detachedCount = computed(() => roots.value.filter((c) => !c.archived_at && c.resolved_at === null && isDetachedAnchor(c)).length)
+  const activeCount = computed(() => roots.value.filter((c) => !c.archived_at && c.resolved_at === null && !isDetachedAnchor(c)).length)
+
+  if (options.overlay) {
+    const unsubscribe = options.overlay.overlayEvents((event) => {
+      if (event.kind === 'comments') {
+        void list().catch(() => undefined)
+      }
+    })
+    if (getCurrentScope()) {
+      onScopeDispose(unsubscribe)
+    }
+  }
 
   async function list(status?: CommentFilterStatus): Promise<AnchoredComment[]> {
     const activeFilter = status ?? filter.value
@@ -108,6 +126,7 @@ export function useRangeComments(nodeId: string, options: UseRangeCommentsOption
     try {
       const created = await client.comments.add(nodeId, input, idempotencyKey)
       comments.value = [...comments.value, created]
+      options.overlay?.invalidateOverlay?.('comments')
       return created
     } catch (caught) {
       error.value = caught
@@ -117,6 +136,40 @@ export function useRangeComments(nodeId: string, options: UseRangeCommentsOption
 
   function reply(rootCommentId: string, body: string, idempotencyKey?: string): Promise<AnchoredComment> {
     return add({ body, parent_id: rootCommentId, anchor: null }, idempotencyKey)
+  }
+
+  async function edit(commentId: string, body: string, etag?: string, idempotencyKey?: string): Promise<AnchoredComment> {
+    if (!client.comments.edit) {
+      throw new Error('ReviewClient comments.edit is not configured.')
+    }
+    error.value = null
+    try {
+      const targetEtag = etag ?? comments.value.find((c) => c.id === commentId)?.etag ?? ''
+      const updated = await client.comments.edit(nodeId, commentId, body, targetEtag, idempotencyKey)
+      comments.value = comments.value.map((c) => (c.id === commentId ? updated : c))
+      options.overlay?.invalidateOverlay?.('comments')
+      return updated
+    } catch (caught) {
+      error.value = caught
+      throw caught
+    }
+  }
+
+  async function archive(commentId: string, archived = true, etag?: string, idempotencyKey?: string): Promise<AnchoredComment> {
+    if (!client.comments.archive) {
+      throw new Error('ReviewClient comments.archive is not configured.')
+    }
+    error.value = null
+    try {
+      const targetEtag = etag ?? comments.value.find((c) => c.id === commentId)?.etag ?? ''
+      const updated = await client.comments.archive(nodeId, commentId, archived, targetEtag, idempotencyKey)
+      comments.value = comments.value.map((c) => (c.id === commentId ? updated : c))
+      options.overlay?.invalidateOverlay?.('comments')
+      return updated
+    } catch (caught) {
+      error.value = caught
+      throw caught
+    }
   }
 
   function resolveEtag(commentId: string, explicit?: string): string {
@@ -201,12 +254,14 @@ export function useRangeComments(nodeId: string, options: UseRangeCommentsOption
       const actuality = evaluateAnchorActuality(root, actualityCtx)
       const resolved = root.resolved_at !== null
       const detached = isDetachedAnchor(root) || actuality.status === 'detached' || actuality.status === 'historical'
+      const archived = Boolean(root.archived_at)
       return {
         root,
         replies: repliesByRoot.get(root.id) ?? [],
         actuality,
         resolved,
         detached,
+        archived,
       }
     })
   }
@@ -217,6 +272,12 @@ export function useRangeComments(nodeId: string, options: UseRangeCommentsOption
       return all
     }
     return all.filter((item) => {
+      if (filter.value === 'archived') {
+        return item.archived
+      }
+      if (item.archived) {
+        return false
+      }
       if (filter.value === 'resolved') {
         return item.resolved
       }
@@ -239,6 +300,8 @@ export function useRangeComments(nodeId: string, options: UseRangeCommentsOption
     loadMore,
     add,
     reply,
+    edit,
+    archive,
     resolve,
     reopen,
     reanchor,
@@ -246,5 +309,6 @@ export function useRangeComments(nodeId: string, options: UseRangeCommentsOption
     activeCount,
     resolvedCount,
     detachedCount,
+    archivedCount,
   }
 }

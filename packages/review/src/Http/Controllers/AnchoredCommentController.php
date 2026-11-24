@@ -110,4 +110,35 @@ final readonly class AnchoredCommentController
 
         return response()->json(null, 204);
     }
+
+    public function update(Request $request, string $node, string $comment): JsonResponse
+    {
+        $body = trim($request->string('body')->toString());
+        if ($body === '') {
+            abort(422, 'Comment body must not be empty.');
+        }
+
+        $context = $this->contexts->resolve($request, $node);
+        $expectedVersion = $this->preconditions->expectedCommentVersion($request, $context, $node, $comment, delete: false, authorOnly: true);
+
+        $drive = ReviewDriveHandle::fromContext($this->vaulter, $context, withIdempotency: true);
+        $updated = $this->review->comments($drive)->edit($node, $comment, $body, $expectedVersion);
+        $resource = new AnchoredCommentResource($updated);
+
+        return $resource->response()->setEtag($resource->etag());
+    }
+
+    public function archive(Request $request, string $node, string $comment): JsonResponse
+    {
+        $archived = $request->has('archived') ? $request->boolean('archived') : true;
+
+        $context = $this->contexts->resolve($request, $node);
+        $expectedVersion = $this->preconditions->expectedCommentVersion($request, $context, $node, $comment, delete: false);
+
+        $drive = ReviewDriveHandle::fromContext($this->vaulter, $context, withIdempotency: true);
+        $updated = $this->review->comments($drive)->archive($node, $comment, $archived, $expectedVersion);
+        $resource = new AnchoredCommentResource($updated);
+
+        return $resource->response()->setEtag($resource->etag());
+    }
 }

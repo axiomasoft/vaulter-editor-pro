@@ -46,6 +46,7 @@ final readonly class TextSuggestion
         public ?string $journalCommandId = null,
         public ?string $journalState = null,
         public ?int $committedPosition = null,
+        public bool $generationChanged = false,
     ) {}
 
     public function isStructural(): bool

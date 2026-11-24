@@ -29,6 +29,10 @@ final class ReviewCommentReplayAuthorizer implements ReplayAuthorizer
 
     public const string VERB_ADD = 'add';
 
+    public const string VERB_EDIT = 'edit';
+
+    public const string VERB_ARCHIVE = 'archive';
+
     public const string VERB_REOPEN = 'reopen';
 
     public const string VERB_REANCHOR = 'reanchor';
@@ -85,6 +89,9 @@ final class ReviewCommentReplayAuthorizer implements ReplayAuthorizer
         }
 
         $authored = $scope?->kind === self::AUTHORED;
+        if ($this->verb === self::VERB_EDIT && ! $authored) {
+            throw PermissionDeniedException::forAction('comment.edit');
+        }
         if ($this->verb !== self::VERB_ADD && ! $authored && ! ($abilities[Ability::Edit->value] ?? false)) {
             throw PermissionDeniedException::forAbility(Ability::Edit->value);
         }

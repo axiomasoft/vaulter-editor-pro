@@ -161,3 +161,54 @@ it('uses one receipt for a complete group and rolls back text if recording the r
         ->and($resolved[0]->receiptId)->not->toBeNull()
         ->and(acceptedReviewText($this->docs, $this->node))->toBe('🦊 green ');
 });
+
+test('bulk accept/reject (all, by_user, in_range) and stale-generation suggestions work', function (): void {
+    $s1 = $this->first->save($this->node->id, reviewTextEdit(0, 2, '🦊', '🐱'));
+    $s2 = $this->second->save($this->node->id, reviewTextEdit(3, 6, 'red', 'gold'));
+    $s3 = $this->first->save($this->node->id, reviewTextEdit(7, 11, 'blue', 'cyan'));
+
+    $byUser = $this->first->acceptByUser($this->node->id, 0, $s2->authorSubject);
+    expect($byUser)->toHaveCount(1)
+        ->and($byUser[0]->id)->toBe($s2->id)
+        ->and($byUser[0]->state)->toBe('accepted');
+
+    $inRange = $this->first->rejectInRange($this->node->id, 0, 7, 11);
+    expect($inRange)->toHaveCount(1)
+        ->and($inRange[0]->id)->toBe($s3->id)
+        ->and($inRange[0]->state)->toBe('rejected');
+
+    $rest = $this->first->acceptAll($this->node->id, 0);
+    expect($rest)->toHaveCount(1)
+        ->and($rest[0]->id)->toBe($s1->id)
+        ->and($rest[0]->state)->toBe('accepted');
+
+    // Stale generation after restore: simulate generation bump on document
+    $pos = $this->docs->metadata($this->node)->stateVersion;
+    $stale = $this->first->save($this->node->id, new TextSuggestionInput(
+        id: (string) Str::uuid7(),
+        groupId: (string) Str::uuid7(),
+        generation: 0,
+        basePosition: $pos,
+        schemaVersion: 2,
+        targetBlockId: 'review_block',
+        from: 0,
+        to: 0,
+        before: '',
+        after: 'new ',
+    ));
+    $db = app(VaulterDatabase::class)->connection();
+    $db->table('v_documents')->where('id', $stale->documentId)->update(['collab_epoch' => 1]);
+
+    expect($this->first->list($this->node->id))->toBe([]);
+    $withStale = $this->first->list($this->node->id, includeStaleGenerations: true);
+    expect($withStale)->toHaveCount(1)
+        ->and($withStale[0]->id)->toBe($stale->id)
+        ->and($withStale[0]->generationChanged)->toBeTrue();
+
+    expect(fn () => $this->first->accept($this->node->id, $stale->id, 0, $stale->version))
+        ->toThrow(SuggestionConflictException::class);
+
+    $rejectedStale = $this->first->reject($this->node->id, $stale->id, 0, $stale->version);
+    expect($rejectedStale->state)->toBe('rejected')
+        ->and($rejectedStale->conflictReason)->toBe('generation_changed');
+});

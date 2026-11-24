@@ -58,6 +58,7 @@ final class SuggestionResource extends JsonResource
             'journal_command_id' => $s->journalCommandId,
             'journal_state' => $s->journalState,
             'committed_position' => $s->committedPosition,
+            'generation_changed' => $s->generationChanged,
         ];
     }
 }

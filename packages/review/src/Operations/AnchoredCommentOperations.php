@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Vaulter\EditorPro\Review\Operations;
 
+use Carbon\CarbonImmutable;
 use DateTimeImmutable;
 use DateTimeInterface;
 use DateTimeZone;
@@ -100,13 +101,21 @@ final readonly class AnchoredCommentOperations implements DriveExtension
             $ids[] = $root->id;
         }
         $anchorsByComment = $this->anchors->mapByCommentIds(array_values(array_unique($ids)));
+        $statesByComment = $this->anchors->mapStatesByCommentIds(array_values(array_unique($ids)));
 
         $merged = array_map(
-            static fn (CommentSnapshot $c): AnchoredCommentData => new AnchoredCommentData(
-                comment: $c,
-                anchor: $anchorsByComment[$c->id] ?? null,
-                etag: self::commentTag($c),
-            ),
+            static function (CommentSnapshot $c) use ($anchorsByComment, $statesByComment): AnchoredCommentData {
+                $state = $statesByComment[$c->id] ?? null;
+
+                return new AnchoredCommentData(
+                    comment: $c,
+                    anchor: $anchorsByComment[$c->id] ?? null,
+                    etag: self::commentTag($c),
+                    editedAt: $state['editedAt'] ?? null,
+                    archivedAt: $state['archivedAt'] ?? null,
+                    archivedBy: $state['archivedBy'] ?? null,
+                );
+            },
             $comments,
         );
 
@@ -116,17 +125,22 @@ final readonly class AnchoredCommentOperations implements DriveExtension
 
         $filtered = array_values(array_filter(
             $merged,
-            static function (AnchoredCommentData $item) use ($filter, $roots, $anchorsByComment): bool {
+            static function (AnchoredCommentData $item) use ($filter, $roots, $anchorsByComment, $statesByComment): bool {
                 $root = $roots[$item->comment->id] ?? null;
+                $rootState = $root === null ? null : ($statesByComment[$root->id] ?? null);
                 $subject = $root === null ? $item : new AnchoredCommentData(
                     comment: $root,
                     anchor: $anchorsByComment[$root->id] ?? null,
                     etag: self::commentTag($root),
+                    editedAt: $rootState['editedAt'] ?? null,
+                    archivedAt: $rootState['archivedAt'] ?? null,
+                    archivedBy: $rootState['archivedBy'] ?? null,
                 );
 
                 return match ($filter) {
                     CommentFilterStatus::Resolved => $subject->isResolved(),
-                    CommentFilterStatus::Detached => ! $subject->isResolved() && $subject->isDetached(),
+                    CommentFilterStatus::Detached => ! $subject->isResolved() && ! $subject->isArchived() && $subject->isDetached(),
+                    CommentFilterStatus::Archived => $subject->isArchived(),
                     CommentFilterStatus::Active => $subject->isActive(),
                 };
             },
@@ -253,11 +267,16 @@ final readonly class AnchoredCommentOperations implements DriveExtension
 
         $snapshot = self::rowToCommentSnapshot($row);
         $anchor = $this->anchors->findByComment($snapshot->id);
+        $states = $this->anchors->mapStatesByCommentIds([$snapshot->id]);
+        $state = $states[$snapshot->id] ?? null;
 
         return new AnchoredCommentData(
             comment: $snapshot,
             anchor: $anchor,
             etag: self::commentTag($snapshot),
+            editedAt: $state['editedAt'] ?? null,
+            archivedAt: $state['archivedAt'] ?? null,
+            archivedBy: $state['archivedBy'] ?? null,
         );
     }
 
@@ -776,6 +795,167 @@ final readonly class AnchoredCommentOperations implements DriveExtension
             },
             $idempotency,
         );
+    }
+
+    /** Edit a comment's body (author-only) with CAS on the comment version. */
+    public function edit(
+        NodeSnapshot|string|int $node,
+        CommentSnapshot|string|int $comment,
+        string $body,
+        ?int $expectedVersion = null,
+    ): AnchoredCommentData {
+        $nodeId = self::nodeIdOf($node);
+        $commentId = self::commentIdOf($comment);
+        $trimmed = trim($body);
+        if ($trimmed === '') {
+            throw new \InvalidArgumentException('Comment body must not be empty.');
+        }
+
+        $authorizer = new ReviewCommentReplayAuthorizer(
+            context: $this->context,
+            vaulter: $this->vaulter,
+            documentsOptions: $this->documentsOptions,
+            verb: ReviewCommentReplayAuthorizer::VERB_EDIT,
+            nodeId: $nodeId,
+        );
+
+        $idempotency = new IdempotentWrite(
+            codec: new AnchoredCommentReceiptCodec,
+            authorizer: $authorizer,
+            fingerprint: [
+                'node' => $nodeId,
+                'comment' => $commentId,
+                'body' => $trimmed,
+                'expected_version' => $expectedVersion,
+            ],
+        );
+
+        /** @var AnchoredCommentData $result */
+        $result = $this->runner->write(
+            new OperationSpec('review.comments.edit', new ModuleId('review')),
+            $this->context->operation,
+            function () use ($node, $comment, $trimmed, $expectedVersion, $authorizer): AnchoredCommentData {
+                $drive = $this->driveWithoutIdempotency();
+                $this->assertMutableCommentsContext($drive);
+
+                $existing = $this->find($node, $comment);
+                $abilities = $drive->nodes()->abilities($existing->comment->nodeId)->flags;
+                if (($abilities[Ability::Comment->value] ?? false) !== true) {
+                    throw PermissionDeniedException::forAbility(Ability::Comment->value);
+                }
+                $actor = $this->context->actor->ref();
+                if (! $this->context->actor->isSystem() && ($actor->type !== $existing->comment->authorType || Identity::stringify($actor->id) !== $existing->comment->authorId)) {
+                    throw PermissionDeniedException::forAction('comment.edit');
+                }
+                $authorizer->provedByAuthorship();
+
+                $targetVersion = $expectedVersion ?? $existing->comment->version;
+                $updated = $this->lookup->connection()
+                    ->table($this->lookup->table('node_comments'))
+                    ->where('id', $existing->comment->id)
+                    ->where('node_id', $existing->comment->nodeId)
+                    ->where('version', $targetVersion)
+                    ->update([
+                        'body' => $trimmed,
+                        'version' => $targetVersion + 1,
+                    ]);
+
+                if ($updated === 0) {
+                    throw StaleWriteException::of('documents.comment', $existing->comment->id);
+                }
+
+                $this->anchors->upsertCommentState(
+                    tenantId: $drive->snapshot()->tenantId ?? '',
+                    commentId: $existing->comment->id,
+                    editedAt: CarbonImmutable::now(),
+                    touchEditedAt: true,
+                );
+
+                return $this->find($node, $comment);
+            },
+            $idempotency,
+        );
+
+        return $result;
+    }
+
+    /** Archive or unarchive a comment discussion with CAS on the comment version. */
+    public function archive(
+        NodeSnapshot|string|int $node,
+        CommentSnapshot|string|int $comment,
+        bool $archived = true,
+        ?int $expectedVersion = null,
+    ): AnchoredCommentData {
+        $nodeId = self::nodeIdOf($node);
+        $commentId = self::commentIdOf($comment);
+        $authorizer = new ReviewCommentReplayAuthorizer(
+            context: $this->context,
+            vaulter: $this->vaulter,
+            documentsOptions: $this->documentsOptions,
+            verb: ReviewCommentReplayAuthorizer::VERB_ARCHIVE,
+            nodeId: $nodeId,
+        );
+
+        $idempotency = new IdempotentWrite(
+            codec: new AnchoredCommentReceiptCodec,
+            authorizer: $authorizer,
+            fingerprint: [
+                'node' => $nodeId,
+                'comment' => $commentId,
+                'archived' => $archived,
+                'expected_version' => $expectedVersion,
+            ],
+        );
+
+        /** @var AnchoredCommentData $result */
+        $result = $this->runner->write(
+            new OperationSpec('review.comments.archive', new ModuleId('review')),
+            $this->context->operation,
+            function () use ($node, $comment, $archived, $expectedVersion): AnchoredCommentData {
+                $drive = $this->driveWithoutIdempotency();
+                $this->assertMutableCommentsContext($drive);
+
+                $existing = $this->find($node, $comment);
+                $abilities = $drive->nodes()->abilities($existing->comment->nodeId)->flags;
+                if (($abilities[Ability::Comment->value] ?? false) !== true) {
+                    throw PermissionDeniedException::forAbility(Ability::Comment->value);
+                }
+                $actor = $this->context->actor->ref();
+                $isAuthor = ! $this->context->actor->isSystem()
+                    && $actor->type === $existing->comment->authorType
+                    && Identity::stringify($actor->id) === $existing->comment->authorId;
+                if (! $isAuthor && ($abilities[Ability::Edit->value] ?? false) !== true) {
+                    throw PermissionDeniedException::forAbility(Ability::Edit->value);
+                }
+
+                $targetVersion = $expectedVersion ?? $existing->comment->version;
+                $updated = $this->lookup->connection()
+                    ->table($this->lookup->table('node_comments'))
+                    ->where('id', $existing->comment->id)
+                    ->where('node_id', $existing->comment->nodeId)
+                    ->where('version', $targetVersion)
+                    ->update([
+                        'version' => $targetVersion + 1,
+                    ]);
+
+                if ($updated === 0) {
+                    throw StaleWriteException::of('documents.comment', $existing->comment->id);
+                }
+
+                $this->anchors->upsertCommentState(
+                    tenantId: $drive->snapshot()->tenantId ?? '',
+                    commentId: $existing->comment->id,
+                    archivedAt: $archived ? CarbonImmutable::now() : null,
+                    archivedBy: $archived ? Identity::stringify($actor->id) : null,
+                    touchArchived: true,
+                );
+
+                return $this->find($node, $comment);
+            },
+            $idempotency,
+        );
+
+        return $result;
     }
 
     public static function commentTag(CommentSnapshot $comment): string

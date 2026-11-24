@@ -605,3 +605,59 @@ it('executes O(1)/O(page) SQL queries in find() and filtered list() regardless o
         $conn->disableQueryLog();
     }
 });
+
+test('comment.edit is author-only with CAS and discussion.archive moves thread to archived bucket', function (): void {
+    $owner = AccessTestHelpers::user(1);
+    $other = AccessTestHelpers::user(2);
+    $storage = AccessTestHelpers::storage();
+    AccessTestHelpers::grant($storage->rootNode, RoleRegistry::OWNER, subjectId: 1);
+    AccessTestHelpers::grant($storage->rootNode, RoleRegistry::OWNER, subjectId: 2);
+
+    $drive = app(Vaulter::class)->drive($storage)->actingAs($owner);
+    $docs = app(DocumentsManager::class)->in($drive);
+    $review = app(ReviewManager::class)->comments($drive);
+    $doc = $docs->create('edit-archive-comments', 'vaulter/rich-text', makeTextBlockDoc('Edit and archive test body'));
+
+    $created = $review->add($doc, new AddAnchoredCommentInput(
+        body: 'Original body',
+        anchor: new CommentAnchorInput(
+            generation: 0,
+            sourcePosition: 1,
+            schemaVersion: 2,
+            blockId: 'blk_p42',
+            selectorKind: SelectorKind::SnapshotUtf16,
+            selectorPayload: ['from_utf16' => 0, 'to_utf16' => 4],
+            quoteText: 'Edit',
+        ),
+    ));
+
+    $edited = $review->edit($doc, $created->comment->id, 'Updated body', $created->comment->version);
+    expect($edited->comment->body)->toBe('Updated body')
+        ->and($edited->comment->version)->toBe($created->comment->version + 1)
+        ->and($edited->editedAt)->not->toBeNull();
+
+    // Another user cannot edit
+    $otherDrive = app(Vaulter::class)->drive($storage)->actingAs($other);
+    $otherReview = app(ReviewManager::class)->comments($otherDrive);
+    expect(fn () => $otherReview->edit($doc, $created->comment->id, 'Hijack', $edited->comment->version))
+        ->toThrow(\Vaulter\Drive\Exceptions\Access\PermissionDeniedException::class);
+
+    // Archive and filter
+    $archived = $review->archive($doc, $created->comment->id, true, $edited->comment->version);
+    expect($archived->isArchived())->toBeTrue()
+        ->and($archived->isActive())->toBeFalse()
+        ->and($archived->archivedBy)->not->toBeNull();
+
+    $archivedList = $review->list($doc, CommentFilterStatus::Archived);
+    expect(array_map(static fn ($item): string => $item->comment->id, $archivedList->items))
+        ->toContain($created->comment->id);
+
+    $activeList = $review->list($doc, CommentFilterStatus::Active);
+    expect(array_map(static fn ($item): string => $item->comment->id, $activeList->items))
+        ->not->toContain($created->comment->id);
+
+    // Unarchive
+    $unarchived = $review->archive($doc, $created->comment->id, false, $archived->comment->version);
+    expect($unarchived->isArchived())->toBeFalse()
+        ->and($unarchived->isActive())->toBeTrue();
+});

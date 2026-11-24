@@ -8,7 +8,7 @@ export type SelectorKind = 'snapshot_utf16' | 'yjs_relative'
 
 export type AnchorState = 'attached' | 'detached' | 'historical'
 
-export type CommentFilterStatus = 'all' | 'active' | 'resolved' | 'detached'
+export type CommentFilterStatus = 'all' | 'active' | 'resolved' | 'detached' | 'archived'
 
 export interface SnapshotUtf16Payload {
   schema: 1
@@ -76,6 +76,9 @@ export interface AnchoredComment {
   anchor: CommentAnchor | null
   resolved_at: string | null
   resolved_by: string | null
+  edited_at?: string | null
+  archived_at?: string | null
+  archived_by?: string | null
   version: number
   etag: string
   created_at: string
@@ -343,6 +346,7 @@ export interface DocumentSuggestion {
   journal_command_id: string | null
   journal_state: string | null
   committed_position: number | null
+  generation_changed?: boolean
 }
 
 export interface SaveSuggestionPayload {
@@ -374,4 +378,37 @@ export interface DecideGroupSuggestionsPayload {
   generation: number
   expected_versions: Record<string, number>
   command_id?: string | null
+}
+
+export type BulkSuggestionScope = 'all' | 'by_user' | 'in_range'
+
+export interface BulkDecideSuggestionsPayload {
+  generation: number
+  scope: BulkSuggestionScope
+  author_subject?: string | null
+  from?: number | null
+  to?: number | null
+  command_id?: string | null
+}
+
+export interface DocumentRevisionSummary {
+  id: string
+  number: number
+  label: string | null
+  is_autosave: boolean
+  keep_forever: boolean
+  is_head: boolean
+  created_by?: string | null
+  created_at: string
+}
+
+export type CompareLayout = 'inline' | 'side-by-side'
+
+export interface CollaborationOverlayEventLike {
+  kind: 'review' | 'comments'
+}
+
+export interface OverlayEventsSource {
+  overlayEvents: (handler: (event: CollaborationOverlayEventLike) => void) => () => void
+  invalidateOverlay?: (kind: 'review' | 'comments') => void
 }

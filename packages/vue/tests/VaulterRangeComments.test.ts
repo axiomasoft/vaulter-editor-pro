@@ -247,4 +247,66 @@ describe('VaulterRangeComments sidebar', () => {
     expect(wrapper.find('[data-comment-id="c-old-gen"] [data-action="reanchor"]').exists()).toBe(true)
     wrapper.unmount()
   })
+
+  it('supports creating, editing, archiving, deleting comments and live overlayEvents refresh', async () => {
+    const initial = makeAnchoredComment({ id: 'c-1', body: 'Initial' })
+    const edited = makeAnchoredComment({ id: 'c-1', body: 'Edited', edited_at: '2026-06-01T00:05:00Z' })
+    const archived = makeAnchoredComment({ id: 'c-1', body: 'Edited', archived_at: '2026-06-01T00:06:00Z', archived_by: 'user:1' })
+    const created = makeAnchoredComment({ id: 'c-2', body: 'New root' })
+
+    let overlayHandler: ((e: { kind: 'review' | 'comments' }) => void) | null = null
+    const overlay = {
+      overlayEvents: (fn: (e: { kind: 'review' | 'comments' }) => void) => {
+        overlayHandler = fn
+        return () => { overlayHandler = null }
+      },
+      invalidateOverlay: vi.fn(),
+    }
+
+    const client = makeMockClient([initial])
+    client.comments.add = vi.fn().mockResolvedValue(created)
+    client.comments.edit = vi.fn().mockResolvedValue(edited)
+    client.comments.archive = vi.fn().mockResolvedValue(archived)
+    client.comments.remove = vi.fn().mockResolvedValue(undefined)
+
+    const wrapper = mount(VaulterRangeComments, {
+      props: {
+        nodeId: 'node-1',
+        actualityContext: { currentGeneration: 1 },
+        clientOptions: { client, overlay },
+      },
+    })
+    await flushPromises()
+
+    await wrapper.get('.vaulter-range-comments__create-input').setValue('New root')
+    await wrapper.get('[data-testid="create-comment-form"]').trigger('submit')
+    await flushPromises()
+    expect(client.comments.add).toHaveBeenCalledTimes(1)
+    expect(overlay.invalidateOverlay).toHaveBeenCalledWith('comments')
+
+    await wrapper.get('[data-comment-id="c-1"] [data-action="edit"]').trigger('click')
+    await wrapper.get('[data-testid="edit-comment-form"] input').setValue('Edited')
+    await wrapper.get('[data-testid="edit-comment-form"]').trigger('submit')
+    await flushPromises()
+    expect(client.comments.edit).toHaveBeenCalledWith('node-1', 'c-1', 'Edited', initial.etag, undefined)
+
+    await wrapper.get('[data-comment-id="c-1"] [data-action="archive"]').trigger('click')
+    await flushPromises()
+    expect(client.comments.archive).toHaveBeenCalledWith('node-1', 'c-1', true, edited.etag, undefined)
+
+    await wrapper.get('[data-filter="archived"]').trigger('click')
+    expect(wrapper.findAll('[data-comment-id="c-1"]')).toHaveLength(1)
+
+    await wrapper.get('[data-comment-id="c-1"] [data-action="delete"]').trigger('click')
+    await flushPromises()
+    expect(client.comments.remove).toHaveBeenCalledTimes(1)
+
+    // Live overlayEvents refresh
+    const listCallsBefore = (client.comments.list as ReturnType<typeof vi.fn>).mock.calls.length
+    ;(overlayHandler as ((e: { kind: 'review' | 'comments' }) => void) | null)?.({ kind: 'comments' })
+    await flushPromises()
+    expect((client.comments.list as ReturnType<typeof vi.fn>).mock.calls.length).toBeGreaterThan(listCallsBefore)
+
+    wrapper.unmount()
+  })
 })

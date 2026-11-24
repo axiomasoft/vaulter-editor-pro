@@ -7,6 +7,7 @@ import { EditorState, Plugin, PluginKey } from '@tiptap/pm/state'
 import { Decoration, DecorationSet, EditorView } from '@tiptap/pm/view'
 import { computed, onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vue'
 import { computeStructuralDiff, type StructuralDiffResult } from '../compare/structuralDiff'
+import type { CompareLayout, DocumentRevisionSummary, RevisionPin } from '../types/review'
 
 const props = withDefaults(
   defineProps<{
@@ -16,16 +17,29 @@ const props = withDefaults(
     toContent?: Record<string, unknown> | null
     mode?: 'compare' | 'preview'
     extensions?: Extensions
+    nodeId?: string
+    revisions?: DocumentRevisionSummary[]
+    pins?: RevisionPin[]
+    initialLayout?: CompareLayout
   }>(),
   {
     toContent: null,
     mode: 'compare',
     extensions: undefined,
+    nodeId: undefined,
+    revisions: () => [],
+    pins: () => [],
+    initialLayout: 'inline',
   },
 )
 
 const emit = defineEmits<{
   compared: [result: StructuralDiffResult]
+  layoutChange: [layout: CompareLayout]
+  pin: [revisionId: string]
+  unpin: [revisionId: string]
+  restore: [revisionId: string]
+  selectRevision: [revisionId: string]
 }>()
 
 const ReviewBlockId = Extension.create({
@@ -227,10 +241,21 @@ function buildCompareDecorations(doc: ProseMirrorNode, diff: StructuralDiffResul
 }
 
 const mountEl = ref<HTMLElement | null>(null)
+const fromMountEl = ref<HTMLElement | null>(null)
 const view = shallowRef<EditorView | null>(null)
+const fromView = shallowRef<EditorView | null>(null)
+const layout = ref<CompareLayout>(props.initialLayout)
 const diffResult = shallowRef<StructuralDiffResult | null>(null)
 const fromDoc = shallowRef<ProseMirrorNode | null>(null)
 const toDoc = shallowRef<ProseMirrorNode | null>(null)
+
+const pinnedIds = computed(() => new Set(props.pins.map((p) => p.revision_id)))
+
+function setLayout(next: CompareLayout): void {
+  if (layout.value === next) return
+  layout.value = next
+  emit('layoutChange', next)
+}
 
 const insertCount = computed(() => diffResult.value?.inlineSpans.filter((s) => s.kind === 'insert').length ?? 0)
 const deleteCount = computed(() => diffResult.value?.inlineSpans.filter((s) => s.kind === 'delete').length ?? 0)
@@ -286,6 +311,24 @@ function renderIsolatedView(): void {
     })
   }
 
+  if (layout.value === 'side-by-side' && props.mode === 'compare' && fromMountEl.value) {
+    const fromState = EditorState.create({ schema, doc: parsedFrom })
+    if (fromView.value) {
+      fromView.value.updateState(fromState)
+    } else {
+      fromView.value = new EditorView(fromMountEl.value, {
+        state: fromState,
+        editable: () => false,
+        dispatchTransaction() {
+          // Read-only base pane.
+        },
+      })
+    }
+  } else if (fromView.value) {
+    fromView.value.destroy()
+    fromView.value = null
+  }
+
   emit('compared', computedDiff)
 }
 
@@ -294,7 +337,7 @@ onMounted(() => {
 })
 
 watch(
-  () => [props.fromContent, props.toContent, props.mode],
+  () => [props.fromContent, props.toContent, props.mode, layout.value],
   () => {
     renderIsolatedView()
   },
@@ -304,10 +347,15 @@ watch(
 onBeforeUnmount(() => {
   view.value?.destroy()
   view.value = null
+  fromView.value?.destroy()
+  fromView.value = null
 })
 
 defineExpose({
   view,
+  fromView,
+  layout,
+  setLayout,
   diffResult,
   fromDoc,
   toDoc,
@@ -319,13 +367,75 @@ defineExpose({
 </script>
 
 <template>
-  <div class="vaulter-history-compare" :data-mode="mode" data-readonly="true">
+  <div class="vaulter-history-compare" :data-mode="mode" :data-layout="layout" data-readonly="true">
+    <div v-if="mode === 'compare'" class="vaulter-history-compare__toolbar">
+      <button
+        type="button"
+        data-layout-option="inline"
+        :aria-pressed="layout === 'inline'"
+        @click="setLayout('inline')"
+      >
+        Inline
+      </button>
+      <button
+        type="button"
+        data-layout-option="side-by-side"
+        :aria-pressed="layout === 'side-by-side'"
+        @click="setLayout('side-by-side')"
+      >
+        Side-by-side
+      </button>
+    </div>
     <div v-if="mode === 'compare' && diffResult" class="vaulter-history-compare__summary">
       <span class="vaulter-history-compare__stat" data-stat="inserts">+{{ insertCount }}</span>
       <span class="vaulter-history-compare__stat" data-stat="deletes">-{{ deleteCount }}</span>
       <span class="vaulter-history-compare__stat" data-stat="marks">~marks: {{ markChangeCount }}</span>
       <span class="vaulter-history-compare__stat" data-stat="attrs">attrs: {{ attrChangeCount }}</span>
     </div>
-    <div ref="mountEl" class="vaulter-history-compare__surface" />
+    <div class="vaulter-history-compare__body">
+      <aside v-if="revisions.length > 0" class="vaulter-history-compare__timeline" data-testid="revision-timeline">
+        <ul>
+          <li
+            v-for="rev in revisions"
+            :key="rev.id"
+            :data-revision-id="rev.id"
+            :data-pinned="pinnedIds.has(rev.id) ? 'true' : 'false'"
+          >
+            <span>#{{ rev.number }} {{ rev.label || (rev.is_autosave ? 'Autosave' : 'Revision') }}</span>
+            <button type="button" data-action="select-revision" @click="emit('selectRevision', rev.id)">
+              Compare
+            </button>
+            <button
+              v-if="pinnedIds.has(rev.id)"
+              type="button"
+              data-action="unpin"
+              @click="emit('unpin', rev.id)"
+            >
+              Unpin
+            </button>
+            <button
+              v-else
+              type="button"
+              data-action="pin"
+              @click="emit('pin', rev.id)"
+            >
+              Pin
+            </button>
+            <button type="button" data-action="restore" @click="emit('restore', rev.id)">
+              Restore
+            </button>
+          </li>
+        </ul>
+      </aside>
+      <div class="vaulter-history-compare__panes">
+        <div
+          v-if="layout === 'side-by-side' && mode === 'compare'"
+          ref="fromMountEl"
+          class="vaulter-history-compare__surface vaulter-history-compare__surface--base"
+          data-pane="base"
+        />
+        <div ref="mountEl" class="vaulter-history-compare__surface" data-pane="target" />
+      </div>
+    </div>
   </div>
 </template>

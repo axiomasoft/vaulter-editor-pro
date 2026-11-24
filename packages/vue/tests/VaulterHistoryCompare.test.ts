@@ -205,4 +205,51 @@ describe('VaulterHistoryCompare (REVIEW-HISTORY)', () => {
     expect(compareWrapper.find('[data-diff-kind="attr_change"][data-attr="align"]').exists()).toBe(true)
     compareWrapper.unmount()
   })
+
+  it('toggles inline | side-by-side layout and renders revision timeline with pin/unpin/restore', async () => {
+    const docA = { type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text: 'Before' }] }] }
+    const docB = { type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text: 'After' }] }] }
+
+    const wrapper = mount(VaulterHistoryCompare, {
+      props: {
+        fromContent: docA,
+        toContent: docB,
+        mode: 'compare',
+        revisions: [
+          { id: 'rev-1', number: 1, label: 'Initial', is_autosave: false, keep_forever: true, is_head: false, created_at: '2026-06-01T00:00:00Z' },
+          { id: 'rev-2', number: 2, label: null, is_autosave: true, keep_forever: false, is_head: true, created_at: '2026-06-01T01:00:00Z' },
+        ],
+        pins: [
+          {
+            revision_id: 'rev-1',
+            document_id: 'doc-1',
+            pin_reason: 'manual_version',
+            source_generation: 1,
+            source_position: 1,
+            pinned_by_subject: 'user:1',
+            pinned_at: '2026-06-01T00:00:00Z',
+            expires_at: null,
+          },
+        ],
+      },
+    })
+
+    expect(wrapper.find('[data-testid="revision-timeline"]').exists()).toBe(true)
+    expect(wrapper.find('[data-pane="base"]').exists()).toBe(false)
+
+    await wrapper.get('[data-layout-option="side-by-side"]').trigger('click')
+    expect(wrapper.attributes('data-layout')).toBe('side-by-side')
+    expect(wrapper.find('[data-pane="base"]').exists()).toBe(true)
+    expect(wrapper.find('[data-pane="target"]').exists()).toBe(true)
+
+    await wrapper.get('[data-revision-id="rev-1"] [data-action="unpin"]').trigger('click')
+    await wrapper.get('[data-revision-id="rev-2"] [data-action="pin"]').trigger('click')
+    await wrapper.get('[data-revision-id="rev-1"] [data-action="restore"]').trigger('click')
+
+    expect(wrapper.emitted('unpin')).toEqual([['rev-1']])
+    expect(wrapper.emitted('pin')).toEqual([['rev-2']])
+    expect(wrapper.emitted('restore')).toEqual([['rev-1']])
+
+    wrapper.unmount()
+  })
 })

@@ -36,8 +36,9 @@ final readonly class ReviewPreconditions
         string $nodeId,
         string $commentId,
         bool $delete,
+        bool $authorOnly = false,
     ): int {
-        return $this->evaluate($request, $context, $nodeId, $commentId, forAnchor: false, delete: $delete);
+        return $this->evaluate($request, $context, $nodeId, $commentId, forAnchor: false, delete: $delete, authorOnly: $authorOnly);
     }
 
     public function expectedAnchorVersion(
@@ -46,7 +47,7 @@ final readonly class ReviewPreconditions
         string $nodeId,
         string $commentId,
     ): int {
-        return $this->evaluate($request, $context, $nodeId, $commentId, forAnchor: true, delete: false);
+        return $this->evaluate($request, $context, $nodeId, $commentId, forAnchor: true, delete: false, authorOnly: false);
     }
 
     private function evaluate(
@@ -56,10 +57,11 @@ final readonly class ReviewPreconditions
         string $commentId,
         bool $forAnchor,
         bool $delete,
+        bool $authorOnly = false,
     ): int {
         $held = null;
         try {
-            $item = $this->authorizeAndFetch($context, $nodeId, $commentId, $delete);
+            $item = $this->authorizeAndFetch($context, $nodeId, $commentId, $delete, $authorOnly);
             if ($forAnchor && $item->anchor !== null) {
                 $currentTag = $item->anchor->etag;
                 $held = $item->anchor->version;
@@ -87,6 +89,7 @@ final readonly class ReviewPreconditions
         string $nodeId,
         string $commentId,
         bool $delete,
+        bool $authorOnly = false,
     ): AnchoredCommentData {
         $drive = ReviewDriveHandle::fromContext($this->vaulter, $context);
         if ($drive->snapshot()->status !== DriveStatus::Active) {
@@ -106,6 +109,9 @@ final readonly class ReviewPreconditions
         $needed = $delete ? Ability::Manage : Ability::Edit;
         if (! $delete && ! ($abilities[Ability::Comment->value] ?? false)) {
             throw PermissionDeniedException::forAbility(Ability::Comment->value);
+        }
+        if ($authorOnly && ! $isAuthor) {
+            throw PermissionDeniedException::forAction('comment.edit');
         }
         if (! $isAuthor && ! ($abilities[$needed->value] ?? false)) {
             throw PermissionDeniedException::forAbility($needed->value);

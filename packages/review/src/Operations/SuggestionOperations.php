@@ -109,7 +109,7 @@ final readonly class SuggestionOperations implements DriveExtension
     }
 
     /** @return list<TextSuggestion> */
-    public function list(int|string $nodeId, ?string $proposalId = null): array
+    public function list(int|string $nodeId, ?string $proposalId = null, bool $includeStaleGenerations = false): array
     {
         $drive = ReviewDriveHandle::fromContext($this->vaulter, $this->context);
         $nodeSnap = $drive->nodes()->find($nodeId);
@@ -131,7 +131,56 @@ final readonly class SuggestionOperations implements DriveExtension
             $query->where('proposal_id', $proposalId);
         }
 
-        return $this->suggestions->read($query);
+        $current = $this->suggestions->read($query);
+        if (! $includeStaleGenerations || $generation <= 0) {
+            return $current;
+        }
+
+        $staleQuery = $this->suggestions->query($this->lookup->connection())
+            ->where('document_id', $documentId)
+            ->where('generation', '<', $generation)
+            ->where('state', 'open')
+            ->orderBy('generation');
+        if ($proposalId !== null) {
+            $staleQuery->where('proposal_id', $proposalId);
+        }
+
+        $stale = array_map(
+            static fn (TextSuggestion $s): TextSuggestion => new TextSuggestion(
+                id: $s->id,
+                documentId: $s->documentId,
+                proposalId: $s->proposalId,
+                groupId: $s->groupId,
+                parentId: $s->parentId,
+                generation: $s->generation,
+                basePosition: $s->basePosition,
+                schemaVersion: $s->schemaVersion,
+                authorSubject: $s->authorSubject,
+                kind: $s->kind,
+                targetBlockId: $s->targetBlockId,
+                from: $s->from,
+                to: $s->to,
+                before: $s->before,
+                after: $s->after,
+                state: $s->state,
+                conflicted: $s->conflicted,
+                version: $s->version,
+                receiptId: $s->receiptId,
+                decidedBySubject: $s->decidedBySubject,
+                decidedAt: $s->decidedAt,
+                targetSelector: $s->targetSelector,
+                payload: $s->payload,
+                conflictReason: 'generation_changed',
+                conflictWithId: $s->conflictWithId,
+                journalCommandId: $s->journalCommandId,
+                journalState: $s->journalState,
+                committedPosition: $s->committedPosition,
+                generationChanged: true,
+            ),
+            $this->suggestions->read($staleQuery),
+        );
+
+        return [...$current, ...$stale];
     }
 
     public function find(int|string $nodeId, string $id): TextSuggestion
@@ -202,7 +251,193 @@ final readonly class SuggestionOperations implements DriveExtension
     /** @param list<string>|null $ifMatch */
     public function reject(int|string $nodeId, string $id, int $generation, ?int $expectedVersion, ?string $commandId = null, ?array $ifMatch = null): TextSuggestion
     {
+        $drive = ReviewDriveHandle::fromContext($this->vaulter, $this->context);
+        $nodeSnap = $drive->nodes()->find($nodeId);
+        $docMeta = $this->documents->in($drive)->metadata($nodeSnap);
+        if ($generation < $docMeta->generation) {
+            return $this->rejectStaleGeneration($nodeSnap->id, $docMeta->documentId, $id, $generation, $expectedVersion ?? 0);
+        }
+
         return $this->decide($nodeId, $generation, [$id => $expectedVersion ?? 0], 'rejected', commandId: $commandId, ifMatch: $ifMatch)[0];
+    }
+
+    /**
+     * Bulk accept all open, non-proposal suggestions in the current generation.
+     *
+     * @return list<TextSuggestion>
+     */
+    public function acceptAll(int|string $nodeId, int $generation, ?string $commandId = null): array
+    {
+        return $this->decideBulk($nodeId, $generation, 'accepted', commandId: $commandId);
+    }
+
+    /**
+     * Bulk reject all open, non-proposal suggestions in the current generation.
+     *
+     * @return list<TextSuggestion>
+     */
+    public function rejectAll(int|string $nodeId, int $generation, ?string $commandId = null): array
+    {
+        return $this->decideBulk($nodeId, $generation, 'rejected', commandId: $commandId);
+    }
+
+    /**
+     * Bulk accept open, non-proposal suggestions authored by a specific subject.
+     *
+     * @return list<TextSuggestion>
+     */
+    public function acceptByUser(int|string $nodeId, int $generation, string $authorSubject, ?string $commandId = null): array
+    {
+        return $this->decideBulk($nodeId, $generation, 'accepted', authorSubject: $authorSubject, commandId: $commandId);
+    }
+
+    /**
+     * Bulk reject open, non-proposal suggestions authored by a specific subject.
+     *
+     * @return list<TextSuggestion>
+     */
+    public function rejectByUser(int|string $nodeId, int $generation, string $authorSubject, ?string $commandId = null): array
+    {
+        return $this->decideBulk($nodeId, $generation, 'rejected', authorSubject: $authorSubject, commandId: $commandId);
+    }
+
+    /**
+     * Bulk accept open, non-proposal suggestions overlapping `[from, to]`.
+     *
+     * @return list<TextSuggestion>
+     */
+    public function acceptInRange(int|string $nodeId, int $generation, int $from, int $to, ?string $commandId = null): array
+    {
+        return $this->decideBulk($nodeId, $generation, 'accepted', from: $from, to: $to, commandId: $commandId);
+    }
+
+    /**
+     * Bulk reject open, non-proposal suggestions overlapping `[from, to]`.
+     *
+     * @return list<TextSuggestion>
+     */
+    public function rejectInRange(int|string $nodeId, int $generation, int $from, int $to, ?string $commandId = null): array
+    {
+        return $this->decideBulk($nodeId, $generation, 'rejected', from: $from, to: $to, commandId: $commandId);
+    }
+
+    /**
+     * @param  'accepted'|'rejected'  $decision
+     * @return list<TextSuggestion>
+     */
+    private function decideBulk(
+        int|string $nodeId,
+        int $generation,
+        string $decision,
+        ?string $authorSubject = null,
+        ?int $from = null,
+        ?int $to = null,
+        ?string $commandId = null,
+    ): array {
+        $candidates = array_values(array_filter(
+            $this->list($nodeId),
+            static function (TextSuggestion $s) use ($generation, $authorSubject, $from, $to): bool {
+                if ($s->generation !== $generation || $s->state !== 'open' || $s->isPendingJournal() || $s->proposalId !== null) {
+                    return false;
+                }
+                if ($authorSubject !== null && $s->authorSubject !== $authorSubject) {
+                    return false;
+                }
+                if ($from !== null && $to !== null && ($s->to < $from || $s->from > $to)) {
+                    return false;
+                }
+
+                return true;
+            },
+        ));
+
+        if ($candidates === []) {
+            return [];
+        }
+
+        $expectedVersions = [];
+        foreach ($candidates as $candidate) {
+            $expectedVersions[$candidate->id] = $candidate->version;
+        }
+
+        return $this->decide($nodeId, $generation, $expectedVersions, $decision, commandId: $commandId);
+    }
+
+    private function rejectStaleGeneration(string $nodeId, string $documentId, string $id, int $generation, int $expectedVersion): TextSuggestion
+    {
+        $this->assertUuid($id);
+        $subject = $this->subject();
+
+        return $this->database->transaction(function () use ($nodeId, $documentId, $id, $generation, $expectedVersion, $subject): TextSuggestion {
+            $drive = $this->driveWithoutIdempotency();
+            $nodeSnap = $drive->nodes()->find($nodeId);
+            $abilities = $drive->nodes()->abilities($nodeSnap)->flags;
+            if (($abilities[Ability::Edit->value] ?? false) !== true) {
+                throw PermissionDeniedException::forAbility(Ability::Edit->value);
+            }
+
+            $conn = $this->lookup->connection();
+            $query = $this->suggestions->query($conn)
+                ->where('id', $id)
+                ->where('document_id', $documentId)
+                ->where('generation', $generation);
+            $rows = $this->suggestions->read((clone $query)->lockForUpdate());
+            $existing = $rows[0] ?? null;
+
+            if ($existing === null || $existing->state !== 'open' || $existing->version !== $expectedVersion) {
+                throw SuggestionConflictException::because('The stale-generation suggestion could not be rejected.', 'generation_changed');
+            }
+
+            $this->suggestions->update($query, $existing, [
+                'state' => 'rejected',
+                'decided_by_subject' => $subject,
+                'decided_at' => now()->utc()->toDateTimeString(),
+                'receipt_id' => null,
+                'target_selector' => SuggestionRepository::selector(
+                    $existing->from,
+                    $existing->to,
+                    $existing->parentId,
+                    true,
+                    $existing->isStructural() ? $existing->targetSelector : [],
+                    'generation_changed',
+                    $existing->conflictWithId,
+                ),
+            ]);
+
+            $fresh = $this->suggestions->read($query);
+
+            return new TextSuggestion(
+                id: $fresh[0]->id,
+                documentId: $fresh[0]->documentId,
+                proposalId: $fresh[0]->proposalId,
+                groupId: $fresh[0]->groupId,
+                parentId: $fresh[0]->parentId,
+                generation: $fresh[0]->generation,
+                basePosition: $fresh[0]->basePosition,
+                schemaVersion: $fresh[0]->schemaVersion,
+                authorSubject: $fresh[0]->authorSubject,
+                kind: $fresh[0]->kind,
+                targetBlockId: $fresh[0]->targetBlockId,
+                from: $fresh[0]->from,
+                to: $fresh[0]->to,
+                before: $fresh[0]->before,
+                after: $fresh[0]->after,
+                state: $fresh[0]->state,
+                conflicted: $fresh[0]->conflicted,
+                version: $fresh[0]->version,
+                receiptId: $fresh[0]->receiptId,
+                decidedBySubject: $fresh[0]->decidedBySubject,
+                decidedAt: $fresh[0]->decidedAt,
+                targetSelector: $fresh[0]->targetSelector,
+                payload: $fresh[0]->payload,
+                conflictReason: 'generation_changed',
+                conflictWithId: $fresh[0]->conflictWithId,
+                journalCommandId: $fresh[0]->journalCommandId,
+                journalState: $fresh[0]->journalState,
+                committedPosition: $fresh[0]->committedPosition,
+                generationChanged: true,
+            );
+        });
     }
 
     /**
@@ -333,7 +568,7 @@ final readonly class SuggestionOperations implements DriveExtension
         return $this->writeSnapshot($this->decisionSpec($verb), $nodeSnap->id, $fingerprint, function (LockedDocumentMutation $locked) use ($generation, $versions, $groupId, $decision, $ifMatch): array {
             $state = $locked->snapshot();
             if ($state->generation !== $generation) {
-                throw new SuggestionConflictException('The suggestion generation is stale.');
+                throw SuggestionConflictException::because('The suggestion generation is stale.', 'generation_changed');
             }
             $subject = $this->subject();
             $query = $this->suggestions->forDocument($locked->connection(), $state->documentId, $generation)->lockForUpdate();
@@ -401,7 +636,7 @@ final readonly class SuggestionOperations implements DriveExtension
                     throw SuggestionConflictException::because('Document write mode changed from journal.', 'write_mode_changed');
                 }
                 if ($meta->generation !== $generation) {
-                    throw new SuggestionConflictException('The suggestion generation is stale.');
+                    throw SuggestionConflictException::because('The suggestion generation is stale.', 'generation_changed');
                 }
                 $this->capabilitiesResolver->assertDocumentSupported($meta->type, $meta->schemaVersion);
 

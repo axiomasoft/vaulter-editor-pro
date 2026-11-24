@@ -96,7 +96,7 @@ final class EditorProReviewModule implements ExtensionPlugin, WithConfiguration,
     #[Override]
     public function tableNouns(): array
     {
-        return ['document_revision_pins', 'document_comment_anchors', 'document_suggestions'];
+        return ['document_revision_pins', 'document_comment_anchors', 'document_suggestions', 'document_comment_states'];
     }
 
     #[Override]

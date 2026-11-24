@@ -4,6 +4,9 @@ declare(strict_types=1);
 
 namespace Vaulter\EditorPro\Review\Repositories;
 
+use DateTimeImmutable;
+use DateTimeInterface;
+use DateTimeZone;
 use Illuminate\Support\Carbon;
 use Packman\Attributes\Internal;
 use Vaulter\EditorPro\Review\Data\CommentAnchorData;
@@ -94,6 +97,85 @@ final readonly class CommentAnchorRepository
         }
 
         return $mapped;
+    }
+
+    /**
+     * @param  list<string>  $commentIds
+     * @return array<string, array{editedAt: ?DateTimeImmutable, archivedAt: ?DateTimeImmutable, archivedBy: ?string}>
+     */
+    public function mapStatesByCommentIds(array $commentIds): array
+    {
+        $validIds = array_values(array_filter(
+            $commentIds,
+            fn (string $id): bool => $this->lookup->fitsKey($id),
+        ));
+
+        if ($validIds === []) {
+            return [];
+        }
+
+        $mapped = [];
+        $rows = $this->lookup->connection()
+            ->table($this->lookup->table('document_comment_states'))
+            ->whereIn('comment_id', $validIds)
+            ->get(['comment_id', 'edited_at', 'archived_at', 'archived_by_subject']);
+
+        foreach ($rows as $row) {
+            /** @var int|string|null $rawCommentId */
+            $rawCommentId = $row->comment_id ?? null;
+            if ($rawCommentId === null) {
+                continue;
+            }
+            $mapped[Identity::stringify($rawCommentId)] = [
+                'editedAt' => self::parseUtcTime($row->edited_at ?? null),
+                'archivedAt' => self::parseUtcTime($row->archived_at ?? null),
+                'archivedBy' => is_string($row->archived_by_subject ?? null) ? $row->archived_by_subject : null,
+            ];
+        }
+
+        return $mapped;
+    }
+
+    public function upsertCommentState(
+        string|int $tenantId,
+        string|int $commentId,
+        ?DateTimeImmutable $editedAt = null,
+        bool $touchEditedAt = false,
+        ?DateTimeImmutable $archivedAt = null,
+        ?string $archivedBy = null,
+        bool $touchArchived = false,
+    ): void {
+        $now = Carbon::now()->toImmutable()->setTimezone(new DateTimeZone('UTC'))->format('Y-m-d H:i:s');
+        $values = ['updated_at' => $now];
+        if ($touchEditedAt) {
+            $values['edited_at'] = $editedAt?->setTimezone(new DateTimeZone('UTC'))->format('Y-m-d H:i:s');
+        }
+        if ($touchArchived) {
+            $values['archived_at'] = $archivedAt?->setTimezone(new DateTimeZone('UTC'))->format('Y-m-d H:i:s');
+            $values['archived_by_subject'] = $archivedBy;
+        }
+
+        $table = $this->lookup->table('document_comment_states');
+        $conn = $this->lookup->connection();
+        $updated = $conn->table($table)->where('comment_id', $commentId)->update($values);
+        if ($updated === 0) {
+            $conn->table($table)->insert($values + [
+                'comment_id' => $commentId,
+                'tenant_id' => $tenantId,
+            ]);
+        }
+    }
+
+    private static function parseUtcTime(mixed $raw): ?DateTimeImmutable
+    {
+        if ($raw instanceof DateTimeInterface) {
+            return DateTimeImmutable::createFromInterface($raw)->setTimezone(new DateTimeZone('UTC'));
+        }
+        if (is_string($raw) && $raw !== '') {
+            return Carbon::parse($raw)->toImmutable()->setTimezone(new DateTimeZone('UTC'));
+        }
+
+        return null;
     }
 
     /** @return list<CommentAnchorData> */

@@ -37,6 +37,7 @@ final class ReviewSchema implements ModuleSchema
             'document_revision_pins',
             'document_comment_anchors',
             'document_suggestions',
+            'document_comment_states',
         ];
     }
 
@@ -52,6 +53,8 @@ final class ReviewSchema implements ModuleSchema
             new KeyColumnExpectation('document_comment_anchors', 'document_id', 'REF'),
             new KeyColumnExpectation('document_suggestions', 'tenant_id', 'HK'),
             new KeyColumnExpectation('document_suggestions', 'document_id', 'REF'),
+            new KeyColumnExpectation('document_comment_states', 'tenant_id', 'HK'),
+            new KeyColumnExpectation('document_comment_states', 'comment_id', 'REF'),
         ];
     }
 
@@ -74,6 +77,7 @@ final class ReviewSchema implements ModuleSchema
                     'document_revision_pins' => $this->defineRevisionPins($table, $ids),
                     'document_comment_anchors' => $this->defineCommentAnchors($table, $ids),
                     'document_suggestions' => $this->defineSuggestions($table, $ids),
+                    'document_comment_states' => $this->defineCommentStates($table, $ids),
                     default => throw new InvalidArgumentException(sprintf('Unknown review entity [%s].', $entity)),
                 };
             },
@@ -325,6 +329,21 @@ final class ReviewSchema implements ModuleSchema
 
             return;
         }
+        if ($entity === 'document_comment_states') {
+            $conn = $this->helpers->dbConnection();
+            $grammar = $conn->getQueryGrammar();
+            $wrappedTable = $grammar->wrapTable($this->helpers->table($entity));
+            if ($this->driver() === 'pgsql' && $conn->transactionLevel() > 0) {
+                $conn->statement("SET LOCAL lock_timeout = '2s'");
+                $conn->statement("SET LOCAL statement_timeout = '15s'");
+            }
+            if ($this->driver() !== 'sqlite') {
+                $conn->statement("ALTER TABLE {$wrappedTable} ADD CHECK ((archived_at IS NULL AND archived_by_subject IS NULL) OR (archived_at IS NOT NULL AND archived_by_subject IS NOT NULL))");
+                $conn->statement("ALTER TABLE {$wrappedTable} ADD CHECK (archived_by_subject IS NULL OR octet_length(archived_by_subject) BETWEEN 1 AND 255)");
+            }
+
+            return;
+        }
         if ($this->driver() !== 'pgsql') {
             return;
         }
@@ -365,6 +384,42 @@ final class ReviewSchema implements ModuleSchema
             $conn->statement("ALTER TABLE {$wrappedTable} ADD CHECK (anchor_state IN ('attached', 'detached', 'historical'))");
             $conn->statement("ALTER TABLE {$wrappedTable} ADD CHECK (version > 0)");
         }
+    }
+
+    private function defineCommentStates(Blueprint $table, IdStrategy $ids): void
+    {
+        $name = $table->getTable();
+        $driver = $this->driver();
+
+        $ids->reference(table: $table, column: 'comment_id');
+        Arr::last($table->getColumns())?->index(false);
+        HostKeyColumns::add(table: $table, column: 'tenant_id', nullable: false, index: false);
+
+        $table->timestampTz('archived_at')->nullable();
+        if ($driver === 'sqlite') {
+            $table->rawColumn(
+                'archived_by_subject',
+                'VARCHAR(255) CHECK(archived_by_subject IS NULL OR length(CAST(archived_by_subject AS BLOB)) BETWEEN 1 AND 255)',
+            )->nullable();
+            $table->timestampTz('edited_at')->nullable();
+            $table->rawColumn(
+                'updated_at',
+                'DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP CHECK((archived_at IS NULL AND archived_by_subject IS NULL) OR (archived_at IS NOT NULL AND archived_by_subject IS NOT NULL))',
+            );
+        } else {
+            $subjectColumn = $table->string('archived_by_subject', 255)->nullable();
+            if ($driver === 'pgsql') {
+                $subjectColumn->collation('C');
+            }
+            $table->timestampTz('edited_at')->nullable();
+            $table->timestampTz('updated_at')->useCurrent();
+        }
+
+        $table->primary('comment_id', $name.'_pkey');
+        $table->foreign('comment_id', $name.'_comment_fk')
+            ->references('id')
+            ->on($this->helpers->table('node_comments'))
+            ->cascadeOnDelete();
     }
 
     private function driver(): string
