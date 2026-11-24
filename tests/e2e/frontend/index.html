@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Vaulter Editor Pro E2E Stand</title>
+    <style>
+      body { font-family: system-ui, -apple-system, sans-serif; margin: 16px; }
+      .ProseMirror { border: 1px solid #d1d5db; padding: 12px; min-height: 120px; border-radius: 6px; }
+      .e2e-grid { display: grid; grid-template-columns: 1fr 380px; gap: 16px; align-items: start; }
+    </style>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module">
+      import { createApp } from 'vue'
+      import { createVaulterClient, VaulterPlugin } from '@vaulter/vue'
+      import App from './App.vue'
+
+      const params = new URLSearchParams(window.location.search)
+      const userId = params.get('user') ?? '1'
+      const client = createVaulterClient({
+        baseUrl: '/api/vaulter',
+        headers: () => ({ 'X-E2E-User': userId }),
+      })
+
+      createApp(App).use(VaulterPlugin, { client }).mount('#app')
+    </script>
+  </body>
+</html>

@@ -664,3 +664,92 @@ jobs:
           npm --workspace=@vaulter/editor-pro-vue test
           npm --workspace=@vaulter/editor-pro-vue run typecheck
           npm --workspace=@vaulter/editor-pro-vue run build
+
+  docx-libreoffice:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "26.13.1"
+          cache: npm
+      - name: Install LibreOffice Writer
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libreoffice-writer
+      - name: Install and build @vaulter/editor-pro-docx
+        run: |
+          npm ci
+          npm --workspace=@vaulter/editor-pro-docx run build
+      - name: Run headless LibreOffice D1-D5 roundtrip gate
+        run: bash scripts/ci/docx-libreoffice.sh
+
+  e2e:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    services:
+      postgres:
+        image: postgres:18.7-alpine@sha256:0115267ab5a509022df9319c77be365cef335adb71556c75f60f5360ee247e71
+        env:
+          POSTGRES_USER: vaulter
+          POSTGRES_PASSWORD: secret
+          POSTGRES_DB: vaulter_e2e_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U vaulter -d vaulter_e2e_test"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: vaulter-editor-pro
+      - uses: actions/checkout@v4
+        with:
+          repository: axiomasoft/vaulter
+          path: vaulter
+          token: ${{ secrets.VAULTER_CI_READ_TOKEN || github.token }}
+      - uses: actions/checkout@v4
+        with:
+          repository: axiomasoft/vaulter-collaboration
+          path: vaulter-collaboration
+          token: ${{ secrets.VAULTER_CI_READ_TOKEN || github.token }}
+      - uses: actions/checkout@v4
+        with:
+          repository: axiomasoft/packman
+          path: packman
+          token: ${{ secrets.VAULTER_CI_READ_TOKEN || github.token }}
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: "8.4"
+          extensions: mbstring, xml, zip, pdo_pgsql, pgsql, pdo_sqlite, sqlite3
+          coverage: none
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "26.13.1"
+      - name: Install sibling dependencies
+        run: |
+          npm --prefix "$GITHUB_WORKSPACE/vaulter" ci
+          npm --prefix "$GITHUB_WORKSPACE/vaulter" run build --workspace @vaulter/vue
+          npm --prefix "$GITHUB_WORKSPACE/vaulter-collaboration" ci
+      - name: Install editor-pro dependencies
+        working-directory: vaulter-editor-pro
+        run: |
+          composer install --no-interaction --prefer-dist --no-progress
+          npm ci
+          npm --workspace=@vaulter/editor-pro-docx run build
+          npm --workspace=@vaulter/editor-pro-vue run build
+      - name: Install Playwright Chromium
+        working-directory: vaulter-editor-pro
+        run: npx playwright install chromium --with-deps
+      - name: Run Playwright E2E suite
+        working-directory: vaulter-editor-pro
+        env:
+          E2E_DB_HOST: 127.0.0.1
+          E2E_DB_PORT: "5432"
+          E2E_DB_DATABASE: vaulter_e2e_test
+          E2E_DB_USERNAME: vaulter
+          E2E_DB_PASSWORD: secret
+        run: npx playwright test --config=tests/e2e/playwright.config.mjs
