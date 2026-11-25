@@ -125,11 +125,16 @@
             "@docx:cli",
             "@php vendor/bin/pest -c phpunit.xml.dist --parallel"
         ],
+        "docs:errors": [
+            "@putenv VAULTER_UPDATE_DOCS=1",
+            "@php vendor/bin/pest -c phpunit.xml.dist --filter=\"docs/reference/errors.md\""
+        ],
         "phpstan": "@php vendor/bin/phpstan analyse -c phpstan.neon.dist --memory-limit=1G --no-progress"
     },
     "scripts-descriptions": {
         "docx:cli": "Build packages/docx/dist/cli.js when it is missing or older than its sources (used by the exchange tests).",
         "test": "Run the review and exchange suites one after the other (any DB_CONNECTION).",
-        "test:parallel": "Run both suites in parallel workers (one per CPU). On a server database set VAULTER_TEST_DB_PER_PROCESS=1 and create <DB_DATABASE without _test>_w<N>_test for N = 1..CPUs."
+        "test:parallel": "Run both suites in parallel workers (one per CPU). On a server database set VAULTER_TEST_DB_PER_PROCESS=1 and create <DB_DATABASE without _test>_w<N>_test for N = 1..CPUs.",
+        "docs:errors": "Regenerate the generated tables in docs/reference/errors.md from the problem catalogue."
     }
 }

@@ -3,6 +3,7 @@
 declare(strict_types=1);
 
 use Packman\Errors\Data\ProblemDefinition;
+use Vaulter\EditorPro\Ci\ErrorsReferenceBlock;
 use Vaulter\EditorPro\Exchange\Errors\ExchangeErrorCode;
 use Vaulter\EditorPro\Exchange\Errors\ExchangeProblemDefinitions;
 use Vaulter\EditorPro\Exchange\Exceptions\ExchangeException;
@@ -67,3 +68,17 @@ function exchangeExceptionFor(ExchangeErrorCode $code): ExchangeException
         ExchangeErrorCode::UnsupportedDocument => ExchangeException::unsupportedDocument(),
     };
 }
+
+it('keeps the exchange section of docs/reference/errors.md in sync with the catalogue', function (): void {
+    $block = new ErrorsReferenceBlock(app(ProblemCatalog::class), 'exchange');
+    $page = (string) file_get_contents(ErrorsReferenceBlock::PAGE);
+    $updated = $block->apply($page);
+
+    expect($updated)->not->toBeNull('docs/reference/errors.md lacks the exchange markers');
+    if (getenv('VAULTER_UPDATE_DOCS') === '1' && $updated !== $page) {
+        file_put_contents(ErrorsReferenceBlock::PAGE, (string) $updated);
+        $page = (string) $updated;
+    }
+
+    expect($page)->toBe($updated, 'docs/reference/errors.md is out of date; run composer docs:errors');
+});

@@ -3,6 +3,7 @@
 declare(strict_types=1);
 
 use Packman\Errors\Data\ProblemDefinition;
+use Vaulter\EditorPro\Ci\ErrorsReferenceBlock;
 use Vaulter\EditorPro\Review\Errors\ReviewErrorCode;
 use Vaulter\EditorPro\Review\Errors\ReviewProblemDefinitions;
 use Vaulter\Exceptions\Contracts\ProblemException;
@@ -45,3 +46,17 @@ it('ships an English and a Russian title and detail for every review problem', f
             ->and($catalog->detail($code->problemSlug(), [], $locale))->toBeString("{$code->problemSlug()} has no {$locale} detail");
     }
 })->with(['en', 'ru']);
+
+it('keeps the review section of docs/reference/errors.md in sync with the catalogue', function (): void {
+    $block = new ErrorsReferenceBlock(app(ProblemCatalog::class), 'review');
+    $page = (string) file_get_contents(ErrorsReferenceBlock::PAGE);
+    $updated = $block->apply($page);
+
+    expect($updated)->not->toBeNull('docs/reference/errors.md lacks the review markers');
+    if (getenv('VAULTER_UPDATE_DOCS') === '1' && $updated !== $page) {
+        file_put_contents(ErrorsReferenceBlock::PAGE, (string) $updated);
+        $page = (string) $updated;
+    }
+
+    expect($page)->toBe($updated, 'docs/reference/errors.md is out of date; run composer docs:errors');
+});
