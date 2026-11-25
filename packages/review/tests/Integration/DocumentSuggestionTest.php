@@ -7,6 +7,7 @@ use Illuminate\Support\Str;
 use Vaulter\Database\VaulterDatabase;
 use Vaulter\Documents\DocumentsManager;
 use Vaulter\Drive\Access\Roles\RoleRegistry;
+use Vaulter\Drive\Exceptions\DriveArchivedException;
 use Vaulter\Drive\Exceptions\Nodes\NodeNotFoundException;
 use Vaulter\Drive\Testing\Access\AccessTestHelpers;
 use Vaulter\Drive\Vaulter;
@@ -17,6 +18,7 @@ use Vaulter\EditorPro\Review\ReviewManager;
 beforeEach(function (): void {
     $storage = AccessTestHelpers::storage();
     AccessTestHelpers::grant($storage->rootNode, RoleRegistry::OWNER, subjectId: 1);
+    $this->storage = $storage;
     $this->root = $storage->rootNode;
     $this->grant = AccessTestHelpers::grant($this->root, RoleRegistry::WRITER, subjectId: 2);
     $vaulter = app(Vaulter::class);
@@ -208,7 +210,71 @@ test('bulk accept/reject (all, by_user, in_range) and stale-generation suggestio
     expect(fn () => $this->first->accept($this->node->id, $stale->id, 0, $stale->version))
         ->toThrow(SuggestionConflictException::class);
 
+    expect(fn () => $this->first->reject($this->node->id, $stale->id, 0, $stale->version + 1))
+        ->toThrow(SuggestionConflictException::class, 'The stale-generation suggestion could not be rejected.');
+
     $rejectedStale = $this->first->reject($this->node->id, $stale->id, 0, $stale->version);
     expect($rejectedStale->state)->toBe('rejected')
         ->and($rejectedStale->conflictReason)->toBe('generation_changed');
+});
+
+/** A draft like reviewTextEdit() with any of its fields replaced. */
+function reviewDraft(array $fields): TextSuggestionInput
+{
+    $edit = reviewTextEdit(3, 6, 'red', 'rose');
+
+    return new TextSuggestionInput(...[
+        'id' => $edit->id, 'groupId' => $edit->groupId, 'generation' => $edit->generation, 'basePosition' => $edit->basePosition,
+        'schemaVersion' => $edit->schemaVersion, 'targetBlockId' => $edit->targetBlockId, 'from' => $edit->from, 'to' => $edit->to,
+        'before' => $edit->before, 'after' => $edit->after, ...$fields,
+    ]);
+}
+
+it('refuses a draft whose base position or schema version is not the document\'s', function (array $fields): void {
+    expect(fn () => $this->first->save($this->node->id, reviewDraft($fields)))
+        ->toThrow(SuggestionConflictException::class);
+    expect($this->first->list($this->node->id))->toBe([]);
+})->with([
+    'base position' => [['basePosition' => 2]],
+    'schema version' => [['schemaVersion' => 1]],
+]);
+
+it('extends a group only with its author\'s open drafts and keeps a parent\'s text while a nested edit is open', function (): void {
+    $draft = $this->first->save($this->node->id, reviewTextEdit(3, 6, 'red', 'rose'));
+    expect(fn () => $this->second->save($this->node->id, reviewTextEdit(7, 11, 'blue', 'gold', groupId: $draft->groupId)))
+        ->toThrow(SuggestionConflictException::class, 'This group cannot be extended.');
+
+    $parent = $this->first->save($this->node->id, reviewTextEdit(6, 6, '', ' bag'));
+    $this->second->save($this->node->id, reviewTextEdit(1, 3, 'ba', 'ru', parentId: $parent->id));
+    expect(fn () => $this->first->save($this->node->id, reviewDraft([
+        'id' => $parent->id, 'groupId' => $parent->groupId, 'from' => 6, 'to' => 6, 'before' => '', 'after' => ' bog',
+    ]), 1))->toThrow(SuggestionConflictException::class, 'Resolve the nested edit before changing its parent text.');
+});
+
+it('nests an edit only inside an open, plain insertion of the same block', function (): void {
+    $proposal = $this->first->save($this->node->id, reviewTextEdit(6, 6, '', ' bag', proposalId: (string) Str::uuid7()));
+    $rejected = $this->first->save($this->node->id, reviewTextEdit(11, 11, '', ' cap'));
+    $this->first->reject($this->node->id, $rejected->id, 0, 1);
+
+    foreach (['proposal' => $proposal, 'rejected' => $rejected] as $label => $parent) {
+        expect(fn () => $this->second->save($this->node->id, reviewTextEdit(1, 3, substr($parent->after, 1, 2), 'xx', parentId: $parent->id)))
+            ->toThrow(SuggestionConflictException::class, 'The parent insertion is unavailable at the supplied text range.');
+    }
+});
+
+it('refuses a draft on an archived drive', function (): void {
+    $this->storage->forceFill(['status' => 'archived'])->save();
+    $archived = app(Vaulter::class)->drive($this->storage->fresh())->actingAs(AccessTestHelpers::user(1));
+
+    expect(fn () => app(ReviewManager::class)->suggestions($archived)->save($this->node->id, reviewTextEdit(3, 6, 'red', 'rose')))
+        ->toThrow(DriveArchivedException::class);
+});
+
+it('does not accept overlapping edits together', function (): void {
+    $first = $this->first->save($this->node->id, reviewTextEdit(3, 6, 'red', 'green'));
+    $second = $this->first->save($this->node->id, reviewTextEdit(4, 8, 'ed b', '', groupId: $first->groupId));
+
+    expect(fn () => $this->first->acceptGroup($this->node->id, $first->groupId, 0, [$first->id => 1, $second->id => 1]))
+        ->toThrow(SuggestionConflictException::class, 'A decision cannot accept overlapping edits together.')
+        ->and(acceptedReviewText($this->docs, $this->node))->toBe('🦊 red blue');
 });
