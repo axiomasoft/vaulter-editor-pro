@@ -42,6 +42,13 @@ and an optional `command_id`. Bulk decisions take `generation`, `scope` (`all`; 
 Suggestion kinds: `insert`, `delete`, `replace`, `mark_change`, `attr_change`, `block_split`,
 `block_join`, `list_change`, `table_change`.
 
+The suggestion and pin lists are not paginated: the editor renders every open suggestion of the
+current generation, and pins are created one per revision on purpose. Comments, which grow
+without such a bound, are paged with `per_page` and a cursor. A document generation holds at
+most 1000 open suggestions; saving a new one beyond that answers `unsupported_suggestion` with
+reason `open_suggestion_limit` until some are accepted or rejected. Amending an existing draft
+is not affected.
+
 ## Exchange
 
 | Method | Path | Name | Idempotent | Purpose |

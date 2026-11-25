@@ -8,6 +8,11 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the package
 
 ### Changed
 
+- A document generation holds at most 1000 open suggestions
+  (`SuggestionOperations::MAX_OPEN_PER_DOCUMENT`). Saving a new suggestion beyond that answers
+  `422 unsupported_suggestion` with reason `open_suggestion_limit`; amending a draft and
+  deciding suggestions still work. Every save reads and locks all open suggestions, so the
+  bound keeps saves and the unpaginated list cheap.
 - The `vaulter-editor-pro-review` config section is validated strictly: an unknown key, a
   non-boolean `pins.enforce_retention` or an anchor limit below its minimum (selector 256 bytes,
   depth 2, quote 64 bytes) is reported by `packman:config:validate` and `vaulter:doctor`

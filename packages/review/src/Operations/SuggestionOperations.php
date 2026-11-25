@@ -34,6 +34,7 @@ use Vaulter\EditorPro\Review\Data\TextSuggestionInput;
 use Vaulter\EditorPro\Review\Enums\SuggestionKind;
 use Vaulter\EditorPro\Review\Exceptions\JournalProjectionPending;
 use Vaulter\EditorPro\Review\Exceptions\SuggestionConflictException;
+use Vaulter\EditorPro\Review\Exceptions\UnsupportedSuggestionException;
 use Vaulter\EditorPro\Review\Idempotency\ReviewNodeReplayAuthorizer;
 use Vaulter\EditorPro\Review\Idempotency\SuggestionReceiptCodec;
 use Vaulter\EditorPro\Review\Repositories\ReviewLookup;
@@ -59,6 +60,12 @@ use Vaulter\Operations\OperationSpec;
 #[Api(since: '1.0')]
 final readonly class SuggestionOperations implements DriveExtension
 {
+    /**
+     * Open suggestions one document generation may hold. Every save reads and locks all of them and the
+     * overlap checks compare them pairwise, so the bound keeps a save (and the editor's full list) cheap.
+     */
+    public const int MAX_OPEN_PER_DOCUMENT = 1000;
+
     private ReviewCapabilities $capabilitiesResolver;
 
     private SnapshotStructuralEdit $structuralEditor;
@@ -1138,6 +1145,16 @@ final readonly class SuggestionOperations implements DriveExtension
         array $rows,
         ?array $doc,
     ): TextSuggestion {
+        if ($current === null) {
+            $open = count(array_filter($rows, static fn (TextSuggestion $row): bool => $row->state === 'open'));
+            if ($open >= self::MAX_OPEN_PER_DOCUMENT) {
+                throw UnsupportedSuggestionException::because(
+                    'the document already has '.self::MAX_OPEN_PER_DOCUMENT.' open suggestions; accept or reject some first.',
+                    'open_suggestion_limit',
+                );
+            }
+        }
+
         $conflicted = false;
         $conflictReason = null;
         $conflictWithId = null;

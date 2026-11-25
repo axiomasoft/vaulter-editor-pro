@@ -3,7 +3,9 @@
 declare(strict_types=1);
 
 use Illuminate\Database\QueryException;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
+use Vaulter\Configuration\DatabaseOptions;
 use Vaulter\Database\VaulterDatabase;
 use Vaulter\Documents\DocumentsManager;
 use Vaulter\Drive\Access\Roles\RoleRegistry;
@@ -13,6 +15,8 @@ use Vaulter\Drive\Testing\Access\AccessTestHelpers;
 use Vaulter\Drive\Vaulter;
 use Vaulter\EditorPro\Review\Data\TextSuggestionInput;
 use Vaulter\EditorPro\Review\Exceptions\SuggestionConflictException;
+use Vaulter\EditorPro\Review\Exceptions\UnsupportedSuggestionException;
+use Vaulter\EditorPro\Review\Operations\SuggestionOperations;
 use Vaulter\EditorPro\Review\ReviewManager;
 
 beforeEach(function (): void {
@@ -277,4 +281,31 @@ it('does not accept overlapping edits together', function (): void {
     expect(fn () => $this->first->acceptGroup($this->node->id, $first->groupId, 0, [$first->id => 1, $second->id => 1]))
         ->toThrow(SuggestionConflictException::class, 'A decision cannot accept overlapping edits together.')
         ->and(acceptedReviewText($this->docs, $this->node))->toBe('🦊 red blue');
+});
+
+it('refuses a new suggestion once the document holds the most open ones, but still amends and counts only open ones', function (): void {
+    $draft = $this->first->save($this->node->id, reviewTextEdit(3, 6, 'red', 'rose'));
+    $table = app(DatabaseOptions::class)->table('document_suggestions');
+    $row = (array) DB::table($table)->where('id', $draft->id)->first();
+    $copies = [];
+    for ($i = 1; $i < SuggestionOperations::MAX_OPEN_PER_DOCUMENT; $i++) {
+        $copies[] = ['id' => (string) Str::uuid7(), 'group_id' => (string) Str::uuid7()] + $row;
+    }
+    foreach (array_chunk($copies, 100) as $chunk) {
+        DB::table($table)->insert($chunk);
+    }
+
+    $refused = null;
+    try {
+        $this->first->save($this->node->id, reviewTextEdit(7, 11, 'blue', 'gold'));
+    } catch (UnsupportedSuggestionException $exception) {
+        $refused = $exception;
+    }
+    expect($refused?->problemDetails())->toBe(['reason' => 'open_suggestion_limit']);
+
+    $amended = reviewDraft(['id' => $draft->id, 'groupId' => $draft->groupId, 'after' => 'ruby']);
+    expect($this->first->save($this->node->id, $amended, $draft->version)->after)->toBe('ruby');
+
+    DB::table($table)->where('id', $copies[0]['id'])->update(['state' => 'rejected', 'decided_at' => now()]);
+    expect($this->first->save($this->node->id, reviewTextEdit(7, 11, 'blue', 'gold'))->state)->toBe('open');
 });
