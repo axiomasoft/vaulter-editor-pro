@@ -42,7 +42,30 @@ final readonly class SuggestionRepository
     /** @return array<string, mixed>|null */
     public function readProvenance(Connection $connection, string $id): ?array
     {
-        $raw = $this->query($connection)->where('id', $id)->lockForUpdate()->value('provenance_json');
+        return self::provenance($this->query($connection)->where('id', $id)->lockForUpdate()->value('provenance_json'));
+    }
+
+    /**
+     * The provenance of every row of `$query` that has one, keyed by suggestion id, in one read.
+     *
+     * @return array<string, array<string, mixed>>
+     */
+    public function readProvenances(Builder $query): array
+    {
+        $out = [];
+        foreach ((clone $query)->whereNotNull('provenance_json')->get(['id', 'provenance_json']) as $row) {
+            $provenance = self::provenance($row->provenance_json ?? null);
+            if ($provenance !== null && is_string($row->id ?? null)) {
+                $out[$row->id] = $provenance;
+            }
+        }
+
+        return $out;
+    }
+
+    /** @return array<string, mixed>|null */
+    private static function provenance(mixed $raw): ?array
+    {
         if (! is_string($raw) || $raw === '') {
             return null;
         }

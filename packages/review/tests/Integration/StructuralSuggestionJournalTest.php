@@ -464,3 +464,49 @@ it('refuses structural drafts and decisions while the journal head cannot be ver
     publishReviewJournalCheckpoint($roomOwner);
     expect($keyed->save($node->id, $newDraft)->basePosition)->toBe(2);
 });
+
+it('lists without locking the document once a rejected journal command left only its provenance', function (): void {
+    $storage = AccessTestHelpers::storage();
+    AccessTestHelpers::grant($storage->rootNode, RoleRegistry::OWNER, subjectId: 1);
+    $writerGrant = AccessTestHelpers::grant($storage->rootNode, RoleRegistry::WRITER, subjectId: 2);
+    $ownerDrive = app(Vaulter::class)->drive($storage)->actingAs(AccessTestHelpers::user(1));
+    $writerDrive = app(Vaulter::class)->drive($storage)->actingAs(AccessTestHelpers::user(2));
+    $node = app(DocumentsManager::class)->in($ownerDrive)->create('rejected-provenance', 'vaulter/rich-text', journalRichDoc());
+    $roomOwner = (string) Str::uuid();
+    enableStrictJournalRoom($node, $roomOwner);
+    $owner = app(ReviewManager::class)->suggestions($ownerDrive);
+    $mark = static fn (string $block): StructuralSuggestionInput => StructuralSuggestionInput::markChange(
+        (string) Str::uuid7(), (string) Str::uuid7(), 0, 1, 2, $block, 0, 5, 'bold', 'added',
+    );
+    $decided = app(ReviewManager::class)->suggestions($writerDrive)->save($node->id, $mark('jp_1'));
+    $owner->save($node->id, $mark('jp_2'));
+    app(ReviewManager::class)->suggestions($writerDrive)->accept($node->id, $decided->id, 0, $decided->version, 'cmd-rejected');
+
+    // The writer loses Edit before the room settles: the journal rejects the command (edit_revoked).
+    $db = app(VaulterDatabase::class);
+    $next = $db->transaction(static fn (): ?array => app(CommandJournal::class)->next(app(CollaborativeState::class)->lock($node->id)));
+    $ownerDrive->access()->revoke($storage->rootNode->id, $writerGrant->id);
+    $bytes = 'rejected-commit';
+    expect(app(CommandJournal::class)->settle(
+        id: (string) $next['id'], owner: $roomOwner, fence: 1, generation: 0, base: 1,
+        fingerprint: (string) $next['fingerprint'],
+        updates: [new UpdateEnvelope(0, (string) Str::uuid(), $bytes, hash('sha256', $bytes), 'server', null)],
+        evidence: ['ranges' => []],
+    )['state'])->toBe('rejected');
+
+    // The first list settles the rejection; the suggestion is open again and keeps its provenance.
+    expect(array_map(static fn ($item): array => [$item->state, $item->isPendingJournal()], $owner->list($node->id)))
+        ->toBe([['open', false], ['open', false]]);
+
+    $connection = $db->connection();
+    $connection->flushQueryLog();
+    $connection->enableQueryLog();
+    expect($owner->list($node->id))->toHaveCount(2);
+    $locking = array_filter(
+        array_column($connection->getQueryLog(), 'query'),
+        static fn (string $sql): bool => stripos($sql, 'for update') !== false || stripos($sql, 'advisory') !== false,
+    );
+    $connection->disableQueryLog();
+
+    expect($locking)->toBe([]);
+});

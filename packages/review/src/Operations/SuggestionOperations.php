@@ -808,12 +808,14 @@ final readonly class SuggestionOperations implements DriveExtension
 
     private function syncPendingJournalState(string $nodeId, string $documentId, int $generation): void
     {
-        $conn = $this->lookup->connection();
-        $openWithPending = $this->suggestions->forDocument($conn, $documentId, $generation)
-            ->where('state', 'open')
-            ->whereNotNull('provenance_json')
-            ->exists();
-        if (! $openWithPending) {
+        // Only a pending journal command needs the locked sync: an open suggestion keeps its provenance after a
+        // journal rejection, so a non-null provenance alone would lock the document on every list.
+        $open = $this->suggestions->forDocument($this->lookup->connection(), $documentId, $generation)->where('state', 'open');
+        $openWithPending = array_filter(
+            $this->suggestions->readProvenances($open),
+            static fn (array $provenance): bool => is_array($provenance['pending_journal'] ?? null),
+        );
+        if ($openWithPending === []) {
             return;
         }
 
@@ -837,11 +839,13 @@ final readonly class SuggestionOperations implements DriveExtension
         /** @var array<string, array<string, mixed>> $metaByCommand */
         $metaByCommand = [];
 
+        // The rows are locked by the read above; their provenance comes in one more read, not one per row.
+        $provenances = $this->suggestions->readProvenances((clone $query)->where('state', 'open'));
         foreach ($all as $row) {
             if ($row->state !== 'open') {
                 continue;
             }
-            $prov = $this->suggestions->readProvenance($conn, $row->id);
+            $prov = $provenances[$row->id] ?? null;
             $pending = is_array($prov['pending_journal'] ?? null) ? $prov['pending_journal'] : null;
             $cmdId = is_array($pending) && is_string($pending['command_id'] ?? null) ? $pending['command_id'] : null;
             if ($cmdId === null) {
