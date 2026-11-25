@@ -1,7 +1,8 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { Extension, getSchema } from '@tiptap/core'
 import StarterKit from '@tiptap/starter-kit'
 import { TableKit } from '@tiptap/extension-table'
+import { Node as ProseMirrorNode } from '@tiptap/pm/model'
 import { BlockId } from '@vaulter/vue'
 import { computeStructuralDiff, textSimhash } from '../src/compare/structuralDiff'
 
@@ -168,5 +169,29 @@ describe('Two-stage structural diff (prosemirror-changeset + MarkAwareEncoder + 
     expect(diff.attrChanges.some((a) => a.nodeType === 'heading' && a.attr === 'level' && a.oldValue === 1 && a.newValue === 2)).toBe(true)
     expect(diff.attrChanges.some((a) => a.nodeType === 'tableCell' && a.attr === 'colwidth')).toBe(true)
     expect(diff.attrChanges.some((a) => a.nodeType === 'tableCell' && a.attr === 'align' && a.oldValue === 'left' && a.newValue === 'right')).toBe(true)
+  })
+
+  it('reads each block text once when the LCS fallback aligns documents without blockIds', () => {
+    // Every block lacks a blockId, so all of them go through the quadratic LCS fallback; the
+    // text it compares must come from a per-block cache, not a fresh textContent walk per pair.
+    const n = 200
+    const doc = (edited: boolean) => schema.nodeFromJSON({
+      type: 'doc',
+      content: Array.from({ length: n }, (_, i) => ({
+        type: 'paragraph',
+        content: [{ type: 'text', text: `block ${i} ${edited && i % 10 === 0 ? 'changed' : 'same'} words` }],
+      })),
+    })
+    const before = doc(false)
+    const after = doc(true)
+    const textReads = vi.spyOn(ProseMirrorNode.prototype, 'textContent', 'get')
+    try {
+      const diff = computeStructuralDiff(before, after)
+      expect(diff.alignments.filter((a) => a.kind === 'matched')).toHaveLength(n)
+      // Linear in the block count (two reads per block plus the changed blocks' inline diff), not ~n^2.
+      expect(textReads.mock.calls.length).toBeLessThan(10 * n)
+    } finally {
+      textReads.mockRestore()
+    }
   })
 })

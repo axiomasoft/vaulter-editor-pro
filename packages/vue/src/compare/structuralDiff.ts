@@ -127,25 +127,38 @@ interface AlignItem {
   pos: number
   blockId: string | null
   signature: string
+  /** Trimmed text content, read once: the LCS fallback compares every pair of unmatched items. */
+  text: string
+  /** Lower-cased word set of `text`, built on first use by signatureSimilarity. */
+  words: Set<string> | null
 }
 
-function collectTopUnits(doc: ProseMirrorNode): AlignItem[] {
+/** Alignment units for the direct children of `parent` (top-level blocks, list items, table rows). */
+function collectAlignItems(parent: ProseMirrorNode): AlignItem[] {
   const items: AlignItem[] = []
   let pos = 0
-  for (let i = 0; i < doc.childCount; i++) {
-    const child = doc.child(i)
+  for (let i = 0; i < parent.childCount; i++) {
+    const child = parent.child(i)
     const rawBlockId = child.attrs?.blockId
     const blockId = typeof rawBlockId === 'string' && rawBlockId !== '' ? rawBlockId : null
+    const text = child.textContent
     items.push({
       index: i,
       node: child,
       pos,
       blockId,
-      signature: `${child.type.name}:${textSimhash(child.textContent)}`,
+      signature: `${child.type.name}:${textSimhash(text)}`,
+      text: text.trim(),
+      words: null,
     })
     pos += child.nodeSize
   }
   return items
+}
+
+function wordsOf(item: AlignItem): Set<string> {
+  item.words ??= new Set(item.text.toLowerCase().split(/\s+/).filter(Boolean))
+  return item.words
 }
 
 function signatureSimilarity(a: AlignItem, b: AlignItem): boolean {
@@ -155,8 +168,8 @@ function signatureSimilarity(a: AlignItem, b: AlignItem): boolean {
   if (a.signature === b.signature) {
     return true
   }
-  const ta = a.node.textContent.trim()
-  const tb = b.node.textContent.trim()
+  const ta = a.text
+  const tb = b.text
   if (ta.length === 0 && tb.length === 0) {
     return true
   }
@@ -165,8 +178,8 @@ function signatureSimilarity(a: AlignItem, b: AlignItem): boolean {
     return false
   }
   // Allow pairing blocks of the same node type when they share substantial prefix/word overlap.
-  const wordsA = new Set(ta.toLowerCase().split(/\s+/).filter(Boolean))
-  const wordsB = new Set(tb.toLowerCase().split(/\s+/).filter(Boolean))
+  const wordsA = wordsOf(a)
+  const wordsB = wordsOf(b)
   let shared = 0
   for (const w of wordsA) {
     if (wordsB.has(w)) {
@@ -211,14 +224,15 @@ function alignSequence(
   if (remA.length > 0 && remB.length > 0) {
     const n = remA.length
     const m = remB.length
-    const dp: number[][] = Array.from({ length: n + 1 }, () => new Array<number>(m + 1).fill(0))
+    // One flat (n+1) x (m+1) table: a nested number[][] costs an array object per row.
+    const width = m + 1
+    const dp = new Int32Array((n + 1) * width)
     for (let i = n - 1; i >= 0; i--) {
       for (let j = m - 1; j >= 0; j--) {
-        if (signatureSimilarity(remA[i], remB[j])) {
-          dp[i][j] = 1 + dp[i + 1][j + 1]
-        } else {
-          dp[i][j] = Math.max(dp[i + 1][j], dp[i][j + 1])
-        }
+        const cell = i * width + j
+        dp[cell] = signatureSimilarity(remA[i], remB[j])
+          ? 1 + dp[cell + width + 1]
+          : Math.max(dp[cell + width], dp[cell + 1])
       }
     }
 
@@ -231,7 +245,7 @@ function alignSequence(
         pairs.push({ a: remA[i], b: remB[j], moved: false })
         i++
         j++
-      } else if (dp[i + 1][j] >= dp[i][j + 1]) {
+      } else if (dp[(i + 1) * width + j] >= dp[i * width + j + 1]) {
         i++
       } else {
         j++
@@ -487,34 +501,7 @@ function diffAlignedBlockWithChangeSet(
     && (blockA.type.name === 'bulletList' || blockA.type.name === 'orderedList' || blockA.type.name === 'table')
   ) {
     diffOwnNodeAttributes(blockA, blockB, offsetB, attrsOut)
-    const childrenA: AlignItem[] = []
-    let pA = 0
-    for (let i = 0; i < blockA.childCount; i++) {
-      const c = blockA.child(i)
-      childrenA.push({
-        index: i,
-        node: c,
-        pos: pA,
-        blockId: typeof c.attrs?.blockId === 'string' ? c.attrs.blockId : null,
-        signature: `${c.type.name}:${textSimhash(c.textContent)}`,
-      })
-      pA += c.nodeSize
-    }
-    const childrenB: AlignItem[] = []
-    let pB = 0
-    for (let i = 0; i < blockB.childCount; i++) {
-      const c = blockB.child(i)
-      childrenB.push({
-        index: i,
-        node: c,
-        pos: pB,
-        blockId: typeof c.attrs?.blockId === 'string' ? c.attrs.blockId : null,
-        signature: `${c.type.name}:${textSimhash(c.textContent)}`,
-      })
-      pB += c.nodeSize
-    }
-
-    const childAlignments = alignSequence(childrenA, childrenB)
+    const childAlignments = alignSequence(collectAlignItems(blockA), collectAlignItems(blockB))
     for (const sub of childAlignments) {
       if (sub.kind === 'matched' && sub.fromNode && sub.toNode && sub.fromPosA !== null && sub.fromPosB !== null) {
         diffAlignedBlockWithChangeSet(
@@ -641,8 +628,8 @@ export function computeStructuralDiff(
   toDoc: ProseMirrorNode,
 ): StructuralDiffResult {
   const schema = toDoc.type.schema
-  const itemsA = collectTopUnits(fromDoc)
-  const itemsB = collectTopUnits(toDoc)
+  const itemsA = collectAlignItems(fromDoc)
+  const itemsB = collectAlignItems(toDoc)
   const alignments = alignSequence(itemsA, itemsB)
 
   const inlineSpans: InlineDiffSpan[] = []
