@@ -2,8 +2,13 @@
 
 declare(strict_types=1);
 
+use Illuminate\Foundation\Testing\RefreshDatabase;
 use Packman\Config\Exceptions\InvalidConfiguration;
 use Vaulter\EditorPro\Review\Configuration\ReviewOptions;
+
+// The package TestCase migrates on boot; without a transaction the teardown
+// rollback of review migrations collides with exchange foreign keys on PostgreSQL.
+uses(RefreshDatabase::class);
 
 it('compiles the shipped config file to the constructor defaults', function (): void {
     /** @var array<string, mixed> $shipped */
