@@ -10,11 +10,28 @@ use Vaulter\EditorPro\Exchange\Exceptions\ExchangeException;
 use Vaulter\Http\Problems\ProblemCodeSource;
 use Vaulter\Http\Problems\ProblemSpec;
 use Vaulter\Http\Problems\ReceiptPolicy;
+use Vaulter\Http\Problems\Retryable;
 
-/** HTTP problem code mappings owned by `axiomasoft/vaulter-editor-pro-exchange`. */
+/**
+ * HTTP problem code mappings owned by `axiomasoft/vaulter-editor-pro-exchange`.
+ *
+ * Status and retry hint come from {@see ExchangeErrorCode}; only the receipt policy is HTTP-specific.
+ */
 #[Internal]
 final class ExchangeProblemCodes implements ProblemCodeSource
 {
+    /** Deterministic refusals: replaying the same idempotent request must answer the same problem. */
+    private const array CACHEABLE = [
+        ExchangeErrorCode::InvalidCommand,
+        ExchangeErrorCode::UnsafeArchive,
+        ExchangeErrorCode::ZipLimitExceeded,
+        ExchangeErrorCode::ProfileBlocked,
+        ExchangeErrorCode::AlreadyApplied,
+        ExchangeErrorCode::SourceUnavailable,
+        ExchangeErrorCode::FormatDisabled,
+        ExchangeErrorCode::UnsupportedDocument,
+    ];
+
     public function translationNamespace(): string
     {
         return 'vaulter-editor-pro-exchange';
@@ -22,21 +39,16 @@ final class ExchangeProblemCodes implements ProblemCodeSource
 
     public function codes(): array
     {
-        return [
-            ExchangeErrorCode::JobNotFound->problemSlug() => new ProblemSpec(404, ExchangeException::class),
-            ExchangeErrorCode::IdempotencyConflict->problemSlug() => new ProblemSpec(409, ExchangeException::class),
-            ExchangeErrorCode::InvalidCommand->problemSlug() => new ProblemSpec(422, ExchangeException::class, receipt: ReceiptPolicy::Cacheable),
-            ExchangeErrorCode::UnsafeArchive->problemSlug() => new ProblemSpec(422, ExchangeException::class, receipt: ReceiptPolicy::Cacheable),
-            ExchangeErrorCode::ZipLimitExceeded->problemSlug() => new ProblemSpec(413, ExchangeException::class, receipt: ReceiptPolicy::Cacheable),
-            ExchangeErrorCode::ProfileBlocked->problemSlug() => new ProblemSpec(422, ExchangeException::class, receipt: ReceiptPolicy::Cacheable),
-            ExchangeErrorCode::JobNotReady->problemSlug() => new ProblemSpec(409, ExchangeException::class),
-            ExchangeErrorCode::StalePreview->problemSlug() => new ProblemSpec(409, ExchangeException::class),
-            ExchangeErrorCode::AlreadyApplied->problemSlug() => new ProblemSpec(409, ExchangeException::class, receipt: ReceiptPolicy::Cacheable),
-            ExchangeErrorCode::SourceUnavailable->problemSlug() => new ProblemSpec(422, ExchangeException::class, receipt: ReceiptPolicy::Cacheable),
-            ExchangeErrorCode::RuntimeFailed->problemSlug() => new ProblemSpec(503, ExchangeException::class),
-            ExchangeErrorCode::LeaseLost->problemSlug() => new ProblemSpec(409, ExchangeException::class),
-            ExchangeErrorCode::FormatDisabled->problemSlug() => new ProblemSpec(422, ExchangeException::class, receipt: ReceiptPolicy::Cacheable),
-            ExchangeErrorCode::UnsupportedDocument->problemSlug() => new ProblemSpec(422, ExchangeException::class, receipt: ReceiptPolicy::Cacheable),
-        ];
+        $codes = [];
+        foreach (ExchangeErrorCode::cases() as $code) {
+            $codes[$code->problemSlug()] = new ProblemSpec(
+                $code->httpStatus(),
+                ExchangeException::class,
+                retryable: $code->retryable() ? Retryable::WithBackoff : Retryable::Never,
+                receipt: in_array($code, self::CACHEABLE, true) ? ReceiptPolicy::Cacheable : ReceiptPolicy::Never,
+            );
+        }
+
+        return $codes;
     }
 }
