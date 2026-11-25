@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Vaulter\EditorPro\Review\Anchors;
 
 use Packman\Attributes\Api;
+use Packman\Attributes\Internal;
 use Vaulter\EditorPro\Review\Data\CommentAnchorData;
 use Vaulter\EditorPro\Review\Data\SnapshotResolutionResult;
 use Vaulter\EditorPro\Review\Enums\AnchorState;
@@ -61,19 +62,33 @@ final readonly class SnapshotAnchorResolver
      */
     public function resolveOnEdit(CommentAnchorData $anchor, array $oldDoc, array $newDoc): SnapshotResolutionResult
     {
-        if ($anchor->selectorKind !== SelectorKind::SnapshotUtf16 || $anchor->anchorState !== AnchorState::Attached) {
-            return new SnapshotResolutionResult($anchor->anchorState, $anchor->selectorPayload, $anchor->quoteText, false);
+        if (! self::resolvable($anchor)) {
+            return self::unchanged($anchor);
         }
 
-        $oldText = $this->findBlockTextById($oldDoc, $anchor->blockId);
-        $newText = $this->findBlockTextById($newDoc, $anchor->blockId);
+        return $this->resolveBlockEdit(
+            $anchor,
+            $this->findBlockTextById($oldDoc, $anchor->blockId),
+            $this->findBlockTextById($newDoc, $anchor->blockId),
+        );
+    }
+
+    /**
+     * resolveOnEdit() over the anchor block's text in the old and the new document (null: no such block).
+     */
+    #[Internal]
+    public function resolveBlockEdit(CommentAnchorData $anchor, ?string $oldText, ?string $newText): SnapshotResolutionResult
+    {
+        if (! self::resolvable($anchor)) {
+            return self::unchanged($anchor);
+        }
 
         if ($newText === null) {
             return $this->detach($anchor);
         }
 
         if ($oldText === null) {
-            return $this->resolveStateless($anchor, $newDoc);
+            return $this->resolveBlock($anchor, $newText);
         }
 
         $bounds = $this->extractBounds($anchor->selectorPayload);
@@ -143,11 +158,23 @@ final readonly class SnapshotAnchorResolver
      */
     public function resolveStateless(CommentAnchorData $anchor, array $doc): SnapshotResolutionResult
     {
-        if ($anchor->selectorKind !== SelectorKind::SnapshotUtf16 || $anchor->anchorState !== AnchorState::Attached) {
-            return new SnapshotResolutionResult($anchor->anchorState, $anchor->selectorPayload, $anchor->quoteText, false);
+        if (! self::resolvable($anchor)) {
+            return self::unchanged($anchor);
         }
 
-        $text = $this->findBlockTextById($doc, $anchor->blockId);
+        return $this->resolveBlock($anchor, $this->findBlockTextById($doc, $anchor->blockId));
+    }
+
+    /**
+     * resolveStateless() over the anchor block's text in the target document (null: no such block).
+     */
+    #[Internal]
+    public function resolveBlock(CommentAnchorData $anchor, ?string $text): SnapshotResolutionResult
+    {
+        if (! self::resolvable($anchor)) {
+            return self::unchanged($anchor);
+        }
+
         if ($text === null) {
             return $this->detach($anchor);
         }
@@ -218,7 +245,7 @@ final readonly class SnapshotAnchorResolver
     {
         $attrs = is_array($node['attrs'] ?? null) ? $node['attrs'] : [];
         if (($attrs['blockId'] ?? null) === $blockId) {
-            return $this->extractNodeText($node);
+            return SnapshotBlockTexts::nodeText($node);
         }
 
         if (is_array($node['content'] ?? null)) {
@@ -234,30 +261,6 @@ final readonly class SnapshotAnchorResolver
         }
 
         return null;
-    }
-
-    /** @param array<string, mixed> $node */
-    private function extractNodeText(array $node): string
-    {
-        if (($node['type'] ?? null) === 'text') {
-            return is_string($node['text'] ?? null) ? $node['text'] : '';
-        }
-        if (($node['type'] ?? null) === 'hardBreak') {
-            return "\n";
-        }
-        if (! is_array($node['content'] ?? null)) {
-            return '';
-        }
-
-        $buffer = '';
-        foreach ($node['content'] as $child) {
-            if (is_array($child)) {
-                /** @var array<string, mixed> $child */
-                $buffer .= $this->extractNodeText($child);
-            }
-        }
-
-        return $buffer;
     }
 
     /**
@@ -410,6 +413,16 @@ final readonly class SnapshotAnchorResolver
             quoteText: $anchor->quoteText,
             changed: $payload !== $anchor->selectorPayload,
         );
+    }
+
+    private static function resolvable(CommentAnchorData $anchor): bool
+    {
+        return $anchor->selectorKind === SelectorKind::SnapshotUtf16 && $anchor->anchorState === AnchorState::Attached;
+    }
+
+    private static function unchanged(CommentAnchorData $anchor): SnapshotResolutionResult
+    {
+        return new SnapshotResolutionResult($anchor->anchorState, $anchor->selectorPayload, $anchor->quoteText, false);
     }
 
     private function detach(CommentAnchorData $anchor): SnapshotResolutionResult

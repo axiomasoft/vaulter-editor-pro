@@ -40,10 +40,18 @@ final readonly class SnapshotAnchorReconciler implements SnapshotWriteHook
     public function reconcile(string|int $documentId, int $generation, array $next, ?array $previous): array
     {
         $results = [];
-        foreach ($this->anchors->lockAttachedSnapshots($documentId, $generation) as $anchor) {
-            $resolution = $previous === null
-                ? $this->resolver->resolveStateless($anchor, $next)
-                : $this->resolver->resolveOnEdit($anchor, $previous, $next);
+        $anchors = $this->anchors->lockAttachedSnapshots($documentId, $generation);
+        if ($anchors === []) {
+            return $results;
+        }
+
+        // Index both documents once instead of walking them for every anchor.
+        $nextBlocks = SnapshotBlockTexts::of($next);
+        $previousBlocks = $previous === null ? null : SnapshotBlockTexts::of($previous);
+        foreach ($anchors as $anchor) {
+            $resolution = $previousBlocks === null
+                ? $this->resolver->resolveBlock($anchor, $nextBlocks->text($anchor->blockId))
+                : $this->resolver->resolveBlockEdit($anchor, $previousBlocks->text($anchor->blockId), $nextBlocks->text($anchor->blockId));
 
             if (! $resolution->changed) {
                 continue;
