@@ -172,7 +172,7 @@ jobs:
         env:
           DB_CONNECTION: sqlite
           DB_DATABASE: ":memory:"
-        run: composer test
+        run: composer test:parallel
 
   static:
     name: PHP ${{ matrix.php }} static
