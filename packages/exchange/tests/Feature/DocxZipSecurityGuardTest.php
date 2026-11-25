@@ -172,3 +172,22 @@ it('rejects UNIX symlinks S_IFLNK, special files, zip-bombs, XXE/XInclude, and d
         @unlink($tmp);
     }
 });
+
+it('measures binary parts without holding their inflated bytes in memory', function (): void {
+    // 32 MiB of incompressible media: the guard must inflate it to check the real size,
+    // but only XML and relationship parts are kept for inspection.
+    $media = random_bytes(32 * 1024 * 1024);
+    $zip = buildSyntheticDocxZip([
+        ['name' => '[Content_Types].xml', 'data' => '<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"/>'],
+        ['name' => 'word/document.xml', 'data' => '<?xml version="1.0" encoding="UTF-8"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"/>'],
+        ['name' => 'word/media/image1.png', 'data' => $media],
+    ]);
+    unset($media);
+    $guard = app(DocxZipArchiveGuard::class);
+
+    memory_reset_peak_usage();
+    $before = memory_get_usage();
+    $guard->assertSafe($zip);
+
+    expect(memory_get_peak_usage() - $before)->toBeLessThan(8 * 1024 * 1024);
+});

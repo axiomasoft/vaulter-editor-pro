@@ -149,8 +149,9 @@ final readonly class DocxZipArchiveGuard
         $actualTotal = 0;
         foreach ($entries as $i => [$rawName, $size, $isRels, $isXml]) {
             $remaining = $this->options->zipMaxTotalBytes - $actualTotal;
-            $content = $this->readBoundedEntry($zip, $i, $rawName, $size, $remaining);
-            $actualTotal += strlen($content);
+            // Media and other binary parts are only measured: their bytes are never inspected here.
+            $content = $this->readBoundedEntry($zip, $i, $rawName, $size, $remaining, keep: $isRels || $isXml);
+            $actualTotal += $size;
 
             if ($isRels) {
                 $this->assertSafeXmlText($content, $rawName);
@@ -204,7 +205,11 @@ final readonly class DocxZipArchiveGuard
         }
     }
 
-    private function readBoundedEntry(ZipArchive $zip, int $index, string $name, int $expectedSize, int $remainingTotal): string
+    /**
+     * Inflates one entry under the declared-size, per-entry and remaining-total caps. Returns its
+     * bytes when $keep is true; otherwise only counts them and returns ''.
+     */
+    private function readBoundedEntry(ZipArchive $zip, int $index, string $name, int $expectedSize, int $remainingTotal, bool $keep): string
     {
         $stream = $zip->getStreamIndex($index);
         if (! is_resource($stream)) {
@@ -226,7 +231,9 @@ final readonly class DocxZipArchiveGuard
                 if ($received > $expectedSize || $received > $this->options->zipMaxEntryBytes || $received > $remainingTotal) {
                     throw ExchangeException::zipLimitExceeded('zip_bomb_overflow', $name);
                 }
-                $buf .= $chunk;
+                if ($keep) {
+                    $buf .= $chunk;
+                }
             }
         } finally {
             fclose($stream);
