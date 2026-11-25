@@ -54,7 +54,7 @@ final readonly class ErrorsReferenceBlock
 
             $title = $this->catalog->title($code, 'en');
             $detail = $this->catalog->detail($code, [], 'en');
-            $sections[] = '#### '.$code."\n\n".($title === null ? '' : '**'.$title.'**'.($detail === null ? '' : ' — '.$detail));
+            $sections[] = '#### `'.$code."`\n\n".($title === null ? '' : '**'.$title.'**'.($detail === null ? '' : ' — '.$detail));
         }
 
         return $this->start()."\n".implode("\n", $summary)."\n\n".implode("\n\n", $sections)."\n".$this->end();
