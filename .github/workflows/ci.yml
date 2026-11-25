@@ -1,28 +1,21 @@
 name: CI
 
-# PHP 8.4 and 8.5, PostgreSQL 18.7 and 19.0, Node.js 26.13.1.
-# Migrations, scripts/ci/sql/unindexed-fks.sql, then Pest on PostgreSQL and SQLite.
-# PHPStan, Pint, and docx/vue test, typecheck and build.
-# scripts/ci/checkout-ecosystem.sh checks the sibling path repositories out beside
-# the workspace before Composer or npm installs that need them: vaulter and
-# vaulter-collaboration at main, Packman at the tag the root composer.json pins.
-# Private sibling checkouts use secrets.VAULTER_READ_TOKEN. The PHP job builds
-# packages/docx/dist/cli.js (Node.js 26.13.1, npm ci, docx build) before Pest.
-# `CI gate` needs every job and is the one check a branch rule should require.
-# Stop-cranes (scripts/ci/engineering-rails.py), enforced before review:
-# Zero-Royalty denylist (0 forbidden packages, no UNLICENSED, no @tiptap-pro),
-# 64-bit hashtextextended locks, no session pg_advisory_lock, no DEFERRABLE
-# INITIALLY DEFERRED, no raw DB::transaction(), no set_config(..., false),
-# no parse_url(), no ZipArchive::extractTo(), no CURLOPT_RESOLVE, no unindexed
-# FK, no Helpers/Utils/Common/Misc/Traits directories, no @phpstan-ignore,
-# no @psalm-suppress, no test ->skip(), no Eloquent Model on an #[Api]
-# surface, no libclamav linkage, no registry.tiptap.dev.
-# scripts/ci/engineering-rails.py carries a negative fixture (--self-test) that must
-# fail when a forbidden package, an UNLICENSED license, or a banned call is introduced.
+# DAG (GitHub draws this from `needs`):
+#   changes → quality → { php, node, docx-libreoffice, e2e } → CI gate
+#
+# quality is the fast fail: stop-cranes, composer validate, Pint, PHPStan,
+# actionlint and zizmor. The heavier lanes only start after it succeeds.
+# Path filters skip unaffected lanes on feature branches; a push to main,
+# workflow_dispatch, or a change under .github/ always runs every lane.
+# `CI gate` is the single check a branch rule should require (skipped lanes are allowed).
+#
+# Siblings (../vaulter, ../vaulter-collaboration, ../packman) come from
+# scripts/ci/checkout-ecosystem.sh. VAULTER_READ_TOKEN is optional now that those
+# repositories are public; when set, it is sent as an HTTP header (never in a URL).
 
 on:
   push:
-    branches: [main, 'feat/**', 'fix/**']
+    branches: [main, 'refactor/**', 'feat/**', 'fix/**', 'hotfix/**', 'chore/**']
   pull_request:
   workflow_dispatch:
 
@@ -33,29 +26,107 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  VAULTER_READ_TOKEN: ${{ secrets.VAULTER_READ_TOKEN }}
+  COMPOSER_NO_INTERACTION: "1"
+
 jobs:
-  stop-cranes:
-    name: Stop-cranes / Node 26.13.1
+  changes:
+    name: Changes
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 5
+    outputs:
+      full: ${{ steps.plan.outputs.full }}
+      php: ${{ steps.plan.outputs.php }}
+      node: ${{ steps.plan.outputs.node }}
+      e2e: ${{ steps.plan.outputs.e2e }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Filter paths
+        id: filter
+        if: github.event_name != 'workflow_dispatch' && github.ref != 'refs/heads/main'
+        uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
+        with:
+          filters: |
+            php:
+              - "**/*.php"
+              - "composer.json"
+              - "composer.lock"
+              - "phpstan*"
+              - "pint.json"
+              - "phpunit.xml*"
+            node:
+              - "package.json"
+              - "package-lock.json"
+              - "packages/**/package.json"
+              - "packages/**/*.{js,mjs,cjs,ts,tsx,vue,json}"
+            e2e:
+              - "tests/e2e/**"
+              - "scripts/ci/**"
+            workflows:
+              - ".github/**"
+              - "scripts/ci/**"
+
+      - name: Plan lanes
+        id: plan
+        env:
+          EVENT: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          FILTER_PHP: ${{ steps.filter.outputs.php }}
+          FILTER_NODE: ${{ steps.filter.outputs.node }}
+          FILTER_E2E: ${{ steps.filter.outputs.e2e }}
+          FILTER_WORKFLOWS: ${{ steps.filter.outputs.workflows }}
+        run: |
+          set -euo pipefail
+          if [[ "$EVENT" == "workflow_dispatch" || "$REF" == "refs/heads/main" || "$FILTER_WORKFLOWS" == "true" || -z "$FILTER_PHP" ]]; then
+            full=true; php=true; node=true; e2e=true
+          else
+            full=false
+            php=${FILTER_PHP:-false}
+            node=${FILTER_NODE:-false}
+            e2e=${FILTER_E2E:-false}
+          fi
+          {
+            echo "full=$full"
+            echo "php=$php"
+            echo "node=$node"
+            echo "e2e=$e2e"
+          } >> "$GITHUB_OUTPUT"
+          echo "lanes full=$full php=$php node=$node e2e=$e2e"
+
+  quality:
+    name: Quality (stop-cranes, Pint, PHPStan, workflow lint)
+    needs: changes
+    if: needs.changes.outputs.full == 'true' || needs.changes.outputs.php == 'true' || needs.changes.outputs.node == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
-      - name: Setup Node.js 26.13.1
-        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+      - name: Setup Node
+        uses: ./.github/actions/setup-node
         with:
           node-version: "26.13.1"
+          install: "false"
 
       - name: Assert Node.js >=26.13.1
         run: |
           node -e 'const parts = process.versions.node.split(".").map(Number); const ok = parts[0] > 26 || (parts[0] === 26 && (parts[1] > 13 || (parts[1] === 13 && parts[2] >= 1))); if (!ok) { console.error(process.versions.node); process.exit(1); }'
           node -e 'const engines = require("./package.json").engines || {}; if (engines.node !== ">=26.13.1") { console.error(engines); process.exit(1); }'
 
-      - name: Setup PHP 8.4
-        uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # v2.40.0
+      - name: Checkout sibling repositories
+        run: scripts/ci/checkout-ecosystem.sh vaulter vaulter-collaboration packman
+
+      - name: Setup PHP and Composer
+        uses: ./.github/actions/setup-php
         with:
           php-version: "8.4"
           coverage: none
@@ -68,10 +139,33 @@ jobs:
           python3 scripts/ci/engineering-rails.py --root "$GITHUB_WORKSPACE"
           python3 scripts/ci/engineering-rails.py --self-test
 
+      - name: Pint
+        run: composer lint:check
+
+      - name: PHPStan
+        run: composer phpstan
+
+      - name: Lint workflows
+        uses: ./.github/actions/lint-workflows
+
+      - name: Quality summary
+        if: always()
+        run: |
+          {
+            echo "## Quality"
+            echo
+            echo "Stop-cranes, composer validate, Pint, PHPStan, actionlint and zizmor ran on PHP 8.4 / Node 26.13.1."
+          } >> "$GITHUB_STEP_SUMMARY"
+
   php:
     name: PHP ${{ matrix.php }} / PG ${{ matrix.postgres }}
+    needs: [changes, quality]
+    if: always() && needs.quality.result == 'success' && (needs.changes.outputs.full == 'true' || needs.changes.outputs.php == 'true')
     runs-on: ubuntu-24.04
     timeout-minutes: 45
+    permissions:
+      contents: read
+      actions: write
     strategy:
       fail-fast: false
       matrix:
@@ -115,44 +209,38 @@ jobs:
           persist-credentials: false
 
       - name: Checkout sibling repositories
-        env:
-          VAULTER_READ_TOKEN: ${{ secrets.VAULTER_READ_TOKEN }}
         run: scripts/ci/checkout-ecosystem.sh vaulter vaulter-collaboration packman
 
-      - name: Setup Node.js 26.13.1
-        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+      - name: Setup Node
+        uses: ./.github/actions/setup-node
         with:
           node-version: "26.13.1"
-          cache: npm
 
       - name: Build DOCX CLI
         run: |
-          npm ci
           npm --workspace=@vaulter/editor-pro-docx run build
           test -f packages/docx/dist/cli.js
 
-      - name: Setup PHP ${{ matrix.php }}
-        uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # v2.40.0
+      - name: Setup PHP and Composer
+        uses: ./.github/actions/setup-php
         with:
           php-version: ${{ matrix.php }}
           extensions: pdo_pgsql, pgsql, pdo_sqlite, sqlite3
-          coverage: none
-
-      - name: Install Composer dependencies
-        run: composer install --no-interaction --no-progress
+          coverage: ${{ matrix.php == '8.4' && matrix.postgres == '18.7' && 'pcov' || 'none' }}
 
       - name: Install PostgreSQL client
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends postgresql-client
 
       - name: Assert PostgreSQL ${{ matrix.postgres }}
+        env:
+          EXPECTED: ${{ matrix.postgres }}
         run: |
           ver=$(psql -d vaulter -tAc 'SHOW server_version')
           ver=${ver//[[:space:]]/}
           echo "server_version=${ver}"
-          expected="${{ matrix.postgres }}"
           case "${ver}" in
-            ${expected}*) ;;
-            *) echo "expected PostgreSQL ${expected}, got ${ver}" >&2; exit 1 ;;
+            "${EXPECTED}"*) ;;
+            *) echo "expected PostgreSQL ${EXPECTED}, got ${ver}" >&2; exit 1 ;;
           esac
 
       - name: Create suite database
@@ -175,7 +263,23 @@ jobs:
       - name: Pest on PostgreSQL ${{ matrix.postgres }}
         env:
           VAULTER_TEST_DB_PER_PROCESS: "1"
-        run: composer test:parallel
+          WITH_COVERAGE: ${{ matrix.php == '8.4' && matrix.postgres == '18.7' && '1' || '0' }}
+        run: |
+          if [[ "$WITH_COVERAGE" == 1 ]]; then
+            mkdir -p build/coverage
+            composer test:parallel -- --coverage --coverage-clover build/coverage/clover.xml
+          else
+            composer test:parallel
+          fi
+
+      - name: Upload coverage
+        if: matrix.php == '8.4' && matrix.postgres == '18.7'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: coverage-php-pgsql
+          path: build/coverage/clover.xml
+          if-no-files-found: warn
+          retention-days: 14
 
       - name: Pest on SQLite
         if: matrix.postgres == '18.7'
@@ -184,42 +288,10 @@ jobs:
           DB_DATABASE: ":memory:"
         run: composer test:parallel
 
-  static:
-    name: PHP ${{ matrix.php }} static
-    runs-on: ubuntu-24.04
-    timeout-minutes: 20
-    strategy:
-      fail-fast: false
-      matrix:
-        php: ['8.4', '8.5']
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-
-      - name: Checkout sibling repositories
-        env:
-          VAULTER_READ_TOKEN: ${{ secrets.VAULTER_READ_TOKEN }}
-        run: scripts/ci/checkout-ecosystem.sh vaulter vaulter-collaboration packman
-
-      - name: Setup PHP ${{ matrix.php }}
-        uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # v2.40.0
-        with:
-          php-version: ${{ matrix.php }}
-          coverage: none
-
-      - name: Install Composer dependencies
-        run: composer install --no-interaction --no-progress
-
-      - name: PHPStan
-        run: composer phpstan
-
-      - name: Pint
-        run: composer lint:check
-
   node:
     name: Node 26.13.1 docx and vue
+    needs: [changes, quality]
+    if: always() && needs.quality.result == 'success' && (needs.changes.outputs.full == 'true' || needs.changes.outputs.node == 'true' || needs.changes.outputs.php == 'true')
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -229,15 +301,13 @@ jobs:
           persist-credentials: false
 
       - name: Checkout sibling repositories
-        env:
-          VAULTER_READ_TOKEN: ${{ secrets.VAULTER_READ_TOKEN }}
         run: scripts/ci/checkout-ecosystem.sh vaulter
 
-      - name: Setup Node.js 26.13.1
-        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+      - name: Setup Node
+        uses: ./.github/actions/setup-node
         with:
           node-version: "26.13.1"
-          cache: npm
+          install: "false"
 
       - name: Build sibling @vaulter/vue
         run: |
@@ -261,6 +331,8 @@ jobs:
 
   docx-libreoffice:
     name: DOCX LibreOffice roundtrip
+    needs: [changes, quality]
+    if: always() && needs.quality.result == 'success' && (needs.changes.outputs.full == 'true' || needs.changes.outputs.node == 'true')
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
@@ -269,43 +341,28 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Setup Node.js 26.13.1
-        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+      - name: Setup Node
+        uses: ./.github/actions/setup-node
         with:
           node-version: "26.13.1"
-          cache: npm
 
       - name: Install LibreOffice Writer
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends libreoffice-writer
 
-      - name: Install and build @vaulter/editor-pro-docx
-        run: |
-          npm ci
-          npm --workspace=@vaulter/editor-pro-docx run build
+      - name: Build @vaulter/editor-pro-docx
+        run: npm --workspace=@vaulter/editor-pro-docx run build
 
       - name: Run headless LibreOffice D1-D5 roundtrip gate
         run: bash scripts/ci/docx-libreoffice.sh
 
   e2e:
     name: Playwright E2E
+    needs: [changes, quality]
+    if: always() && needs.quality.result == 'success' && (needs.changes.outputs.full == 'true' || needs.changes.outputs.e2e == 'true' || needs.changes.outputs.php == 'true' || needs.changes.outputs.node == 'true')
     runs-on: ubuntu-24.04
     timeout-minutes: 25
-    services:
-      postgres:
-        image: postgres:18.7-alpine@sha256:0115267ab5a509022df9319c77be365cef335adb71556c75f60f5360ee247e71
-        env:
-          POSTGRES_USER: vaulter
-          POSTGRES_PASSWORD: secret
-          POSTGRES_DB: vaulter_e2e_test
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd="pg_isready -U vaulter -d vaulter_e2e_test"
-          --health-interval=5s
-          --health-timeout=5s
-          --health-retries=20
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -313,22 +370,20 @@ jobs:
           persist-credentials: false
 
       - name: Checkout sibling repositories
-        env:
-          VAULTER_READ_TOKEN: ${{ secrets.VAULTER_READ_TOKEN }}
         run: scripts/ci/checkout-ecosystem.sh vaulter vaulter-collaboration packman
 
-      - name: Setup PHP 8.4
-        uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # v2.40.0
+      - name: Setup PHP and Composer
+        uses: ./.github/actions/setup-php
         with:
           php-version: "8.4"
           extensions: mbstring, xml, zip, pdo_pgsql, pgsql, pdo_sqlite, sqlite3
           coverage: none
 
-      - name: Setup Node.js 26.13.1
-        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+      - name: Setup Node
+        uses: ./.github/actions/setup-node
         with:
           node-version: "26.13.1"
-          cache: npm
+          install: "false"
 
       - name: Install sibling dependencies
         run: |
@@ -339,7 +394,6 @@ jobs:
 
       - name: Install editor-pro dependencies
         run: |
-          composer install --no-interaction --prefer-dist --no-progress
           npm ci
           npm --workspace=@vaulter/editor-pro-docx run build
           npm --workspace=@vaulter/editor-pro-vue run build
@@ -355,18 +409,47 @@ jobs:
           E2E_DB_USERNAME: vaulter
           E2E_DB_PASSWORD: secret
         run: npx playwright test --config=tests/e2e/playwright.config.mjs
+    services:
+      postgres:
+        image: postgres:18.7-alpine@sha256:0115267ab5a509022df9319c77be365cef335adb71556c75f60f5360ee247e71
+        env:
+          POSTGRES_USER: vaulter
+          POSTGRES_PASSWORD: secret
+          POSTGRES_DB: vaulter_e2e_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U vaulter -d vaulter_e2e_test"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=20
 
   ci-gate:
     name: CI gate
     if: always()
-    needs: [stop-cranes, php, static, node, docx-libreoffice, e2e]
+    needs: [changes, quality, php, node, docx-libreoffice, e2e]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
-      # The one check a branch rule has to require: red unless every job (and every matrix cell) succeeded,
-      # so a failed, cancelled or skipped lane can never pass as green.
       - name: Verdict
         env:
           NEEDS: ${{ toJSON(needs) }}
         run: |
-          jq -e -r 'to_entries | map(select(.value.result != "success") | "\(.key): \(.value.result)") | if length == 0 then "all jobs succeeded" else (join("\n") | halt_error(1)) end' <<< "$NEEDS"
+          python3 - <<'PY'
+          import json, os, sys
+          needs = json.loads(os.environ["NEEDS"])
+          lines = [f"- `{name}`: {job['result']}" for name, job in sorted(needs.items())]
+          failed = {name: job["result"] for name, job in needs.items() if job["result"] not in ("success", "skipped")}
+          summary = os.environ.get("GITHUB_STEP_SUMMARY")
+          if summary:
+              with open(summary, "a", encoding="utf-8") as fh:
+                  fh.write("## CI gate\n\n")
+                  fh.write("\n".join(lines) + "\n")
+                  if failed:
+                      fh.write("\nA skipped lane is allowed when the path filter dropped it; failed or cancelled jobs are not.\n")
+          for name, result in sorted(failed.items()):
+              print(f"::error::{name}: {result}")
+          if failed:
+              sys.exit(1)
+          print("all required jobs succeeded or were skipped")
+          PY

@@ -52,26 +52,35 @@ PostgreSQL 18 cluster from `/usr/lib/postgresql/18/bin`.
 
 ## CI
 
-`.github/workflows/ci.yml` runs on pushes to `main`, `feat/**` and `fix/**`, on pull requests
-and manually. Every action is pinned to a commit SHA and the PostgreSQL images to a digest.
+`.github/workflows/ci.yml` is a DAG. GitHub draws it from each job's `needs`:
 
-| Job | What it checks |
-| --- | --- |
-| Stop-cranes | `composer validate`; `engineering-rails.py`: license denylist (copyleft, `UNLICENSED`, `@tiptap-pro`), banned calls and patterns in PHP, SQL and tests, and its own negative self-test |
-| PHP *version* / PG *version* | Matrix PHP 8.4 and 8.5 × PostgreSQL 18.7 and 19.0: build the DOCX CLI, migrate, `scripts/ci/sql/unindexed-fks.sql` (no foreign key without an index), Pest in parallel on PostgreSQL with a database per worker, and on SQLite (once per PHP version) |
-| PHP *version* static | PHPStan at level max with strict rules, the SQL stop rail and disallowed calls; Pint |
-| Node docx and vue | Vitest, typecheck and build of both npm packages |
-| DOCX LibreOffice roundtrip | The corpus gate above |
-| Playwright E2E | The E2E suite against PostgreSQL 18.7 |
-| CI gate | Fails unless every job above succeeded; the one check a branch rule should require |
+```
+changes ──► quality ──► php (8.4/8.5 × PostgreSQL 18.7/19.0, SQLite once per PHP)
+                   ├──► node (docx and vue test, typecheck, build)
+                   ├──► docx-libreoffice (corpus gate)
+                   └──► e2e (Playwright against PostgreSQL 18.7)
+                         └──► CI gate
+```
+
+1. **Changes** selects lanes. A push to `main`, a `workflow_dispatch`, or a change under
+   `.github/` or `scripts/ci/` runs every lane. On other branches, `dorny/paths-filter` skips
+   lanes whose files did not change.
+2. **Quality** is the fast fail: the Node engines assertion, stop-cranes, `composer validate`,
+   Pint, PHPStan, actionlint and zizmor. Heavier lanes start only after it succeeds.
+3. **PHP, Node, LibreOffice and E2E** then run in parallel. The PHP 8.4 / PostgreSQL 18.7 cell
+   uploads a Clover coverage artifact.
+4. **CI gate** waits for every job (`if: always()`) and fails if any needed job failed or was
+   cancelled. A skipped lane (path filter) is allowed. Branch protection should require only
+   `CI gate`.
+
+Triggers: pushes to `main`, `refactor/**`, `feat/**`, `fix/**`, `hotfix/**` and `chore/**`, pull
+requests, and manual `workflow_dispatch`. Concurrent runs on the same ref cancel the earlier one.
+Every action is pinned to a commit SHA and the PostgreSQL images to a digest. PHP and Node setup,
+Composer/npm caching, and workflow lint live in composite actions under `.github/actions/`.
 
 Sibling repositories are checked out by `scripts/ci/checkout-ecosystem.sh`: `vaulter` and
-`vaulter-collaboration` at `main`, Packman at the tag pinned in the root `composer.json`.
-
-### Requirements of a repository that runs this workflow
-
-- GitHub Actions enabled, with hosted Ubuntu 24.04 runners (service containers need Docker).
-- Read access to `axiomasoft/vaulter`, `axiomasoft/vaulter-collaboration` and
-  `axiomasoft/packman` (the script fetches them from `github.com/axiomasoft` whatever the
-  owner of the repository running the workflow) through the secret `VAULTER_READ_TOKEN`.
-  Without the secret the checkout only works for public repositories.
+`vaulter-collaboration` at `main`, Packman at the tag pinned in the root `composer.json`. The
+secret `VAULTER_READ_TOKEN` is optional while those repositories are public; when set, it is
+sent as an HTTP header, never in a URL. Without the secret the checkout only works for public
+repositories. Hosted Ubuntu 24.04 runners (or self-hosted ones with Docker) are required for
+service containers.
