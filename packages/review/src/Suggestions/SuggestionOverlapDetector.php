@@ -14,8 +14,19 @@ use Vaulter\EditorPro\Review\Enums\SuggestionKind;
  * Overlap policy v1 detector across text edits and all 6 structural review profiles.
  */
 #[Internal]
-final readonly class SuggestionOverlapDetector
+final class SuggestionOverlapDetector
 {
+    /**
+     * The document the container index below was built from. Callers compare every pair of a selection against
+     * the same document, so the index is built once per document instead of walking the tree twice per pair.
+     *
+     * @var array<string, mixed>|null
+     */
+    private ?array $indexedDoc = null;
+
+    /** @var array<string, array<string, string>> container block ID by block ID, per container type list */
+    private array $containerIndex = [];
+
     /**
      * @param  list<string>  $destroyedBlockIds
      * @param  array<string, mixed>|null  $doc
@@ -104,11 +115,6 @@ final readonly class SuggestionOverlapDetector
             $other = $split === $a ? $b : $a;
 
             return $this->splitVsOtherOverlap($split, $other);
-        }
-
-        if (($a->kind === SuggestionKind::TableChange->value && $this->isDestructiveTableOp($a))
-            || ($b->kind === SuggestionKind::TableChange->value && $this->isDestructiveTableOp($b))) {
-            return true;
         }
 
         return true;
@@ -253,25 +259,53 @@ final readonly class SuggestionOverlapDetector
     }
 
     /**
-     * @param  array<array-key, mixed>  $node
+     * The block ID of the first container of one of `$types` around `$target` (the container's own first block ID).
+     * Document order decides between duplicate block IDs: the first occurrence that sits in such a container wins,
+     * and an occurrence nested inside an earlier occurrence of the same ID is never considered.
+     *
+     * @param  array<string, mixed>  $doc
      * @param  list<string>  $types
      */
-    private function findContainer(array $node, string $target, array $types, ?string $container = null): ?string
+    private function findContainer(array $doc, string $target, array $types): ?string
+    {
+        if ($this->indexedDoc !== $doc) {
+            $this->indexedDoc = $doc;
+            $this->containerIndex = [];
+        }
+        $key = implode(',', $types);
+        if (! isset($this->containerIndex[$key])) {
+            $index = [];
+            $this->indexContainers($doc, $types, null, [], $index);
+            $this->containerIndex[$key] = $index;
+        }
+
+        return $this->containerIndex[$key][$target] ?? null;
+    }
+
+    /**
+     * @param  array<array-key, mixed>  $node
+     * @param  list<string>  $types
+     * @param  array<string, true>  $ancestorIds
+     * @param  array<string, string>  $index
+     */
+    private function indexContainers(array $node, array $types, ?string $container, array $ancestorIds, array &$index): void
     {
         if (in_array($node['type'] ?? null, $types, true)) {
             $container = $this->firstBlockId($node);
         }
         $attrs = $node['attrs'] ?? null;
-        if (is_array($attrs) && ($attrs['blockId'] ?? null) === $target) {
-            return $container;
+        $id = is_array($attrs) && is_string($attrs['blockId'] ?? null) ? $attrs['blockId'] : null;
+        if ($id !== null) {
+            if ($container !== null && ! isset($index[$id]) && ! isset($ancestorIds[$id])) {
+                $index[$id] = $container;
+            }
+            $ancestorIds[$id] = true;
         }
         foreach (is_array($node['content'] ?? null) ? $node['content'] : [] as $child) {
-            if (is_array($child) && ($found = $this->findContainer($child, $target, $types, $container)) !== null) {
-                return $found;
+            if (is_array($child)) {
+                $this->indexContainers($child, $types, $container, $ancestorIds, $index);
             }
         }
-
-        return null;
     }
 
     /** @param array<array-key, mixed> $node */
@@ -288,13 +322,5 @@ final readonly class SuggestionOverlapDetector
         }
 
         return null;
-    }
-
-    private function isDestructiveTableOp(TextSuggestion|TextSuggestionInput|StructuralSuggestionInput $item): bool
-    {
-        $payload = $item instanceof TextSuggestionInput ? [] : $item->payload;
-        $op = $payload['table_op'] ?? null;
-
-        return $op === 'delete_row' || $op === 'delete_column';
     }
 }
