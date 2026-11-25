@@ -263,7 +263,7 @@ final class NodeDocxExchangeRuntime implements DocxExchangeRuntime
             $message = is_string($error['message'] ?? null) ? $error['message'] : 'DOCX conversion failed.';
 
             throw match ($code) {
-                'zip_quota_exceeded', 'zip_bomb_ratio', 'limit_exceeded' => ExchangeException::zipLimitExceeded($code),
+                'zip_quota_exceeded', 'zip_bomb_ratio', 'limit_exceeded', 'media_quota_exceeded' => ExchangeException::zipLimitExceeded($code),
                 'zip_invalid_archive',
                 'zip_slip',
                 'zip_symlink',
@@ -273,7 +273,9 @@ final class NodeDocxExchangeRuntime implements DocxExchangeRuntime
                 'xml_xxe_forbidden',
                 'xml_malformed',
                 'xml_depth_exceeded',
-                'external_rel_forbidden' => ExchangeException::unsafeArchive($code, detailMessage: $message),
+                'external_rel_forbidden',
+                'media_invalid_format',
+                'media_svg_unsafe' => ExchangeException::unsafeArchive($code, detailMessage: $message),
                 'profile_blocked' => ExchangeException::profileBlocked($code),
                 'invalid_request', 'invalid_profile' => ExchangeException::invalidCommand($message, $code),
                 default => ExchangeException::runtimeFailed($code, $message),

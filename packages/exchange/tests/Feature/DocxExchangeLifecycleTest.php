@@ -122,7 +122,8 @@ function sampleRichDocument(string $lead = 'Initial clause'): array
     ];
 }
 
-function makeDocxZip(string $documentXml, ?string $relsXml = null): string
+/** @param array<string, string> $extraEntries */
+function makeDocxZip(string $documentXml, ?string $relsXml = null, array $extraEntries = []): string
 {
     $entries = [
         [
@@ -141,6 +142,9 @@ function makeDocxZip(string $documentXml, ?string $relsXml = null): string
 
     if ($relsXml !== null) {
         $entries[] = ['name' => 'word/_rels/document.xml.rels', 'data' => $relsXml];
+    }
+    foreach ($extraEntries as $name => $data) {
+        $entries[] = ['name' => $name, 'data' => $data];
     }
 
     $parts = [];
@@ -644,6 +648,41 @@ it('retains section and discussion metadata on server import without body_only w
     'sections' => ['d2-sections.docx', 'body_only_sections'],
     'discussions' => ['d3-discussions.docx', 'body_only_discussions'],
 ]);
+
+it('fails an import with an unsafe embedded SVG terminally instead of requeueing it', function (): void {
+    $owner = AccessTestHelpers::user(1);
+    $storage = AccessTestHelpers::storage();
+    AccessTestHelpers::grant($storage->rootNode, RoleRegistry::OWNER, subjectId: 1);
+    $drive = app(Vaulter::class)->drive($storage)->actingAs($owner);
+    $docs = app(DocumentsManager::class);
+    $docNode = $docs->in($drive)->create('svg-target', 'vaulter/rich-text', sampleRichDocument('Untouched safe text'));
+    $before = $docs->in($drive)->content($docNode);
+
+    // The PHP archive guard only inspects XML parts, so the scripted SVG reaches the converter,
+    // which rejects it with media_svg_unsafe. That refusal is deterministic: retrying cannot help.
+    $bytes = makeDocxZip(
+        '<?xml version="1.0"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>Hi</w:t></w:r></w:p></w:body></w:document>',
+        extraEntries: ['word/media/evil.svg' => '<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>'],
+    );
+
+    $job = $this->actingAs($owner)->withHeaders(['Idempotency-Key' => 'svg-unsafe'])
+        ->postJson('api/vaulter/v1/documents/'.$docNode->id.'/exchange-jobs', [
+            'request_key' => 'svg-unsafe',
+            'kind' => 'import',
+            'profile_id' => 'discussions',
+            'docx_b64' => base64_encode($bytes),
+        ])
+        ->assertStatus(202)
+        ->assertJsonPath('data.state', ExchangeJobState::Failed->value)
+        ->assertJsonPath('data.error_code', 'exchange_unsafe_archive')
+        ->assertJsonPath('data.diagnostics_report.reason', 'media_svg_unsafe')
+        ->json('data');
+
+    expect(app(ExchangeManager::class)->reclaimExpiredLeases())->toBe([])
+        ->and(app(ExchangeManager::class)->forDrive($drive)->status($docNode, (string) $job['id'])->job->state)
+        ->toBe(ExchangeJobState::Failed)
+        ->and($docs->in($drive)->content($docNode)->stateVersion)->toBe($before->stateVersion);
+});
 
 it('refuses to resolve a bare blob ID as an import source', function (): void {
     $owner = AccessTestHelpers::user(1);

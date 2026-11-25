@@ -34,7 +34,10 @@ The `@vaulter/editor-pro-docx` CLI receives the same ZIP quotas and applies its 
 (`DocxSecurityError`): archive structure, quotas and compression ratio, path traversal,
 symlinks, duplicate and overlapping entries, DTD/entity/XInclude constructs, XML depth,
 external relationships, and embedded media (allowed formats, SVG content, media size and image
-dimensions). Its archive and XML violations map to the same two problem codes.
+dimensions). Its rejections map to the same two terminal problem codes: quota violations
+(including `media_quota_exceeded`) to `exchange_zip_limit_exceeded`, everything else (including
+`media_svg_unsafe` and `media_invalid_format`) to `exchange_unsafe_archive`. Only a failure of
+the runtime itself is `exchange_runtime_failed`, which returns the job to the queue.
 
 The CLI runs as a separate process with a timeout (`runtime_timeout_seconds`). DOCX bytes are
 exchanged through temporary files created with mode `0600` and deleted afterwards, and the
