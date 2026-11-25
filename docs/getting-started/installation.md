@@ -62,7 +62,8 @@ VAULTER_DOCX_NODE_BIN=node
 
 The default `cli_path` points at `packages/docx/dist/cli.js` inside this repository and only
 works in a monorepo checkout. When the file is missing every attempt fails with
-`exchange_runtime_failed` (reason `cli_missing`) and the job goes back to `queued`.
+`exchange_runtime_failed` (reason `cli_missing`): the job goes back to `queued` while the queue
+retries it and ends `failed` once the worker's `--tries` are spent.
 
 ## 3. Queue and maintenance (exchange only)
 

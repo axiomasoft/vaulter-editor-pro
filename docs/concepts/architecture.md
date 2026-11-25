@@ -82,8 +82,9 @@ A job moves `queued` → `running` → `preview_ready` (import) or `completed` (
    conversion runs in the `DocxExchangeRuntime`, by default `node cli.js` with a JSON request on
    stdin and DOCX bytes passed through `0600` temp files. The result is committed only while the
    lease is still held; a worker that lost its lease gets `exchange_lease_lost`. A runtime
-   failure (`exchange_runtime_failed`) returns the job to `queued`; a deterministic refusal
-   marks it `failed`.
+   failure (`exchange_runtime_failed`) returns the job to `queued` for the queue's next attempt;
+   once the queue gives up (the worker's `--tries` are spent, or at once under `sync`) the job
+   is marked `failed` with that error. A deterministic refusal marks it `failed` immediately.
 3. **Apply (import).** `apply` locks the job and writes the imported content, sections,
    discussions and suggestions in one atomic document mutation, compare-and-set against the
    generation the preview was built from. A changed document answers `exchange_stale_preview`.
