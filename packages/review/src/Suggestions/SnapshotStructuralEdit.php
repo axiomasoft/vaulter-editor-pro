@@ -13,7 +13,9 @@ use Vaulter\EditorPro\Review\Anchors\SnapshotAnchorResolver;
 use Vaulter\EditorPro\Review\Data\StructuralSuggestionInput;
 use Vaulter\EditorPro\Review\Data\TextSuggestion;
 use Vaulter\EditorPro\Review\Data\TextSuggestionInput;
+use Vaulter\EditorPro\Review\Enums\ListOperation;
 use Vaulter\EditorPro\Review\Enums\SuggestionKind;
+use Vaulter\EditorPro\Review\Enums\TableOperation;
 use Vaulter\EditorPro\Review\Exceptions\SuggestionConflictException;
 use Vaulter\EditorPro\Review\Exceptions\UnsupportedSuggestionException;
 
@@ -587,16 +589,17 @@ final readonly class SnapshotStructuralEdit
      */
     private function applyListChange(array $doc, StructuralSuggestionInput $input): array
     {
-        $listOp = self::strVal($input->payload['list_op'] ?? null);
+        $listOp = ListOperation::tryFrom(self::strVal($input->payload['list_op'] ?? null))
+            ?? throw UnsupportedSuggestionException::because('Unsupported list operation.', 'unsupported_list_operation');
         $listAttrs = self::stringMapOrEmpty($input->payload['list_attrs'] ?? null);
 
         return match ($listOp) {
-            'wrap_bullet', 'wrap_ordered' => $this->wrapBlockInList($doc, $input->targetBlockId, $listOp === 'wrap_bullet' ? 'bulletList' : 'orderedList', $listAttrs),
-            'toggle_type' => $this->toggleEnclosingListType($doc, $input->targetBlockId, $listAttrs),
-            'lift' => $this->liftBlockFromList($doc, $input->targetBlockId),
-            'sink_item' => $this->sinkListItem($doc, $input->targetBlockId),
-            'split_item' => $this->splitListItem($doc, $input),
-            default => throw UnsupportedSuggestionException::because('Unsupported list operation.', 'unsupported_list_operation'),
+            ListOperation::WrapBullet => $this->wrapBlockInList($doc, $input->targetBlockId, 'bulletList', $listAttrs),
+            ListOperation::WrapOrdered => $this->wrapBlockInList($doc, $input->targetBlockId, 'orderedList', $listAttrs),
+            ListOperation::ToggleType => $this->toggleEnclosingListType($doc, $input->targetBlockId, $listAttrs),
+            ListOperation::Lift => $this->liftBlockFromList($doc, $input->targetBlockId),
+            ListOperation::SinkItem => $this->sinkListItem($doc, $input->targetBlockId),
+            ListOperation::SplitItem => $this->splitListItem($doc, $input),
         };
     }
 
@@ -930,8 +933,9 @@ final readonly class SnapshotStructuralEdit
      */
     private function applyTableChange(array $doc, StructuralSuggestionInput $input, array &$destroyed): array
     {
-        $tableOp = self::strVal($input->payload['table_op'] ?? null);
-        if ($tableOp === 'insert_table') {
+        $tableOp = TableOperation::tryFrom(self::strVal($input->payload['table_op'] ?? null))
+            ?? throw UnsupportedSuggestionException::because('Unsupported table operation.', 'unsupported_table_operation');
+        if ($tableOp === TableOperation::InsertTable) {
             return $this->applyInsertTable($doc, $input);
         }
 
@@ -1021,7 +1025,7 @@ final readonly class SnapshotStructuralEdit
     private function mutateTableNode(
         array $doc,
         array $table,
-        string $tableOp,
+        TableOperation $tableOp,
         StructuralSuggestionInput $input,
         array &$destroyed,
     ): array {
@@ -1037,7 +1041,7 @@ final readonly class SnapshotStructuralEdit
         $providedIds = self::stringList($input->payload['cell_block_ids'] ?? null);
         $providedCells = is_array($input->payload['cells_content'] ?? null) ? array_values($input->payload['cells_content']) : [];
 
-        if ($tableOp === 'insert_row') {
+        if ($tableOp === TableOperation::InsertRow) {
             $rowIdx = is_int($input->payload['row_index'] ?? null) ? $input->payload['row_index'] : $rowCount;
             if ($rowIdx < 0 || $rowIdx > $rowCount) {
                 throw new SuggestionConflictException('Row index is out of bounds.');
@@ -1058,7 +1062,7 @@ final readonly class SnapshotStructuralEdit
             return $table;
         }
 
-        if ($tableOp === 'delete_row') {
+        if ($tableOp === TableOperation::DeleteRow) {
             $rowIdx = $input->payload['row_index'] ?? null;
             if (! is_int($rowIdx) || ! isset($rows[$rowIdx])) {
                 throw new SuggestionConflictException('Target table row for deletion does not exist.');
@@ -1073,7 +1077,7 @@ final readonly class SnapshotStructuralEdit
             return $table;
         }
 
-        if ($tableOp === 'insert_column') {
+        if ($tableOp === TableOperation::InsertColumn) {
             $colIdx = is_int($input->payload['col_index'] ?? null) ? $input->payload['col_index'] : $colCount;
             if ($colIdx < 0 || $colIdx > $colCount) {
                 throw new SuggestionConflictException('Column index is out of bounds.');
@@ -1097,7 +1101,7 @@ final readonly class SnapshotStructuralEdit
             return $table;
         }
 
-        if ($tableOp === 'delete_column') {
+        if ($tableOp === TableOperation::DeleteColumn) {
             $colIdx = $input->payload['col_index'] ?? null;
             if (! is_int($colIdx) || $colIdx < 0) {
                 throw new SuggestionConflictException('Target table column index is invalid.');
@@ -1116,7 +1120,7 @@ final readonly class SnapshotStructuralEdit
             return $table;
         }
 
-        if ($tableOp === 'toggle_header_row') {
+        if ($tableOp === TableOperation::ToggleHeaderRow) {
             $rowIdx = is_int($input->payload['row_index'] ?? null) ? $input->payload['row_index'] : 0;
             if (! isset($rows[$rowIdx])) {
                 throw new SuggestionConflictException('Target table row does not exist.');
@@ -1133,7 +1137,7 @@ final readonly class SnapshotStructuralEdit
             return $table;
         }
 
-        if ($tableOp === 'toggle_header_cell') {
+        if ($tableOp === TableOperation::ToggleHeaderCell) {
             [$rowIdx, $colIdx] = $this->locateCellCoords(
                 $rows,
                 $input->targetBlockId,
@@ -1153,7 +1157,9 @@ final readonly class SnapshotStructuralEdit
             return $table;
         }
 
-        // set_cell_attr
+        if ($tableOp !== TableOperation::SetCellAttr) {
+            throw UnsupportedSuggestionException::because('Unsupported table operation.', 'unsupported_table_operation');
+        }
         [$rowIdx, $colIdx] = $this->locateCellCoords(
             $rows,
             $input->targetBlockId,
@@ -1270,7 +1276,7 @@ final readonly class SnapshotStructuralEdit
         if ($found === null) {
             return;
         }
-        if (($input->payload['table_op'] ?? null) === 'insert_table') {
+        if (($input->payload['table_op'] ?? null) === TableOperation::InsertTable->value) {
             throw UnsupportedSuggestionException::because('A table cannot be inserted inside another table.', 'non_textual_table');
         }
         $this->assertTableIsTextual($found);

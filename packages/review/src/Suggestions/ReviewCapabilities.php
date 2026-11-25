@@ -12,7 +12,9 @@ use Vaulter\Documents\Types\RichTextDocumentType;
 use Vaulter\EditorPro\Review\Data\ReviewCapabilitiesData;
 use Vaulter\EditorPro\Review\Data\StructuralSuggestionInput;
 use Vaulter\EditorPro\Review\Data\TextSuggestionInput;
+use Vaulter\EditorPro\Review\Enums\ListOperation;
 use Vaulter\EditorPro\Review\Enums\SuggestionKind;
+use Vaulter\EditorPro\Review\Enums\TableOperation;
 use Vaulter\EditorPro\Review\Exceptions\UnsupportedSuggestionException;
 
 /**
@@ -27,24 +29,24 @@ final readonly class ReviewCapabilities
 
     /** @var list<string> */
     public const array LIST_OPERATIONS = [
-        'wrap_bullet',
-        'wrap_ordered',
-        'lift',
-        'toggle_type',
-        'sink_item',
-        'split_item',
+        ListOperation::WrapBullet->value,
+        ListOperation::WrapOrdered->value,
+        ListOperation::Lift->value,
+        ListOperation::ToggleType->value,
+        ListOperation::SinkItem->value,
+        ListOperation::SplitItem->value,
     ];
 
     /** @var list<string> */
     public const array TABLE_OPERATIONS = [
-        'insert_table',
-        'insert_row',
-        'delete_row',
-        'insert_column',
-        'delete_column',
-        'toggle_header_row',
-        'toggle_header_cell',
-        'set_cell_attr',
+        TableOperation::InsertTable->value,
+        TableOperation::InsertRow->value,
+        TableOperation::DeleteRow->value,
+        TableOperation::InsertColumn->value,
+        TableOperation::DeleteColumn->value,
+        TableOperation::ToggleHeaderRow->value,
+        TableOperation::ToggleHeaderCell->value,
+        TableOperation::SetCellAttr->value,
     ];
 
     /** @var list<string> */
@@ -290,14 +292,15 @@ final readonly class ReviewCapabilities
 
     private function validateListChange(StructuralSuggestionInput $input, TipTapSchema $schema): void
     {
-        $listOp = $input->payload['list_op'] ?? null;
-        if (! is_string($listOp) || ! in_array($listOp, self::LIST_OPERATIONS, true)) {
+        $rawListOp = $input->payload['list_op'] ?? null;
+        $listOp = is_string($rawListOp) ? ListOperation::tryFrom($rawListOp) : null;
+        if ($listOp === null) {
             throw UnsupportedSuggestionException::because(
-                sprintf('List operation [%s] is not supported.', is_string($listOp) ? $listOp : 'unknown'),
+                sprintf('List operation [%s] is not supported.', is_string($rawListOp) ? $rawListOp : 'unknown'),
                 'unsupported_list_operation',
             );
         }
-        if ($listOp === 'split_item') {
+        if ($listOp === ListOperation::SplitItem) {
             $newBlockId = $input->payload['new_block_id'] ?? null;
             if (! is_string($newBlockId) || ! BlockIdentity::isValid($newBlockId) || $newBlockId === $input->targetBlockId) {
                 throw UnsupportedSuggestionException::because('list_change split_item requires a distinct valid new_block_id.', 'invalid_new_block_id');
@@ -323,15 +326,16 @@ final readonly class ReviewCapabilities
 
     private function validateTableChange(StructuralSuggestionInput $input, TipTapSchema $schema): void
     {
-        $tableOp = $input->payload['table_op'] ?? null;
-        if (! is_string($tableOp) || ! in_array($tableOp, self::TABLE_OPERATIONS, true)) {
+        $rawTableOp = $input->payload['table_op'] ?? null;
+        $tableOp = is_string($rawTableOp) ? TableOperation::tryFrom($rawTableOp) : null;
+        if ($tableOp === null) {
             throw UnsupportedSuggestionException::because(
-                sprintf('Table operation [%s] is not supported.', is_string($tableOp) ? $tableOp : 'unknown'),
+                sprintf('Table operation [%s] is not supported.', is_string($rawTableOp) ? $rawTableOp : 'unknown'),
                 'unsupported_table_operation',
             );
         }
 
-        if ($tableOp === 'insert_table') {
+        if ($tableOp === TableOperation::InsertTable) {
             $rows = $input->payload['rows'] ?? 2;
             $cols = $input->payload['cols'] ?? 2;
             if (! is_int($rows) || ! is_int($cols) || $rows < 1 || $cols < 1
@@ -353,7 +357,7 @@ final readonly class ReviewCapabilities
                 }
             }
         }
-        if ($tableOp === 'set_cell_attr') {
+        if ($tableOp === TableOperation::SetCellAttr) {
             $attr = $input->payload['attr'] ?? null;
             if (! is_string($attr) || ! in_array($attr, $schema->attributes('tableCell'), true)) {
                 throw UnsupportedSuggestionException::because('Unsupported table cell attribute.', 'unsupported_table_cell_attr');

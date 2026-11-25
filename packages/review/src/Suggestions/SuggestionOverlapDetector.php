@@ -9,6 +9,7 @@ use Vaulter\EditorPro\Review\Data\StructuralSuggestionInput;
 use Vaulter\EditorPro\Review\Data\TextSuggestion;
 use Vaulter\EditorPro\Review\Data\TextSuggestionInput;
 use Vaulter\EditorPro\Review\Enums\SuggestionKind;
+use Vaulter\EditorPro\Review\Enums\TableOperation;
 
 /**
  * Overlap policy v1 detector across text edits and all 6 structural review profiles.
@@ -218,23 +219,22 @@ final class SuggestionOverlapDetector
 
         $aPayload = $a instanceof TextSuggestionInput ? [] : $a->payload;
         $bPayload = $b instanceof TextSuggestionInput ? [] : $b->payload;
-        $aOp = $aPayload['table_op'] ?? null;
-        $bOp = $bPayload['table_op'] ?? null;
+        $aOp = is_string($aPayload['table_op'] ?? null) ? TableOperation::tryFrom($aPayload['table_op']) : null;
+        $bOp = is_string($bPayload['table_op'] ?? null) ? TableOperation::tryFrom($bPayload['table_op']) : null;
         $container = $this->container($a, $doc);
         if ($container === null || $container !== $this->container($b, $doc)) {
             return false;
         }
 
         // A row or column insertion/deletion changes the meaning of selectors into its table.
-        $indexChanging = ['insert_row', 'insert_column', 'delete_row', 'delete_column'];
-        if (in_array($aOp, $indexChanging, true) || in_array($bOp, $indexChanging, true)) {
+        if ($aOp?->shiftsIndexes() === true || $bOp?->shiftsIndexes() === true) {
             return true;
         }
 
         $row = $aPayload['row_index'] ?? null;
 
         return $row !== null && $row === ($bPayload['row_index'] ?? null)
-            && ($aOp === 'toggle_header_row' || $bOp === 'toggle_header_row'
+            && ($aOp === TableOperation::ToggleHeaderRow || $bOp === TableOperation::ToggleHeaderRow
                 || ($aPayload['col_index'] ?? null) === ($bPayload['col_index'] ?? null));
     }
 
