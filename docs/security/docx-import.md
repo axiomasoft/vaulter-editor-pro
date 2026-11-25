@@ -21,12 +21,14 @@ entry name in `diagnostics_report.entry` when there is one.
 | Absolute or drive paths, backslashes, `.` or `..` segments (zip slip); empty, non-UTF-8 or duplicate (case-insensitive) names | `zip_slip`, `invalid_entry_name`, `duplicate_entry_name` |
 | Symlinks and special files in the entry attributes | `zip_symlink`, `zip_special_file` |
 | Missing `[Content_Types].xml` or main document part | `missing_ooxml_parts` |
-| `DOCTYPE`, `ENTITY`, `ELEMENT`, `ATTLIST` declarations or XInclude in any XML part | `xxe_doctype`, `xxe_or_xinclude`, `xxe_xinclude` |
-| XML nesting deeper than 256 elements, malformed XML or encoding | `xml_depth_exceeded`, `malformed_xml`, `invalid_xml_encoding` |
+| `DOCTYPE`, `ENTITY`, `ELEMENT`, `ATTLIST` declarations or XInclude in any XML part | `xxe_or_xinclude` (a text scan before parsing; the parser's own `xxe_doctype` and `xxe_xinclude` checks are a second line) |
+| Malformed XML, encoding other than UTF-8, nesting deeper than 256 elements | `malformed_xml`, `invalid_xml_encoding`; libxml stops at 256 levels itself, so deep nesting reports `malformed_xml` (`xml_depth_exceeded` is the guard's backstop) |
 | `.rels` part above `zip.max_rels_bytes` or malformed | `oversized_rels`, `malformed_rels` |
 | External relationship that is not a hyperlink to `http`, `https` or `mailto` | `disallowed_external_relationship` |
 
-Entries are read with bounded buffers; their declared sizes are not trusted.
+Every entry is inflated to check its real size against its declared size and the quotas, so
+declared sizes are not trusted. Only XML and `.rels` parts are kept in memory for inspection;
+media and other binary parts are counted as they stream and never buffered.
 
 ## During conversion (Node.js)
 
