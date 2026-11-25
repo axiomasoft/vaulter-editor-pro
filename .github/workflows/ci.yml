@@ -112,31 +112,7 @@ jobs:
       - name: Checkout sibling repositories
         env:
           VAULTER_READ_TOKEN: ${{ secrets.VAULTER_READ_TOKEN }}
-          GIT_TERMINAL_PROMPT: "0"
-        run: |
-          set -euo pipefail
-          root="$GITHUB_WORKSPACE"
-          workspace="$(dirname "$root")"
-          fetch_dependency() {
-            local directory="$1" url="$2" ref="$3"
-            local dest="$workspace/$directory"
-            if [ -e "$dest" ]; then
-              echo "sibling present: $dest"
-              return 0
-            fi
-            mkdir -p "$dest"
-            git -C "$dest" init -q
-            git -C "$dest" fetch --quiet --depth=1 "$url" "$ref"
-            git -C "$dest" checkout -q -b main FETCH_HEAD
-          }
-          if [ -n "${VAULTER_READ_TOKEN}" ]; then
-            base="https://x-access-token:${VAULTER_READ_TOKEN}@github.com/axiomasoft"
-          else
-            base="https://github.com/axiomasoft"
-          fi
-          fetch_dependency vaulter "$base/vaulter.git" refs/heads/main
-          fetch_dependency vaulter-collaboration "$base/vaulter-collaboration.git" refs/heads/main
-          fetch_dependency packman "$base/packman.git" refs/tags/v0.1.2
+        run: scripts/ci/checkout-ecosystem.sh vaulter vaulter-collaboration packman
 
       - name: Setup Node.js 26.13.1
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
@@ -209,31 +185,7 @@ jobs:
       - name: Checkout sibling repositories
         env:
           VAULTER_READ_TOKEN: ${{ secrets.VAULTER_READ_TOKEN }}
-          GIT_TERMINAL_PROMPT: "0"
-        run: |
-          set -euo pipefail
-          root="$GITHUB_WORKSPACE"
-          workspace="$(dirname "$root")"
-          fetch_dependency() {
-            local directory="$1" url="$2" ref="$3"
-            local dest="$workspace/$directory"
-            if [ -e "$dest" ]; then
-              echo "sibling present: $dest"
-              return 0
-            fi
-            mkdir -p "$dest"
-            git -C "$dest" init -q
-            git -C "$dest" fetch --quiet --depth=1 "$url" "$ref"
-            git -C "$dest" checkout -q -b main FETCH_HEAD
-          }
-          if [ -n "${VAULTER_READ_TOKEN}" ]; then
-            base="https://x-access-token:${VAULTER_READ_TOKEN}@github.com/axiomasoft"
-          else
-            base="https://github.com/axiomasoft"
-          fi
-          fetch_dependency vaulter "$base/vaulter.git" refs/heads/main
-          fetch_dependency vaulter-collaboration "$base/vaulter-collaboration.git" refs/heads/main
-          fetch_dependency packman "$base/packman.git" refs/tags/v0.1.2
+        run: scripts/ci/checkout-ecosystem.sh vaulter vaulter-collaboration packman
 
       - name: Setup PHP ${{ matrix.php }}
         uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # v2.40.0
@@ -263,29 +215,7 @@ jobs:
       - name: Checkout sibling repositories
         env:
           VAULTER_READ_TOKEN: ${{ secrets.VAULTER_READ_TOKEN }}
-          GIT_TERMINAL_PROMPT: "0"
-        run: |
-          set -euo pipefail
-          root="$GITHUB_WORKSPACE"
-          workspace="$(dirname "$root")"
-          fetch_dependency() {
-            local directory="$1" url="$2" ref="$3"
-            local dest="$workspace/$directory"
-            if [ -e "$dest" ]; then
-              echo "sibling present: $dest"
-              return 0
-            fi
-            mkdir -p "$dest"
-            git -C "$dest" init -q
-            git -C "$dest" fetch --quiet --depth=1 "$url" "$ref"
-            git -C "$dest" checkout -q -b main FETCH_HEAD
-          }
-          if [ -n "${VAULTER_READ_TOKEN}" ]; then
-            base="https://x-access-token:${VAULTER_READ_TOKEN}@github.com/axiomasoft"
-          else
-            base="https://github.com/axiomasoft"
-          fi
-          fetch_dependency vaulter "$base/vaulter.git" refs/heads/main
+        run: scripts/ci/checkout-ecosystem.sh vaulter
 
       - name: Setup Node.js 26.13.1
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
@@ -313,26 +243,36 @@ jobs:
           npm --workspace=@vaulter/editor-pro-vue run build
 
   docx-libreoffice:
+    name: DOCX LibreOffice roundtrip
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js 26.13.1
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "26.13.1"
           cache: npm
+
       - name: Install LibreOffice Writer
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends libreoffice-writer
+
       - name: Install and build @vaulter/editor-pro-docx
         run: |
           npm ci
           npm --workspace=@vaulter/editor-pro-docx run build
+
       - name: Run headless LibreOffice D1-D5 roundtrip gate
         run: bash scripts/ci/docx-libreoffice.sh
 
   e2e:
+    name: Playwright E2E
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     services:
@@ -350,49 +290,47 @@ jobs:
           --health-timeout=5s
           --health-retries=20
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          path: vaulter-editor-pro
-      - uses: actions/checkout@v4
-        with:
-          repository: axiomasoft/vaulter
-          path: vaulter
-          token: ${{ secrets.VAULTER_CI_READ_TOKEN || github.token }}
-      - uses: actions/checkout@v4
-        with:
-          repository: axiomasoft/vaulter-collaboration
-          path: vaulter-collaboration
-          token: ${{ secrets.VAULTER_CI_READ_TOKEN || github.token }}
-      - uses: actions/checkout@v4
-        with:
-          repository: axiomasoft/packman
-          path: packman
-          token: ${{ secrets.VAULTER_CI_READ_TOKEN || github.token }}
-      - uses: shivammathur/setup-php@v2
+          persist-credentials: false
+
+      - name: Checkout sibling repositories
+        env:
+          VAULTER_READ_TOKEN: ${{ secrets.VAULTER_READ_TOKEN }}
+        run: scripts/ci/checkout-ecosystem.sh vaulter vaulter-collaboration packman
+
+      - name: Setup PHP 8.4
+        uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # v2.40.0
         with:
           php-version: "8.4"
           extensions: mbstring, xml, zip, pdo_pgsql, pgsql, pdo_sqlite, sqlite3
           coverage: none
-      - uses: actions/setup-node@v4
+
+      - name: Setup Node.js 26.13.1
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "26.13.1"
+          cache: npm
+
       - name: Install sibling dependencies
         run: |
-          npm --prefix "$GITHUB_WORKSPACE/vaulter" ci
-          npm --prefix "$GITHUB_WORKSPACE/vaulter" run build --workspace @vaulter/vue
-          npm --prefix "$GITHUB_WORKSPACE/vaulter-collaboration" ci
+          workspace="$(dirname "$GITHUB_WORKSPACE")"
+          npm --prefix "$workspace/vaulter" ci
+          npm --prefix "$workspace/vaulter" run build --workspace @vaulter/vue
+          npm --prefix "$workspace/vaulter-collaboration" ci
+
       - name: Install editor-pro dependencies
-        working-directory: vaulter-editor-pro
         run: |
           composer install --no-interaction --prefer-dist --no-progress
           npm ci
           npm --workspace=@vaulter/editor-pro-docx run build
           npm --workspace=@vaulter/editor-pro-vue run build
+
       - name: Install Playwright Chromium
-        working-directory: vaulter-editor-pro
         run: npx playwright install chromium --with-deps
+
       - name: Run Playwright E2E suite
-        working-directory: vaulter-editor-pro
         env:
           E2E_DB_HOST: 127.0.0.1
           E2E_DB_PORT: "5432"
