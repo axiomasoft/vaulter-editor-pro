@@ -317,11 +317,12 @@ jobs:
       - name: Install npm dependencies
         run: npm ci
 
-      - name: docx test, typecheck and build
+      - name: docx build, test and typecheck
         run: |
+          npm --workspace=@vaulter/editor-pro-docx run build
+          test -f packages/docx/dist/cli.js
           npm --workspace=@vaulter/editor-pro-docx test
           npm --workspace=@vaulter/editor-pro-docx run typecheck
-          npm --workspace=@vaulter/editor-pro-docx run build
 
       - name: vue test, typecheck and build
         run: |
