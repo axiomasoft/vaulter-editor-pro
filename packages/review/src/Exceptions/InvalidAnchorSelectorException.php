@@ -7,7 +7,6 @@ namespace Vaulter\EditorPro\Review\Exceptions;
 use Override;
 use Packman\Attributes\Api;
 use Packman\Errors\Data\ErrorDescriptor;
-use Packman\Errors\Enums\ErrorCategory;
 use Vaulter\EditorPro\Review\Errors\ReviewErrorCode;
 use Vaulter\Exceptions\Concerns\ProvidesProblemDetails;
 use Vaulter\Exceptions\Contracts\ProblemException;
@@ -17,6 +16,8 @@ use Vaulter\Exceptions\VaulterException;
 final class InvalidAnchorSelectorException extends VaulterException implements ProblemException
 {
     use ProvidesProblemDetails;
+
+    private const ReviewErrorCode ERROR_CODE = ReviewErrorCode::InvalidSelector;
 
     private string $reason = 'invalid_selector';
 
@@ -30,12 +31,12 @@ final class InvalidAnchorSelectorException extends VaulterException implements P
 
     public function problemCode(): string
     {
-        return 'invalid_anchor_selector';
+        return self::ERROR_CODE->problemSlug();
     }
 
     public function httpStatus(): int
     {
-        return 422;
+        return self::ERROR_CODE->httpStatus();
     }
 
     /** @return array<string, mixed> */
@@ -48,8 +49,8 @@ final class InvalidAnchorSelectorException extends VaulterException implements P
     public function errorDescriptor(): ErrorDescriptor
     {
         return new ErrorDescriptor(
-            code: ReviewErrorCode::InvalidSelector,
-            category: ErrorCategory::Validation,
+            code: self::ERROR_CODE,
+            category: self::ERROR_CODE->category(),
             details: ['reason' => self::boundedDetail($this->reason, 64)],
         );
     }

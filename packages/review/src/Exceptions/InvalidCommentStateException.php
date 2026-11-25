@@ -7,7 +7,6 @@ namespace Vaulter\EditorPro\Review\Exceptions;
 use Override;
 use Packman\Attributes\Api;
 use Packman\Errors\Data\ErrorDescriptor;
-use Packman\Errors\Enums\ErrorCategory;
 use Vaulter\EditorPro\Review\Errors\ReviewErrorCode;
 use Vaulter\Exceptions\Concerns\ProvidesProblemDetails;
 use Vaulter\Exceptions\Contracts\ProblemException;
@@ -17,6 +16,8 @@ use Vaulter\Exceptions\VaulterException;
 final class InvalidCommentStateException extends VaulterException implements ProblemException
 {
     use ProvidesProblemDetails;
+
+    private const ReviewErrorCode ERROR_CODE = ReviewErrorCode::InvalidCommentState;
 
     public static function replyCannotCarryRangeAnchor(): self
     {
@@ -39,20 +40,20 @@ final class InvalidCommentStateException extends VaulterException implements Pro
 
     public function problemCode(): string
     {
-        return 'invalid_comment_state';
+        return self::ERROR_CODE->problemSlug();
     }
 
     public function httpStatus(): int
     {
-        return 409;
+        return self::ERROR_CODE->httpStatus();
     }
 
     #[Override]
     public function errorDescriptor(): ErrorDescriptor
     {
         return new ErrorDescriptor(
-            code: ReviewErrorCode::InvalidCommentState,
-            category: ErrorCategory::Conflict,
+            code: self::ERROR_CODE,
+            category: self::ERROR_CODE->category(),
         );
     }
 }

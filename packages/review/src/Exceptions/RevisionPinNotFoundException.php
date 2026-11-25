@@ -7,7 +7,6 @@ namespace Vaulter\EditorPro\Review\Exceptions;
 use Override;
 use Packman\Attributes\Api;
 use Packman\Errors\Data\ErrorDescriptor;
-use Packman\Errors\Enums\ErrorCategory;
 use Vaulter\EditorPro\Review\Errors\ReviewErrorCode;
 use Vaulter\Exceptions\Concerns\ProvidesProblemDetails;
 use Vaulter\Exceptions\Contracts\ProblemException;
@@ -18,6 +17,8 @@ use Vaulter\Support\Identity;
 final class RevisionPinNotFoundException extends VaulterException implements ProblemException
 {
     use ProvidesProblemDetails;
+
+    private const ReviewErrorCode ERROR_CODE = ReviewErrorCode::PinNotFound;
 
     public static function forRevision(mixed $nodeId, mixed $revisionId): self
     {
@@ -30,20 +31,20 @@ final class RevisionPinNotFoundException extends VaulterException implements Pro
 
     public function problemCode(): string
     {
-        return 'revision_pin_not_found';
+        return self::ERROR_CODE->problemSlug();
     }
 
     public function httpStatus(): int
     {
-        return 404;
+        return self::ERROR_CODE->httpStatus();
     }
 
     #[Override]
     public function errorDescriptor(): ErrorDescriptor
     {
         return new ErrorDescriptor(
-            code: ReviewErrorCode::PinNotFound,
-            category: ErrorCategory::NotFound,
+            code: self::ERROR_CODE,
+            category: self::ERROR_CODE->category(),
         );
     }
 }

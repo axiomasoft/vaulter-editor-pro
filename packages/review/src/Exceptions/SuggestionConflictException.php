@@ -7,7 +7,6 @@ namespace Vaulter\EditorPro\Review\Exceptions;
 use Override;
 use Packman\Attributes\Api;
 use Packman\Errors\Data\ErrorDescriptor;
-use Packman\Errors\Enums\ErrorCategory;
 use Throwable;
 use Vaulter\EditorPro\Review\Errors\ReviewErrorCode;
 use Vaulter\Exceptions\Concerns\ProvidesProblemDetails;
@@ -19,6 +18,8 @@ use Vaulter\Exceptions\VaulterException;
 final class SuggestionConflictException extends VaulterException implements ProblemException
 {
     use ProvidesProblemDetails;
+
+    private const ReviewErrorCode ERROR_CODE = ReviewErrorCode::SuggestionConflict;
 
     public readonly string $reason;
 
@@ -39,12 +40,12 @@ final class SuggestionConflictException extends VaulterException implements Prob
 
     public function problemCode(): string
     {
-        return 'suggestion_conflict';
+        return self::ERROR_CODE->problemSlug();
     }
 
     public function httpStatus(): int
     {
-        return 409;
+        return self::ERROR_CODE->httpStatus();
     }
 
     /** @return array<string, mixed> */
@@ -57,8 +58,8 @@ final class SuggestionConflictException extends VaulterException implements Prob
     public function errorDescriptor(): ErrorDescriptor
     {
         return new ErrorDescriptor(
-            code: ReviewErrorCode::SuggestionConflict,
-            category: ErrorCategory::Conflict,
+            code: self::ERROR_CODE,
+            category: self::ERROR_CODE->category(),
             details: ['reason' => self::boundedDetail($this->reason, 64)],
         );
     }
