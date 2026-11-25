@@ -115,10 +115,21 @@
     "scripts": {
         "lint": "@php vendor/bin/pint",
         "lint:check": "@php vendor/bin/pint --test",
+        "docx:cli": "sh scripts/ensure-docx-cli.sh",
         "test": [
+            "@docx:cli",
             "@php vendor/bin/pest -c phpunit.xml.dist --testsuite=review --test-directory=packages/review/tests",
             "@php vendor/bin/pest -c phpunit.xml.dist --testsuite=exchange --test-directory=packages/exchange/tests"
         ],
+        "test:parallel": [
+            "@docx:cli",
+            "@php vendor/bin/pest -c phpunit.xml.dist --parallel"
+        ],
         "phpstan": "@php vendor/bin/phpstan analyse -c phpstan.neon.dist --memory-limit=1G --no-progress"
+    },
+    "scripts-descriptions": {
+        "docx:cli": "Build packages/docx/dist/cli.js when it is missing or older than its sources (used by the exchange tests).",
+        "test": "Run the review and exchange suites one after the other (any DB_CONNECTION).",
+        "test:parallel": "Run both suites in parallel workers; SQLite only, a server database is shared by all workers."
     }
 }
