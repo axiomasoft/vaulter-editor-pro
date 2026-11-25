@@ -510,3 +510,37 @@ it('lists without locking the document once a rejected journal command left only
 
     expect($locking)->toBe([]);
 });
+
+it('refuses journal drafts and accepts that are not on the journal head', function (): void {
+    $storage = AccessTestHelpers::storage();
+    AccessTestHelpers::grant($storage->rootNode, RoleRegistry::OWNER, subjectId: 1);
+    $drive = app(Vaulter::class)->drive($storage)->actingAs(AccessTestHelpers::user(1));
+    $node = app(DocumentsManager::class)->in($drive)->create('journal-head', 'vaulter/rich-text', journalRichDoc());
+    $roomOwner = (string) Str::uuid();
+    enableStrictJournalRoom($node, $roomOwner);
+    $review = app(ReviewManager::class)->suggestions($drive);
+    $table = static fn (int $position): StructuralSuggestionInput => StructuralSuggestionInput::tableChange(
+        (string) Str::uuid7(), (string) Str::uuid7(), 0, $position, 2, 'jp_1', 'insert_table', ['rows' => 1, 'cols' => 1],
+    );
+
+    expect(fn () => $review->save($node->id, $table(2)))
+        ->toThrow(SuggestionConflictException::class, 'The journal suggestion base position is stale.');
+    expect(fn () => $review->save($node->id, StructuralSuggestionInput::tableChange(
+        (string) Str::uuid7(), (string) Str::uuid7(), 1, 1, 2, 'jp_1', 'insert_table', ['rows' => 1, 'cols' => 1],
+    )))->toThrow(SuggestionConflictException::class, 'The suggestion generation or schema version is stale.');
+    $draft = $review->save($node->id, $table(1));
+
+    // The journal moves on: the draft's base is no longer its head.
+    $bytes = 'later-update';
+    app(UpdateLog::class)->appendFenced($node->id,
+        new UpdateEnvelope(0, (string) Str::uuid(), $bytes, hash('sha256', $bytes), 'server', null),
+        $roomOwner, 1, 1, static fn () => null,
+    );
+    $marker = app(VaulterDatabase::class)->transaction(static fn () => app(CollaborativeState::class)->lock($node->id)->pending);
+    expect(app(CompactionLeases::class)->requestDrain($marker))->toBeTrue();
+    publishReviewJournalCheckpoint($roomOwner);
+
+    expect(fn () => $review->accept($node->id, $draft->id, 0, $draft->version))
+        ->toThrow(SuggestionConflictException::class, 'The journal suggestion base position is stale.')
+        ->and(app(VaulterDatabase::class)->connection()->table(app(DatabaseOptions::class)->table('collaboration_commands'))->count())->toBe(0);
+});
