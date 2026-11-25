@@ -9,6 +9,7 @@ use Vaulter\Documents\Data\Comments\AddCommentInput;
 use Vaulter\Documents\DocumentsManager;
 use Vaulter\Drive\Access\Roles\RoleRegistry;
 use Vaulter\Drive\Data\ListOptions;
+use Vaulter\Drive\Exceptions\Access\PermissionDeniedException;
 use Vaulter\Drive\Exceptions\Nodes\NodeNotFoundException;
 use Vaulter\Drive\Testing\Access\AccessTestHelpers;
 use Vaulter\Drive\Vaulter;
@@ -640,7 +641,7 @@ test('comment.edit is author-only with CAS and discussion.archive moves thread t
     $otherDrive = app(Vaulter::class)->drive($storage)->actingAs($other);
     $otherReview = app(ReviewManager::class)->comments($otherDrive);
     expect(fn () => $otherReview->edit($doc, $created->comment->id, 'Hijack', $edited->comment->version))
-        ->toThrow(\Vaulter\Drive\Exceptions\Access\PermissionDeniedException::class);
+        ->toThrow(PermissionDeniedException::class);
 
     // Archive and filter
     $archived = $review->archive($doc, $created->comment->id, true, $edited->comment->version);
