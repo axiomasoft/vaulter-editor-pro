@@ -164,8 +164,18 @@ jobs:
       - name: Zero unindexed foreign keys
         run: psql -d vaulter_test -v ON_ERROR_STOP=1 -f scripts/ci/sql/unindexed-fks.sql
 
+      # One database per Pest worker (vaulter_w<N>_test, N = 1..CPUs): the suites migrate and refresh
+      # their database, so parallel workers must not share one.
+      - name: Create per-worker databases
+        run: |
+          for worker in $(seq 1 "$(nproc)"); do
+            psql -d vaulter -v ON_ERROR_STOP=1 -c "CREATE DATABASE vaulter_w${worker}_test"
+          done
+
       - name: Pest on PostgreSQL ${{ matrix.postgres }}
-        run: composer test
+        env:
+          VAULTER_TEST_DB_PER_PROCESS: "1"
+        run: composer test:parallel
 
       - name: Pest on SQLite
         if: matrix.postgres == '18.7'
