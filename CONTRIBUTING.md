@@ -47,6 +47,7 @@ npm ci
 | PHP tests, parallel workers | `composer test:parallel` |
 | DOCX converter | `npm test`, `npm run typecheck`, `npm run build` in `packages/docx` |
 | Vue components | `npm test`, `npm run typecheck`, `npm run build` in `packages/vue` |
+| Regenerate the error code tables | `composer docs:errors` |
 
 The exchange tests run the DOCX converter as a subprocess, so both test scripts first run
 `composer docx:cli`, which builds `packages/docx/dist/cli.js` when it is missing or older than
@@ -67,6 +68,14 @@ composer test
 For `composer test:parallel` on PostgreSQL, also set `VAULTER_TEST_DB_PER_PROCESS=1` and create
 one database per worker, `vaulter_w1_test` … `vaulter_w<N>_test` for N = number of CPUs. Each
 worker then migrates and refreshes its own database, which is what CI does.
+
+More on the suites, the E2E harness and the CI jobs: [Testing and CI](docs/guides/testing-and-ci.md).
+
+## Documentation
+
+Docs are English only and live in `docs/` (see [docs/index.md](docs/index.md)). Every statement
+should be checkable against the code; generated parts (the error code tables) are kept in sync
+by tests.
 
 ## Commits and branches
 

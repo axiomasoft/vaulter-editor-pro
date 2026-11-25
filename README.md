@@ -22,6 +22,30 @@ Composer path repository `packages/*` and npm workspaces ship `review`, `exchang
 - Node.js `>=26.13.1` (`package.json` `engines.node`)
 - PostgreSQL CI matrix: 18.7 and 19.0
 
+## Documentation
+
+English documentation lives in [`docs/`](docs/index.md): installation, architecture, DOCX
+profiles and the D1–D5 corpus, configuration, HTTP API, error codes, testing and CI, and DOCX
+import security. Development setup is in [CONTRIBUTING.md](CONTRIBUTING.md), vulnerability
+reporting in [SECURITY.md](SECURITY.md).
+
 ## CI
 
-`.github/workflows/ci.yml` validates the Composer and npm manifests, runs the PHP 8.4/8.5 matrix against PostgreSQL 18.7 and 19.0 (migrate the suite database, then `scripts/ci/sql/unindexed-fks.sql`, then Pest on PostgreSQL and SQLite), runs PHPStan and Pint, builds and tests `@vaulter/editor-pro-docx` and `@vaulter/editor-pro-vue` on Node.js 26.13.1, and fails when a dependency or a source file hits a stop-crane (`UNLICENSED`, `@tiptap-pro`, copyleft, or a banned call). The workflow's negative fixture must fail on a forbidden package, an `UNLICENSED` license, or a banned call.
+`.github/workflows/ci.yml` runs on pushes to `main`, `feat/**` and `fix/**`, on pull requests
+and on demand. Siblings (`vaulter`, `vaulter-collaboration`, Packman at the pinned tag) are
+checked out by `scripts/ci/checkout-ecosystem.sh` with `secrets.VAULTER_READ_TOKEN`. Jobs:
+
+- **Stop-cranes**: `composer validate` and `scripts/ci/engineering-rails.py` (license
+  denylist: copyleft, `UNLICENSED`, `@tiptap-pro`; banned calls and patterns), with its negative
+  self-test.
+- **PHP 8.4/8.5 × PostgreSQL 18.7/19.0**: build the DOCX CLI, migrate,
+  `scripts/ci/sql/unindexed-fks.sql`, then `composer test:parallel` on PostgreSQL (one database
+  per worker) and on SQLite.
+- **PHP static**: PHPStan at level max and Pint.
+- **Node 26.13.1**: Vitest, typecheck and build of `@vaulter/editor-pro-docx` and
+  `@vaulter/editor-pro-vue`.
+- **DOCX LibreOffice roundtrip** of the D1–D5 corpus, and **Playwright E2E**.
+- **CI gate**: requires every job above; the one check a branch rule should require.
+
+Actions are pinned to commit SHAs and PostgreSQL images to digests. Details:
+[Testing and CI](docs/guides/testing-and-ci.md).
