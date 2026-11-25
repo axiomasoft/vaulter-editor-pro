@@ -1,10 +1,15 @@
 #!/usr/bin/env python3
-"""Scaffold stop-cranes for a Vaulter satellite repository.
+"""Stop-cranes for a Vaulter satellite repository.
 
-Scans committed manifests and sources for the Zero-Royalty denylist
-(including UNLICENSED and Pro packages) and the source bans in
-engineering-standards §2 that a text scan can see. Exit 0
-means zero hits. ``--self-test`` proves a forbidden tree fails and an
+Scans committed manifests and sources for the zero-royalty denylist
+(commercial or copyleft packages, UNLICENSED, Tiptap Pro / Univer Pro and
+their registries) and for the source bans a text scan can see: 32-bit
+hashtext() locks, session advisory locks, deferred constraints, raw
+DB::transaction(), parse_url(), ZipArchive::extractTo(), suppressions, test
+->skip() and an Eloquent Model on an #[Api] surface. PHPStan enforces the
+same call bans semantically; this scan also covers SQL, TypeScript and Vue.
+
+Exit 0 means zero hits. ``--self-test`` proves a forbidden tree fails and an
 allowed twin passes.
 """
 

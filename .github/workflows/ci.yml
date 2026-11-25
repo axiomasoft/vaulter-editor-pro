@@ -3,13 +3,13 @@ name: CI
 # PHP 8.4 and 8.5, PostgreSQL 18.7 and 19.0, Node.js 26.13.1.
 # Migrations, scripts/ci/sql/unindexed-fks.sql, then Pest on PostgreSQL and SQLite.
 # PHPStan, Pint, and docx/vue test, typecheck and build.
-# Sibling path repositories are checked out beside the workspace before Composer
-# or npm installs that need them. The PHP job builds packages/docx/dist/cli.js
-# (Node.js 26.13.1, npm ci, docx build) before Pest. Packman is fetched at
-# refs/tags/v0.1.2, the version pinned by the Composer path repositories.
-# Private sibling checkouts use secrets.VAULTER_READ_TOKEN when the default
-# token cannot read axiomasoft/vaulter, vaulter-collaboration, and packman.
-# Stop-cranes from engineering-standards §2, enforced before review:
+# scripts/ci/checkout-ecosystem.sh checks the sibling path repositories out beside
+# the workspace before Composer or npm installs that need them: vaulter and
+# vaulter-collaboration at main, Packman at the tag the root composer.json pins.
+# Private sibling checkouts use secrets.VAULTER_READ_TOKEN. The PHP job builds
+# packages/docx/dist/cli.js (Node.js 26.13.1, npm ci, docx build) before Pest.
+# `CI gate` needs every job and is the one check a branch rule should require.
+# Stop-cranes (scripts/ci/engineering-rails.py), enforced before review:
 # Zero-Royalty denylist (0 forbidden packages, no UNLICENSED, no @tiptap-pro),
 # 64-bit hashtextextended locks, no session pg_advisory_lock, no DEFERRABLE
 # INITIALLY DEFERRED, no raw DB::transaction(), no set_config(..., false),

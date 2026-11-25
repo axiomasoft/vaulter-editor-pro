@@ -158,7 +158,8 @@ final readonly class SelectorValidator
             throw InvalidAnchorSelectorException::because('start.rel and end.rel must be valid base64.', 'invalid_base64');
         }
 
-        // Spec §2.2: start boundary MUST use assoc = 0 (glued right), end boundary MUST use assoc = -1 (glued left).
+        // The start boundary sticks to the character after it (assoc 0) and the end boundary to the character
+        // before it (assoc -1), so text typed at either edge of the range does not widen the comment.
         if (($start['assoc'] ?? null) !== 0 || ($end['assoc'] ?? null) !== -1) {
             throw InvalidAnchorSelectorException::because(
                 'yjs_relative requires start.assoc === 0 and end.assoc === -1 to prevent boundary expansion.',

@@ -26,7 +26,7 @@ import {
   CORPUS_D5,
 } from '../../../tests/corpus/docx/corpus'
 
-describe('DOCX Corpus D1–D4 Roundtrip & Loss Report (10.1-A)', () => {
+describe('DOCX corpus D1–D5 roundtrip and loss report', () => {
   it('decodes XML character references once and preserves literal CDATA', () => {
     const root = parseXmlPart(
       `<root attr="&lt;&gt;&quot;&apos;&amp;&#38;&#x1F44B;">&amp;lt;&#x3C;&#62;<![CDATA[&amp;]]></root>`,

@@ -16,7 +16,8 @@ return [
     'max_import_bytes' => 50 * 1024 * 1024,
     'max_export_bytes' => 50 * 1024 * 1024,
 
-    // Pre-parse ZIP security quotas (engineering-standards §2.8 & §3.6).
+    // ZIP quotas checked before any entry is parsed: entry count, per-entry and total uncompressed bytes,
+    // compression ratio (zip-bomb guard) and the size of each .rels part.
     'zip' => [
         'max_entries' => 2_000,
         'max_entry_bytes' => 50 * 1024 * 1024,
