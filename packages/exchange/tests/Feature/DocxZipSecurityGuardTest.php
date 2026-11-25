@@ -10,7 +10,7 @@ use Vaulter\EditorPro\Exchange\Security\DocxZipArchiveGuard;
  * Build raw ZIP bytes cleanly without writing to disk so arbitrary path names, external attributes
  * (including UNIX symlinks S_IFLNK / special files), and compression ratios can be synthesized directly.
  *
- * @param  list<array{name: string, data: string, ext_attrs?: int, comp_size?: int, uncomp_size?: int}>  $entries
+ * @param  list<array{name: string, data: string, ext_attrs?: int, comp_size?: int, uncomp_size?: int, flags?: int}>  $entries
  */
 function buildSyntheticDocxZip(array $entries): string
 {
@@ -31,9 +31,10 @@ function buildSyntheticDocxZip(array $entries): string
         $uncompLen = $entry['uncomp_size'] ?? strlen($data);
         $extAttrs = $entry['ext_attrs'] ?? (0100644 << 16);
         $nameLen = strlen($name);
+        $flags = $entry['flags'] ?? 0;
 
-        $lfh = pack('VvvvvvVVVvv', 0x04034B50, 20, 0, 8, 0, 0, $crc, $compLen, strlen($data), $nameLen, 0).$name;
-        $cd = pack('VvvvvvvVVVvvvvvVV', 0x02014B50, (3 << 8) | 20, 20, 0, 8, 0, 0, $crc, $compLen, $uncompLen, $nameLen, 0, 0, 0, 0, $extAttrs, $offset).$name;
+        $lfh = pack('VvvvvvVVVvv', 0x04034B50, 20, $flags, 8, 0, 0, $crc, $compLen, $uncompLen, $nameLen, 0).$name;
+        $cd = pack('VvvvvvvVVVvvvvvVV', 0x02014B50, (3 << 8) | 20, 20, $flags, 8, 0, 0, $crc, $compLen, $uncompLen, $nameLen, 0, 0, 0, 0, $extAttrs, $offset).$name;
 
         $parts[] = $lfh.$compressed;
         $central[] = $cd;
@@ -190,4 +191,64 @@ it('measures binary parts without holding their inflated bytes in memory', funct
     $guard->assertSafe($zip);
 
     expect(memory_get_peak_usage() - $before)->toBeLessThan(8 * 1024 * 1024);
+});
+
+/**
+ * A minimal valid package plus `$extra` entries, so each case below fails on exactly one guard.
+ *
+ * @param  list<array{name: string, data: string, ext_attrs?: int, comp_size?: int, uncomp_size?: int, flags?: int}>  $extra
+ */
+function docxZipWith(array $extra, bool $withContentTypes = true): string
+{
+    $base = [
+        ['name' => 'word/document.xml', 'data' => '<?xml version="1.0" encoding="UTF-8"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"/>'],
+    ];
+    if ($withContentTypes) {
+        array_unshift($base, ['name' => '[Content_Types].xml', 'data' => '<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"/>']);
+    }
+
+    return buildSyntheticDocxZip([...$base, ...$extra]);
+}
+
+it('rejects each malformed or oversized entry with its own reason', function (string $zip, string $reason): void {
+    $guard = new DocxZipArchiveGuard(new ExchangeOptions(
+        zipMaxEntries: 10,
+        zipMaxEntryBytes: 64 * 1024,
+        zipMaxTotalBytes: 96 * 1024,
+        zipMaxRatio: 1_000,
+        zipMaxRelsBytes: 1024,
+    ));
+
+    expect(fn () => $guard->assertSafe($zip))->toThrow(ExchangeException::class, $reason);
+})->with([
+    'no entries' => [buildSyntheticDocxZip([]), 'empty_archive'],
+    'no [Content_Types].xml' => [docxZipWith([], withContentTypes: false), 'missing_ooxml_parts'],
+    'no main document' => [buildSyntheticDocxZip([['name' => '[Content_Types].xml', 'data' => '<Types/>']]), 'missing_ooxml_parts'],
+    'entry name not UTF-8' => [docxZipWith([['name' => "word/\xC3\x28.xml", 'data' => '<p/>']]), 'invalid_entry_name'],
+    'encrypted entry' => [docxZipWith([['name' => 'word/secret.xml', 'data' => '<p/>', 'flags' => 1]]), 'encrypted_archive'],
+    'directory entry with data' => [docxZipWith([['name' => 'word/media/', 'data' => 'payload']]), 'non_empty_directory_entry'],
+    'entry over the per-entry cap' => [docxZipWith([['name' => 'word/media/a.bin', 'data' => random_bytes(65 * 1024)]]), 'entry_size_limit'],
+    'entries over the total cap' => [docxZipWith([
+        ['name' => 'word/media/a.bin', 'data' => random_bytes(60 * 1024)],
+        ['name' => 'word/media/b.bin', 'data' => random_bytes(60 * 1024)],
+    ]), 'total_size_limit'],
+    'relationships part over its cap' => [docxZipWith([['name' => 'word/_rels/document.xml.rels', 'data' => '<Relationships>'.str_repeat(' ', 2048).'</Relationships>']]), 'oversized_rels'],
+    'inflates past its declared size' => [docxZipWith([['name' => 'word/media/a.bin', 'data' => random_bytes(4096), 'uncomp_size' => 1024]]), 'zip_bomb_overflow'],
+    'XML part not UTF-8' => [docxZipWith([['name' => 'word/styles.xml', 'data' => "<w:styles>\xFF</w:styles>"]]), 'invalid_xml_encoding'],
+    'XML part not well-formed' => [docxZipWith([['name' => 'word/styles.xml', 'data' => '<w:styles><w:style></w:styles>']]), 'malformed_xml'],
+    // libxml stops at 256 levels on its own, so a part this deep fails as malformed before the
+    // guard's own depth check can see it; either way it never reaches the converter.
+    'XML nested past the depth cap' => [docxZipWith([['name' => 'word/styles.xml', 'data' => str_repeat('<a>', DocxZipArchiveGuard::MAX_XML_DEPTH + 2).str_repeat('</a>', DocxZipArchiveGuard::MAX_XML_DEPTH + 2)]]), 'malformed_xml'],
+    'relationships not well-formed' => [docxZipWith([['name' => 'word/_rels/document.xml.rels', 'data' => '<Relationships><Relationship Id="r1"></Relationships>']]), 'malformed_rels'],
+]);
+
+it('accepts empty directory entries and internal relationships', function (): void {
+    $guard = app(DocxZipArchiveGuard::class);
+
+    $guard->assertSafe(docxZipWith([
+        ['name' => 'word/media/', 'data' => '', 'ext_attrs' => 0040755 << 16],
+        ['name' => 'word/_rels/document.xml.rels', 'data' => '<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="r1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>'],
+    ]));
+
+    expect(true)->toBeTrue();
 });
