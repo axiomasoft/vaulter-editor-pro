@@ -100,6 +100,9 @@ it('pins a revision so pruning keeps it, serves preview/compare across compactio
 
     // Revoke reader grant: pinned revision MUST NOT leak via preview, compare, or pin list!
     $ownerDrive->access()->revoke($docNode->id, $readerGrant->id);
+    $this->getJson('api/vaulter/v1/review/documents/'.$docNode->id.'/pins?per_page=1')
+        ->assertNotFound()
+        ->assertJsonPath('code', 'node_not_found');
     $this->getJson('api/vaulter/v1/review/documents/'.$docNode->id.'/pins')
         ->assertNotFound()
         ->assertJsonPath('code', 'node_not_found');
@@ -109,6 +112,41 @@ it('pins a revision so pruning keeps it, serves preview/compare across compactio
     $this->getJson('api/vaulter/v1/review/documents/'.$docNode->id.'/compare?from='.$revH->id)
         ->assertNotFound()
         ->assertJsonPath('code', 'node_not_found');
+});
+
+it('pages revision pins in ID order and filters expired pins before the page boundary', function (): void {
+    $owner = AccessTestHelpers::user(1);
+    $storage = AccessTestHelpers::storage();
+    AccessTestHelpers::grant($storage->rootNode, RoleRegistry::OWNER, subjectId: 1);
+    $drive = app(Vaulter::class)->drive($storage)->actingAs($owner);
+    $documents = app(DocumentsManager::class)->in($drive);
+    $pins = app(ReviewManager::class)->pins($drive);
+    $node = $documents->create('pin-pages', 'vaulter/rich-text', richDocContent('Version one'));
+    $expires = new DateTimeImmutable('+10 minutes');
+    $ids = [];
+    foreach (['first', 'expired', 'third'] as $label) {
+        $revision = $documents->snapshot($node, $label, keepForever: false);
+        $pins->pin($node, $revision, new PinRevisionInput(PinReason::ReviewBase, $label === 'expired' ? $expires : null));
+        $ids[] = $revision->id;
+    }
+
+    $this->actingAs($owner);
+    $url = 'api/vaulter/v1/review/documents/'.$node->id.'/pins';
+    Carbon::setTestNow(Carbon::instance($expires)->addMinute());
+    try {
+        $first = $this->getJson($url.'?per_page=1')->assertOk()->assertJsonCount(1, 'data')
+            ->assertJsonPath('data.0.revision_id', $ids[0])->assertJsonPath('meta.per_page', 1);
+        $cursor = $first->json('meta.next_cursor');
+        expect($cursor)->toBeString();
+        $this->getJson($url.'?per_page=1&cursor='.urlencode($cursor))->assertOk()
+            ->assertJsonCount(1, 'data')->assertJsonPath('data.0.revision_id', $ids[2])->assertJsonPath('meta.next_cursor', null);
+        $this->getJson($url.'?per_page=1&include_expired=1&cursor='.urlencode($cursor))->assertOk()
+            ->assertJsonPath('data.0.revision_id', $ids[1]);
+        $this->getJson($url.'?cursor=999999999999999999999999')->assertUnprocessable();
+        $this->getJson($url)->assertOk()->assertJsonCount(2, 'data')->assertJsonMissingPath('meta');
+    } finally {
+        Carbon::setTestNow();
+    }
 });
 
 it('protects a temporary pin until expiry without setting Documents retention', function (): void {

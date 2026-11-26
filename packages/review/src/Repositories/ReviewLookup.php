@@ -5,13 +5,13 @@ declare(strict_types=1);
 namespace Vaulter\EditorPro\Review\Repositories;
 
 use Illuminate\Database\Connection;
+use Illuminate\Support\Str;
 use Packman\Attributes\Internal;
 use stdClass;
 use Vaulter\Configuration\DatabaseOptions;
 use Vaulter\Configuration\IdsOptions;
 use Vaulter\Database\VaulterDatabase;
 use Vaulter\Documents\Exceptions\CommentNotFoundException;
-use Vaulter\Documents\Models\Revisions\DocumentRevision;
 use Vaulter\EditorPro\Review\Exceptions\InvalidCommentStateException;
 use Vaulter\Support\Identity;
 
@@ -122,7 +122,29 @@ final readonly class ReviewLookup
 
     public function fitsKey(int|string $value): bool
     {
-        return Identity::fitsKey(new DocumentRevision, $value);
+        $key = (string) $value;
+
+        return match ($this->idsOptions->strategy) {
+            'bigint' => $this->fitsBigint($key),
+            'uuid7' => Str::isUuid($key),
+            'ulid' => Str::isUlid($key),
+            default => $key !== '',
+        };
+    }
+
+    private function fitsBigint(string $key): bool
+    {
+        if (! ctype_digit($key)) {
+            return false;
+        }
+
+        $key = ltrim($key, '0');
+        $maximum = in_array($this->connection()->getDriverName(), ['mysql', 'mariadb'], true)
+            ? '18446744073709551615'
+            : '9223372036854775807';
+
+        return strlen($key) < strlen($maximum)
+            || (strlen($key) === strlen($maximum) && strcmp($key, $maximum) <= 0);
     }
 
     public function normalizeTenantId(int|string|null $tenantId): int|string
