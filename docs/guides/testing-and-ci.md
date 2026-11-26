@@ -65,14 +65,12 @@ changes ──► quality ──► php (8.4/8.5 × PostgreSQL 18.7/19.0, SQLite
 
 1. **Changes** selects lanes. A push to `main`, a `workflow_dispatch`, or a change under
    `.github/` or `scripts/ci/` runs every lane. On other branches, `dorny/paths-filter` skips
-   lanes whose files did not change.
+   lanes whose files did not change. An E2E-only change runs quality and Playwright. Changes to DOCX corpus binaries run the PHP, MySQL, Node, LibreOffice and Playwright checks that consume those fixtures.
 2. **Quality** is the fast fail: the Node engines assertion, stop-cranes, `composer validate`,
    Pint, PHPStan, actionlint and zizmor. Heavier lanes start only after it succeeds.
 3. **PHP, MySQL, Node, LibreOffice and E2E** then run in parallel. The PHP 8.4 / PostgreSQL 18.7 cell
    uploads a Clover coverage artifact.
-4. **CI gate** waits for every job (`if: always()`) and fails if any needed job failed or was
-   cancelled. A skipped lane (path filter) is allowed. Branch protection should require only
-   `CI gate`.
+4. **CI gate** compares each result with the change plan. Every selected lane must succeed and every unselected lane must be skipped. A missing plan fails the gate. Branch protection requires `CI gate`.
 
 Triggers: pushes to `main`, `refactor/**`, `feat/**`, `fix/**`, `hotfix/**` and `chore/**`, pull
 requests, and manual `workflow_dispatch`. Concurrent runs on the same ref cancel the earlier one.

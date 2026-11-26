@@ -41,11 +41,12 @@ checked out by `scripts/ci/checkout-ecosystem.sh` with `secrets.VAULTER_READ_TOK
 - **PHP 8.4/8.5 × PostgreSQL 18.7/19.0**: build the DOCX CLI, migrate,
   `scripts/ci/sql/unindexed-fks.sql`, then `composer test:parallel` on PostgreSQL (one database
   per worker) and on SQLite.
+- **MySQL 9.7** runs exchange and review integration tests, including interrupted migration recovery.
 - **PHP static**: PHPStan at level max and Pint.
 - **Node 26.13.1**: Vitest, typecheck and build of `@vaulter/editor-pro-docx` and
   `@vaulter/editor-pro-vue`.
 - **DOCX LibreOffice roundtrip** of the D1–D5 corpus, and **Playwright E2E**.
-- **CI gate**: requires every job above; the one check a branch rule should require.
+- **CI gate** verifies that every selected job succeeded and every other lane was skipped. It is the required branch check.
 
-Actions are pinned to commit SHAs and PostgreSQL images to digests. Details:
+Actions are pinned to commit SHAs and database images to digests. Details:
 [Testing and CI](docs/guides/testing-and-ci.md).
