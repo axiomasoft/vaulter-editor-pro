@@ -6,6 +6,8 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the package
 
 ## Unreleased
 
+- Exchange and its base Vaulter dependencies install at the same version. Exhausting queue retries records a terminal failure when the worker can claim the job.
+
 ### Changed
 
 - `exchange_job_not_ready`, `exchange_runtime_failed` and `exchange_lease_lost` answer
