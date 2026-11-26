@@ -132,6 +132,9 @@ final readonly class RevisionPinRepository implements RevisionPruneProtection
     /** @return Page<RevisionPinData> */
     public function pageForDocument(string|int $documentId, ListOptions $options, bool $includeExpired): Page
     {
+        if (! $this->lookup->fitsKey($documentId)) {
+            return new Page([], null);
+        }
         $query = $this->listing($documentId, $includeExpired);
         if ($options->cursor !== null) {
             if (! $this->lookup->fitsKey($options->cursor)) {

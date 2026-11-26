@@ -6,6 +6,8 @@ namespace Vaulter\EditorPro\Review\Http\Controllers;
 
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Validator;
+use Illuminate\Validation\Rule;
 use Packman\Attributes\Internal;
 use Vaulter\Drive\Data\ListOptions;
 use Vaulter\Drive\Http\Support\NodeRequestContext;
@@ -44,6 +46,7 @@ final readonly class SuggestionController
         $proposalId = $request->query('proposal_id');
         $includeStale = $request->boolean('include_stale_generations');
         if ($request->query->has('per_page') || $request->query->has('cursor') || $request->query->has('open_only')) {
+            Validator::make($request->query(), ['open_only' => ['sometimes', Rule::in(['0', '1', 'true', 'false'])]])->validate();
             $options = new ListOptions(perPage: PageResponse::perPage($request), cursor: PageResponse::cursor($request));
             $page = $this->review->suggestions($drive)->page($node, $options, is_string($proposalId) && $proposalId !== '' ? $proposalId : null, $includeStale, $request->boolean('open_only'));
 

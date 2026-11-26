@@ -218,7 +218,7 @@ final readonly class SuggestionOperations implements DriveExtension
             ->whereIn('kind', SuggestionKind::allValues())
             ->where(static function (Builder $generations) use ($metadata, $includeStaleGenerations): void {
                 $generations->where('generation', $metadata->generation);
-                if ($includeStaleGenerations) {
+                if ($includeStaleGenerations && $metadata->generation > 0) {
                     $generations->orWhere(static fn (Builder $old) => $old->where('generation', '<', $metadata->generation)->where('state', 'open'));
                 }
             });
@@ -233,7 +233,7 @@ final readonly class SuggestionOperations implements DriveExtension
             if (! Str::isUuid($options->cursor)) {
                 throw InvalidCursorException::invalid();
             }
-            $query->where('id', '>', $options->cursor);
+            $query->where('id', '>', strtolower($options->cursor));
         }
         $rows = $this->suggestions->read($query->limit($options->perPage + 1));
         $more = count($rows) > $options->perPage;

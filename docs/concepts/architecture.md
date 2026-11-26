@@ -90,8 +90,7 @@ A job moves `queued` → `running` → `preview_ready` (import) or `completed` (
    generation the preview was built from. A changed document answers `exchange_stale_preview`.
    `apply_command_id` makes the apply idempotent; a different id on an applied job answers
    `exchange_already_applied`.
-4. **Recover.** `vaulter-editor-pro-exchange:recover` reclaims expired leases and purges old jobs,
-   releasing their Media pins.
+4. **Recover.** `vaulter-editor-pro-exchange:recover` reclaims expired leases. With automatic dispatch it resubmits these jobs and aged queued jobs. Purging expired jobs releases their Media pins.
 
 Both `DocxExchangeRuntime` and `ExchangeActorResolver` are SPIs: bind your own implementation
 in the container to run conversions elsewhere or to resolve queued actors differently.

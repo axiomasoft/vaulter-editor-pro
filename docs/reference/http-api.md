@@ -44,7 +44,7 @@ Suggestion kinds: `insert`, `delete`, `replace`, `mark_change`, `attr_change`, `
 
 Pass `per_page` (1–200, default 50) or `cursor` to page suggestions and revision pins.
 The response contains `data` and `meta: {per_page, next_cursor}`. A null cursor marks the last page.
-Paged suggestions use ascending suggestion ID and support `open_only=true`. Paged pins use ascending
+Paged suggestions use ascending suggestion ID. Supplying `open_only` also selects the paged response. Set it to `true` or `1` to filter open changes. Use `false` or `0` to include decided changes. Paged pins use ascending
 revision ID and honor `include_expired`. Existing list requests retain their response and ordering.
 A document generation accepts up to 1000 open suggestions. Saving another returns HTTP 422
 with code `unsupported_suggestion` and reason `open_suggestion_limit`. Existing drafts can still be amended.

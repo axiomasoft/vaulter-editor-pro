@@ -343,3 +343,19 @@ it('pages the visible suggestion history and filters open changes before limitin
         ->and($active->items[0]->id)->toBe($open->id)
         ->and($active->nextCursor)->toBeNull();
 });
+
+it('exposes paged suggestions over HTTP while preserving the original list envelope', function (): void {
+    $closed = $this->first->save($this->node->id, reviewTextEdit(3, 6, 'red', 'green'));
+    $this->first->reject($this->node->id, $closed->id, 0, $closed->version);
+    $open = $this->second->save($this->node->id, reviewTextEdit(7, 11, 'blue', 'gold'));
+    $url = 'api/vaulter/v1/review/documents/'.$this->node->id.'/suggestions';
+    $this->actingAs(AccessTestHelpers::user(1));
+    $this->getJson($url)->assertOk()->assertJsonCount(2, 'data')->assertJsonMissingPath('meta');
+    $this->getJson($url.'?open_only=1')->assertOk()->assertJsonCount(1, 'data')->assertJsonPath('data.0.id', $open->id)
+        ->assertJsonPath('meta.next_cursor', null);
+    $this->getJson($url.'?open_only=false')->assertOk()->assertJsonCount(2, 'data')->assertJsonPath('meta.next_cursor', null);
+    $cursor = $this->getJson($url.'?per_page=1')->assertOk()->assertJsonCount(1, 'data')->json('meta.next_cursor');
+    $this->getJson($url.'?cursor='.strtoupper($cursor))->assertOk()->assertJsonCount(1, 'data')->assertJsonPath('meta.next_cursor', null);
+    $this->getJson($url.'?cursor=invalid')->assertUnprocessable();
+    $this->getJson($url.'?open_only=invalid')->assertUnprocessable();
+});
