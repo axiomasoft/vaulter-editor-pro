@@ -46,7 +46,7 @@ reported by `php artisan packman:config:validate` and `php artisan vaulter:docto
 | `node_binary` | `VAULTER_DOCX_NODE_BIN` | string | `node` | Node.js executable that runs the CLI. |
 | `cli_path` | `VAULTER_DOCX_CLI_PATH` | string | `packages/docx/dist/cli.js` of this repository | Path to `@vaulter/editor-pro-docx/dist/cli.js`. Set it in every installation outside this monorepo. |
 | `runtime_timeout_seconds` | — | int | `30` | Timeout of one CLI run. |
-| `persistent_worker` | — | bool | `false` | Keep one CLI process per PHP worker and talk to it over NDJSON instead of starting Node.js per conversion. Not in the shipped config file; add the key to enable it. |
+| `persistent_worker` | — | bool | `false` | Keep one CLI process per request or queue job and talk to it over NDJSON instead of starting Node.js per conversion. Not in the shipped config file; add the key to enable it. |
 
 The exchange section is read leniently: a missing or invalid value (a non-positive number, an
 empty string) falls back to its default instead of failing validation, and `formats` and

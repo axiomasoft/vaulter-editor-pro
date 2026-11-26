@@ -46,13 +46,13 @@ final class ExchangeBindings implements ModuleBindings
         $app->tag('vaulter.config_validator.exchange', 'vaulter.config_validators');
         ConfigSectionRegistration::registerValidator($app, 'vaulter.editor-pro-exchange', $validate);
 
-        $app->singleton(DocxZipArchiveGuard::class);
-        $app->singleton(ExchangeLookup::class);
-        $app->singleton(ExchangeJobRepository::class);
-        $app->singleton(DocxExchangeRuntime::class, NodeDocxExchangeRuntime::class);
-        $app->singleton(ExchangeActorResolver::class, ConfigAuthActorResolver::class);
-        $app->singleton(ExchangeJobProcessor::class);
-        $app->singleton(ExchangeManager::class);
+        $app->scoped(DocxZipArchiveGuard::class);
+        $app->scoped(ExchangeLookup::class);
+        $app->scoped(ExchangeJobRepository::class);
+        $app->scoped(DocxExchangeRuntime::class, NodeDocxExchangeRuntime::class);
+        $app->scoped(ExchangeActorResolver::class, ConfigAuthActorResolver::class);
+        $app->scoped(ExchangeJobProcessor::class);
+        $app->scoped(ExchangeManager::class);
         $app->alias(ExchangeManager::class, 'vaulter.exchange');
 
         $app->bind(ExchangeOperations::class);

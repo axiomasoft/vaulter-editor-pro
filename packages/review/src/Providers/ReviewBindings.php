@@ -51,18 +51,18 @@ final class ReviewBindings implements ModuleBindings
         $app->tag('vaulter.config_validator.review', 'vaulter.config_validators');
         ConfigSectionRegistration::registerValidator($app, 'vaulter.editor-pro-review', $validate);
 
-        $app->singleton(SelectorValidator::class);
-        $app->singleton(SnapshotAnchorResolver::class);
-        $app->singleton(ReviewLookup::class);
-        $app->singleton(RevisionPinRepository::class);
-        $app->singleton(CommentAnchorRepository::class);
-        $app->singleton(SuggestionRepository::class);
-        $app->singleton(ReviewCapabilities::class);
-        $app->singleton(SnapshotStructuralEdit::class);
-        $app->singleton(SuggestionOverlapDetector::class);
-        $app->singleton(SuggestionJournalBridge::class);
-        $app->singleton(ReviewPreconditions::class);
-        $app->singleton(ReviewManager::class);
+        $app->scoped(SelectorValidator::class);
+        $app->scoped(SnapshotAnchorResolver::class);
+        $app->scoped(ReviewLookup::class);
+        $app->scoped(RevisionPinRepository::class);
+        $app->scoped(CommentAnchorRepository::class);
+        $app->scoped(SuggestionRepository::class);
+        $app->scoped(ReviewCapabilities::class);
+        $app->scoped(SnapshotStructuralEdit::class);
+        $app->scoped(SuggestionOverlapDetector::class);
+        $app->scoped(SuggestionJournalBridge::class);
+        $app->scoped(ReviewPreconditions::class);
+        $app->scoped(ReviewManager::class);
         $app->alias(ReviewManager::class, 'vaulter.review');
 
         $app->bind(RevisionPinOperations::class);
