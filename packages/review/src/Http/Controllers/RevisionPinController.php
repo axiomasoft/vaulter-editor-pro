@@ -8,6 +8,7 @@ use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Validator;
 use Packman\Attributes\Internal;
+use Vaulter\Drive\Data\ListOptions;
 use Vaulter\Drive\Http\Support\NodeRequestContext;
 use Vaulter\Drive\Vaulter;
 use Vaulter\EditorPro\Review\Data\RevisionPinData;
@@ -17,6 +18,7 @@ use Vaulter\EditorPro\Review\Http\Resources\RevisionPinResource;
 use Vaulter\EditorPro\Review\Http\Resources\RevisionPreviewResource;
 use Vaulter\EditorPro\Review\ReviewManager;
 use Vaulter\EditorPro\Review\Support\ReviewDriveHandle;
+use Vaulter\Http\Resources\PageResponse;
 
 /** Endpoints for revision pins, immutable revision previews, and two-version compare. */
 #[Internal]
@@ -32,6 +34,12 @@ final readonly class RevisionPinController
     {
         $drive = ReviewDriveHandle::fromContext($this->vaulter, $this->contexts->resolve($request, $node));
         $includeExpired = $request->boolean('include_expired');
+        if ($request->query->has('per_page') || $request->query->has('cursor')) {
+            $options = new ListOptions(perPage: PageResponse::perPage($request), cursor: PageResponse::cursor($request));
+            $page = $this->review->pins($drive)->page($node, $options, $includeExpired);
+
+            return PageResponse::make($page, static fn (RevisionPinData $item): array => (new RevisionPinResource($item))->toArray($request), $options->perPage);
+        }
         $pins = $this->review->pins($drive)->list($node, $includeExpired);
 
         return response()->json([

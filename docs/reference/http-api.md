@@ -42,12 +42,13 @@ and an optional `command_id`. Bulk decisions take `generation`, `scope` (`all`; 
 Suggestion kinds: `insert`, `delete`, `replace`, `mark_change`, `attr_change`, `block_split`,
 `block_join`, `list_change`, `table_change`.
 
-The suggestion and pin lists are not paginated: the editor renders every open suggestion of the
-current generation, and pins are created one per revision on purpose. Comments, which grow
-without such a bound, are paged with `per_page` and a cursor. A document generation holds at
-most 1000 open suggestions; saving a new one beyond that answers `unsupported_suggestion` with
-reason `open_suggestion_limit` until some are accepted or rejected. Amending an existing draft
-is not affected.
+Pass `per_page` (1–200, default 50) or `cursor` to page suggestions and revision pins.
+The response contains `data` and `meta: {per_page, next_cursor}`. A null cursor marks the last page.
+Paged suggestions use ascending suggestion ID and support `open_only=true`. Paged pins use ascending
+revision ID and honor `include_expired`. Existing list requests retain their response and ordering.
+A document generation accepts up to 1000 open suggestions. Saving another returns HTTP 422
+with code `unsupported_suggestion` and reason `open_suggestion_limit`. Existing drafts can still be amended.
+
 
 ## Exchange
 

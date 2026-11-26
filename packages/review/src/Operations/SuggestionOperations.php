@@ -11,19 +11,23 @@ use Illuminate\Database\Query\Builder;
 use Illuminate\Support\Str;
 use Packman\Attributes\Api;
 use Packman\Attributes\Internal;
+use Vaulter\Data\Page;
 use Vaulter\Database\VaulterDatabase;
 use Vaulter\Documents\Content\TipTap\TipTapContent;
 use Vaulter\Documents\Contracts\LockedDocumentMutation;
+use Vaulter\Documents\Data\Documents\DocumentMetadata;
 use Vaulter\Documents\Data\Documents\DocumentMutationState;
 use Vaulter\Documents\DocumentsManager;
 use Vaulter\Documents\State\CollaborativeState;
 use Vaulter\Documents\Types\DocumentTypeRegistry;
 use Vaulter\Drive\Contracts\DriveExtension;
 use Vaulter\Drive\Contracts\DriveHandle;
+use Vaulter\Drive\Data\ListOptions;
 use Vaulter\Drive\Enums\Access\Ability;
 use Vaulter\Drive\Enums\DriveStatus;
 use Vaulter\Drive\Exceptions\Access\PermissionDeniedException;
 use Vaulter\Drive\Exceptions\DriveArchivedException;
+use Vaulter\Drive\Exceptions\Nodes\InvalidCursorException;
 use Vaulter\Drive\Operations\DriveContext;
 use Vaulter\Drive\Vaulter;
 use Vaulter\EditorPro\Review\Anchors\SnapshotAnchorResolver;
@@ -118,20 +122,9 @@ final readonly class SuggestionOperations implements DriveExtension
     /** @return list<TextSuggestion> */
     public function list(int|string $nodeId, ?string $proposalId = null, bool $includeStaleGenerations = false): array
     {
-        $drive = ReviewDriveHandle::fromContext($this->vaulter, $this->context);
-        $nodeSnap = $drive->nodes()->find($nodeId);
-        $abilities = $drive->nodes()->abilities($nodeSnap)->flags;
-        if (($abilities[Ability::View->value] ?? false) !== true) {
-            throw PermissionDeniedException::forAbility(Ability::View->value);
-        }
-        $docMeta = $this->documents->in($drive)->metadata($nodeSnap);
-        $documentId = $docMeta->documentId;
-        $generation = $docMeta->generation;
-
-        if ($docMeta->writeMode === 'journal' && $this->journalBridge->isAvailable()) {
-            $this->syncPendingJournalState($nodeSnap->id, $documentId, $generation);
-        }
-
+        $metadata = $this->listingMetadata($nodeId);
+        $documentId = $metadata->documentId;
+        $generation = $metadata->generation;
         $query = $this->suggestions->forDocument($this->lookup->connection(), $documentId, $generation);
         if ($proposalId !== null) {
             $this->assertUuid($proposalId);
@@ -153,50 +146,109 @@ final readonly class SuggestionOperations implements DriveExtension
         }
 
         $stale = array_map(
-            static fn (TextSuggestion $s): TextSuggestion => new TextSuggestion(
-                id: $s->id,
-                documentId: $s->documentId,
-                proposalId: $s->proposalId,
-                groupId: $s->groupId,
-                parentId: $s->parentId,
-                generation: $s->generation,
-                basePosition: $s->basePosition,
-                schemaVersion: $s->schemaVersion,
-                authorSubject: $s->authorSubject,
-                kind: $s->kind,
-                targetBlockId: $s->targetBlockId,
-                from: $s->from,
-                to: $s->to,
-                before: $s->before,
-                after: $s->after,
-                state: $s->state,
-                conflicted: $s->conflicted,
-                version: $s->version,
-                receiptId: $s->receiptId,
-                decidedBySubject: $s->decidedBySubject,
-                decidedAt: $s->decidedAt,
-                targetSelector: $s->targetSelector,
-                payload: $s->payload,
-                conflictReason: 'generation_changed',
-                conflictWithId: $s->conflictWithId,
-                journalCommandId: $s->journalCommandId,
-                journalState: $s->journalState,
-                committedPosition: $s->committedPosition,
-                generationChanged: true,
-            ),
+            self::markStale(...),
             $this->suggestions->read($staleQuery),
         );
 
         return [...$current, ...$stale];
     }
 
+    private function listingMetadata(int|string $nodeId): DocumentMetadata
+    {
+        $drive = ReviewDriveHandle::fromContext($this->vaulter, $this->context);
+        $nodeSnap = $drive->nodes()->find($nodeId);
+        $abilities = $drive->nodes()->abilities($nodeSnap)->flags;
+        if (($abilities[Ability::View->value] ?? false) !== true) {
+            throw PermissionDeniedException::forAbility(Ability::View->value);
+        }
+        $docMeta = $this->documents->in($drive)->metadata($nodeSnap);
+
+        if ($docMeta->writeMode === 'journal' && $this->journalBridge->isAvailable()) {
+            $this->syncPendingJournalState($nodeSnap->id, $docMeta->documentId, $docMeta->generation);
+        }
+
+        return $docMeta;
+    }
+
+    private static function markStale(TextSuggestion $s): TextSuggestion
+    {
+        return new TextSuggestion(
+            id: $s->id,
+            documentId: $s->documentId,
+            proposalId: $s->proposalId,
+            groupId: $s->groupId,
+            parentId: $s->parentId,
+            generation: $s->generation,
+            basePosition: $s->basePosition,
+            schemaVersion: $s->schemaVersion,
+            authorSubject: $s->authorSubject,
+            kind: $s->kind,
+            targetBlockId: $s->targetBlockId,
+            from: $s->from,
+            to: $s->to,
+            before: $s->before,
+            after: $s->after,
+            state: $s->state,
+            conflicted: $s->conflicted,
+            version: $s->version,
+            receiptId: $s->receiptId,
+            decidedBySubject: $s->decidedBySubject,
+            decidedAt: $s->decidedAt,
+            targetSelector: $s->targetSelector,
+            payload: $s->payload,
+            conflictReason: 'generation_changed',
+            conflictWithId: $s->conflictWithId,
+            journalCommandId: $s->journalCommandId,
+            journalState: $s->journalState,
+            committedPosition: $s->committedPosition,
+            generationChanged: true,
+        );
+    }
+
+    /** @return Page<TextSuggestion> */
+    public function page(int|string $nodeId, ListOptions $options, ?string $proposalId = null, bool $includeStaleGenerations = false, bool $openOnly = false): Page
+    {
+        $metadata = $this->listingMetadata($nodeId);
+        $query = $this->suggestions->query($this->lookup->connection())
+            ->where('document_id', $metadata->documentId)
+            ->whereIn('kind', SuggestionKind::allValues())
+            ->where(static function (Builder $generations) use ($metadata, $includeStaleGenerations): void {
+                $generations->where('generation', $metadata->generation);
+                if ($includeStaleGenerations) {
+                    $generations->orWhere(static fn (Builder $old) => $old->where('generation', '<', $metadata->generation)->where('state', 'open'));
+                }
+            });
+        if ($proposalId !== null) {
+            $this->assertUuid($proposalId);
+            $query->where('proposal_id', $proposalId);
+        }
+        if ($openOnly) {
+            $query->where('state', 'open');
+        }
+        if ($options->cursor !== null) {
+            if (! Str::isUuid($options->cursor)) {
+                throw InvalidCursorException::invalid();
+            }
+            $query->where('id', '>', $options->cursor);
+        }
+        $rows = $this->suggestions->read($query->limit($options->perPage + 1));
+        $more = count($rows) > $options->perPage;
+        if ($more) {
+            array_pop($rows);
+        }
+        $items = array_map(static fn (TextSuggestion $row): TextSuggestion => $row->generation === $metadata->generation ? $row : self::markStale($row), $rows);
+
+        return new Page($items, $more && $items !== [] ? $items[array_key_last($items)]->id : null);
+    }
+
     public function find(int|string $nodeId, string $id): TextSuggestion
     {
         $this->assertUuid($id);
-        foreach ($this->list($nodeId) as $suggestion) {
-            if ($suggestion->id === $id) {
-                return $suggestion;
-            }
+        $metadata = $this->listingMetadata($nodeId);
+        $query = $this->suggestions->forDocument($this->lookup->connection(), $metadata->documentId, $metadata->generation);
+        $found = $this->suggestions->read($query->where('id', $id));
+        if ($found !== []) {
+            return $found[0];
         }
 
         throw SuggestionConflictException::because('The requested suggestion was not found.', 'suggestion_not_found');
@@ -237,7 +289,10 @@ final readonly class SuggestionOperations implements DriveExtension
 
             $author = $this->subject();
             $conn = $locked->connection();
-            $query = $this->suggestions->forDocument($conn, $state->documentId, $state->generation)->lockForUpdate();
+            $query = $this->suggestions->forDocument($conn, $state->documentId, $state->generation)
+                ->where(static fn (Builder $drafts) => $drafts->where('state', 'open')
+                    ->orWhere('id', $input->id)->orWhere('group_id', $input->groupId))
+                ->lockForUpdate();
             $rows = array_column($this->suggestions->read($query), null, 'id');
             $current = $rows[$input->id] ?? null;
             $this->assertSaveAmendable($current, $input, $this->saveVersion($current, $expectedVersion, $ifMatch), $author);
@@ -515,7 +570,10 @@ final readonly class SuggestionOperations implements DriveExtension
                 $conn = $this->lookup->connection();
                 $this->syncPendingJournalLocked($conn, $nodeId, $documentId, $input->generation);
 
-                $query = $this->suggestions->forDocument($conn, $documentId, $input->generation)->lockForUpdate();
+                $query = $this->suggestions->forDocument($conn, $documentId, $input->generation)
+                    ->where(static fn (Builder $drafts) => $drafts->where('state', 'open')
+                        ->orWhere('id', $input->id)->orWhere('group_id', $input->groupId))
+                    ->lockForUpdate();
                 $rows = array_column($this->suggestions->read($query), null, 'id');
                 $current = $rows[$input->id] ?? null;
                 $this->assertSaveAmendable($current, $input, $this->saveVersion($current, $expectedVersion, $ifMatch), $author);

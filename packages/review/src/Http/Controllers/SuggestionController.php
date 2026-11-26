@@ -7,6 +7,7 @@ namespace Vaulter\EditorPro\Review\Http\Controllers;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Packman\Attributes\Internal;
+use Vaulter\Drive\Data\ListOptions;
 use Vaulter\Drive\Http\Support\NodeRequestContext;
 use Vaulter\Drive\Vaulter;
 use Vaulter\EditorPro\Review\Data\TextSuggestion;
@@ -17,6 +18,7 @@ use Vaulter\EditorPro\Review\Http\Resources\SuggestionResource;
 use Vaulter\EditorPro\Review\Http\Support\SuggestionPreconditions;
 use Vaulter\EditorPro\Review\ReviewManager;
 use Vaulter\EditorPro\Review\Support\ReviewDriveHandle;
+use Vaulter\Http\Resources\PageResponse;
 
 /** HTTP endpoints for text and structural review suggestions and capability queries. */
 #[Internal]
@@ -41,6 +43,12 @@ final readonly class SuggestionController
         $drive = ReviewDriveHandle::fromContext($this->vaulter, $this->contexts->resolve($request, $node));
         $proposalId = $request->query('proposal_id');
         $includeStale = $request->boolean('include_stale_generations');
+        if ($request->query->has('per_page') || $request->query->has('cursor') || $request->query->has('open_only')) {
+            $options = new ListOptions(perPage: PageResponse::perPage($request), cursor: PageResponse::cursor($request));
+            $page = $this->review->suggestions($drive)->page($node, $options, is_string($proposalId) && $proposalId !== '' ? $proposalId : null, $includeStale, $request->boolean('open_only'));
+
+            return PageResponse::make($page, static fn (TextSuggestion $item): array => (new SuggestionResource($item))->toArray($request), $options->perPage);
+        }
         $items = $this->review->suggestions($drive)->list(
             $node,
             is_string($proposalId) && $proposalId !== '' ? $proposalId : null,

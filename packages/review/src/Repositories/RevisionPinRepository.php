@@ -5,9 +5,13 @@ declare(strict_types=1);
 namespace Vaulter\EditorPro\Review\Repositories;
 
 use DateTimeImmutable;
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Support\Carbon;
 use Packman\Attributes\Internal;
+use Vaulter\Data\Page;
 use Vaulter\Documents\Contracts\RevisionPruneProtection;
+use Vaulter\Drive\Data\ListOptions;
+use Vaulter\Drive\Exceptions\Nodes\InvalidCursorException;
 use Vaulter\EditorPro\Review\Configuration\ReviewOptions;
 use Vaulter\EditorPro\Review\Data\RevisionPinData;
 use Vaulter\EditorPro\Review\Enums\PinReason;
@@ -102,9 +106,18 @@ final readonly class RevisionPinRepository implements RevisionPruneProtection
             return [];
         }
 
+        $query = $this->listing($documentId, $includeExpired)->orderByDesc('pinned_at');
+
+        return array_values($query->get()
+            ->map(fn (DocumentRevisionPin $pin): RevisionPinData => $this->toData($pin))
+            ->all());
+    }
+
+    /** @return Builder<DocumentRevisionPin> */
+    private function listing(string|int $documentId, bool $includeExpired): Builder
+    {
         $query = DocumentRevisionPin::query()
-            ->where('document_id', $documentId)
-            ->orderByDesc('pinned_at');
+            ->where('document_id', $documentId);
 
         if (! $includeExpired) {
             $now = Carbon::now();
@@ -113,9 +126,27 @@ final readonly class RevisionPinRepository implements RevisionPruneProtection
             });
         }
 
-        return array_values($query->get()
-            ->map(fn (DocumentRevisionPin $pin): RevisionPinData => $this->toData($pin))
-            ->all());
+        return $query;
+    }
+
+    /** @return Page<RevisionPinData> */
+    public function pageForDocument(string|int $documentId, ListOptions $options, bool $includeExpired): Page
+    {
+        $query = $this->listing($documentId, $includeExpired);
+        if ($options->cursor !== null) {
+            if (! $this->lookup->fitsKey($options->cursor)) {
+                throw InvalidCursorException::invalid();
+            }
+            $query->where('revision_id', '>', $options->cursor);
+        }
+        $pins = $query->orderBy('revision_id')->limit($options->perPage + 1)->get();
+        $more = $pins->count() > $options->perPage;
+        if ($more) {
+            $pins->pop();
+        }
+        $items = array_values($pins->map($this->toData(...))->all());
+
+        return new Page($items, $more && $items !== [] ? $items[array_key_last($items)]->revisionId : null);
     }
 
     public function delete(string|int $revisionId, string|int $documentId): bool

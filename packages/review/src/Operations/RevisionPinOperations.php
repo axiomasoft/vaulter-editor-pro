@@ -8,11 +8,13 @@ use DateTimeImmutable;
 use Illuminate\Support\Carbon;
 use Packman\Attributes\Api;
 use Packman\Attributes\Internal;
+use Vaulter\Data\Page;
 use Vaulter\Documents\Data\Snapshots\DocumentRevisionSnapshot;
 use Vaulter\Documents\Data\Snapshots\DocumentSnapshot;
 use Vaulter\Documents\DocumentsManager;
 use Vaulter\Drive\Contracts\DriveExtension;
 use Vaulter\Drive\Contracts\DriveHandle;
+use Vaulter\Drive\Data\ListOptions;
 use Vaulter\Drive\Data\Snapshots\NodeSnapshot;
 use Vaulter\Drive\Enums\Access\Ability;
 use Vaulter\Drive\Enums\DriveStatus;
@@ -68,6 +70,15 @@ final readonly class RevisionPinOperations implements DriveExtension
         $doc = $this->lookup->documentForNode($snapshot->id);
 
         return $this->pins->listForDocument($doc['id'], $includeExpired);
+    }
+
+    /** @return Page<RevisionPinData> */
+    public function page(NodeSnapshot|string|int $document, ListOptions $options, bool $includeExpired = false): Page
+    {
+        $snapshot = $this->drive()->nodes()->find($document);
+        $doc = $this->lookup->documentForNode($snapshot->id);
+
+        return $this->pins->pageForDocument($doc['id'], $options, $includeExpired);
     }
 
     public function find(NodeSnapshot|string|int $document, DocumentRevisionSnapshot|string|int $revision): ?RevisionPinData

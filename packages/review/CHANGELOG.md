@@ -6,6 +6,10 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the package
 
 ## Unreleased
 
+- Added cursor pagination to the suggestion and pin APIs, PHP operations and Vue client. Use `per_page` or `cursor` to retrieve `meta.next_cursor`. The suggestion API also accepts `open_only`.
+
+- Review and its base Vaulter dependencies install at the same version.
+
 ### Changed
 
 - A document generation holds at most 1000 open suggestions

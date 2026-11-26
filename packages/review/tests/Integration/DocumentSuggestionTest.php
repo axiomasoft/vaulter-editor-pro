@@ -9,6 +9,7 @@ use Vaulter\Configuration\DatabaseOptions;
 use Vaulter\Database\VaulterDatabase;
 use Vaulter\Documents\DocumentsManager;
 use Vaulter\Drive\Access\Roles\RoleRegistry;
+use Vaulter\Drive\Data\ListOptions;
 use Vaulter\Drive\Exceptions\DriveArchivedException;
 use Vaulter\Drive\Exceptions\Nodes\NodeNotFoundException;
 use Vaulter\Drive\Testing\Access\AccessTestHelpers;
@@ -308,4 +309,18 @@ it('refuses a new suggestion once the document holds the most open ones, but sti
 
     DB::table($table)->where('id', $copies[0]['id'])->update(['state' => 'rejected', 'decided_at' => now()]);
     expect($this->first->save($this->node->id, reviewTextEdit(7, 11, 'blue', 'gold'))->state)->toBe('open');
+});
+
+it('pages the visible suggestion history and filters open changes before limiting the page', function (): void {
+    $closed = $this->first->save($this->node->id, reviewTextEdit(3, 6, 'red', 'green'));
+    $this->first->reject($this->node->id, $closed->id, 0, $closed->version);
+    $open = $this->second->save($this->node->id, reviewTextEdit(7, 11, 'blue', 'gold'));
+    $options = new ListOptions(perPage: 1);
+    $first = $this->first->page($this->node->id, $options);
+    $second = $this->first->page($this->node->id, $options->cursor($first->nextCursor));
+    $active = $this->first->page($this->node->id, $options, openOnly: true);
+    expect([$first->items[0]->id, $second->items[0]->id])->toEqualCanonicalizing([$closed->id, $open->id])
+        ->and($second->nextCursor)->toBeNull()
+        ->and($active->items[0]->id)->toBe($open->id)
+        ->and($active->nextCursor)->toBeNull();
 });

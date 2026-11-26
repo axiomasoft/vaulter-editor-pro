@@ -11,6 +11,7 @@ use Vaulter\Configuration\DatabaseOptions;
 use Vaulter\Configuration\IdsOptions;
 use Vaulter\Database\VaulterDatabase;
 use Vaulter\Documents\Exceptions\CommentNotFoundException;
+use Vaulter\Documents\Models\Revisions\DocumentRevision;
 use Vaulter\EditorPro\Review\Exceptions\InvalidCommentStateException;
 use Vaulter\Support\Identity;
 
@@ -121,17 +122,7 @@ final readonly class ReviewLookup
 
     public function fitsKey(int|string $value): bool
     {
-        $raw = (string) $value;
-        if ($raw === '') {
-            return false;
-        }
-
-        return match ($this->idsOptions->strategy) {
-            'bigint' => preg_match('/^[0-9]+$/', $raw) === 1,
-            'uuid7' => preg_match('/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i', $raw) === 1,
-            'ulid' => preg_match('/^[0-9A-HJKMNP-TV-Z]{26}$/i', $raw) === 1,
-            default => true,
-        };
+        return Identity::fitsKey(new DocumentRevision, $value);
     }
 
     public function normalizeTenantId(int|string|null $tenantId): int|string
