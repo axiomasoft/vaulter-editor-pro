@@ -33,6 +33,18 @@ final readonly class SuggestionRepository
             ->whereIn('kind', SuggestionKind::allValues());
     }
 
+    /** @param list<string> $ids */
+    public function lockForMutation(Connection $connection, string $documentId, int $generation, array $ids, ?string $groupId): Builder
+    {
+        return $this->forDocument($connection, $documentId, $generation)
+            ->where(static function (Builder $rows) use ($ids, $groupId): void {
+                $rows->where('state', 'open')->orWhereIn('id', $ids);
+                if ($groupId !== null) {
+                    $rows->orWhere('group_id', $groupId);
+                }
+            })->lockForUpdate();
+    }
+
     /** @return list<TextSuggestion> */
     public function read(Builder $query): array
     {

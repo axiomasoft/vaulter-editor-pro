@@ -289,10 +289,7 @@ final readonly class SuggestionOperations implements DriveExtension
 
             $author = $this->subject();
             $conn = $locked->connection();
-            $query = $this->suggestions->forDocument($conn, $state->documentId, $state->generation)
-                ->where(static fn (Builder $drafts) => $drafts->where('state', 'open')
-                    ->orWhere('id', $input->id)->orWhere('group_id', $input->groupId))
-                ->lockForUpdate();
+            $query = $this->suggestions->lockForMutation($conn, $state->documentId, $state->generation, [$input->id], $input->groupId);
             $rows = array_column($this->suggestions->read($query), null, 'id');
             $current = $rows[$input->id] ?? null;
             $this->assertSaveAmendable($current, $input, $this->saveVersion($current, $expectedVersion, $ifMatch), $author);
@@ -396,22 +393,17 @@ final readonly class SuggestionOperations implements DriveExtension
         ?int $to = null,
         ?string $commandId = null,
     ): array {
-        $candidates = array_values(array_filter(
-            $this->list($nodeId),
-            static function (TextSuggestion $s) use ($generation, $authorSubject, $from, $to): bool {
-                if ($s->generation !== $generation || $s->state !== 'open' || $s->isPendingJournal() || $s->proposalId !== null) {
-                    return false;
-                }
-                if ($authorSubject !== null && $s->authorSubject !== $authorSubject) {
-                    return false;
-                }
-                if ($from !== null && $to !== null && ($s->to < $from || $s->from > $to)) {
-                    return false;
-                }
+        $metadata = $this->listingMetadata($nodeId);
+        if ($metadata->generation !== $generation) {
+            return [];
+        }
 
-                return true;
-            },
-        ));
+        $query = $this->suggestions->forDocument($this->lookup->connection(), $metadata->documentId, $generation)
+            ->where('state', 'open')->whereNull('proposal_id');
+        if ($authorSubject !== null) {
+            $query->where('author_subject', $authorSubject);
+        }
+        $candidates = array_filter($this->suggestions->read($query), static fn (TextSuggestion $row): bool => ! $row->isPendingJournal() && ($from === null || $to === null || ($row->to >= $from && $row->from <= $to)));
 
         if ($candidates === []) {
             return [];
@@ -570,10 +562,7 @@ final readonly class SuggestionOperations implements DriveExtension
                 $conn = $this->lookup->connection();
                 $this->syncPendingJournalLocked($conn, $nodeId, $documentId, $input->generation);
 
-                $query = $this->suggestions->forDocument($conn, $documentId, $input->generation)
-                    ->where(static fn (Builder $drafts) => $drafts->where('state', 'open')
-                        ->orWhere('id', $input->id)->orWhere('group_id', $input->groupId))
-                    ->lockForUpdate();
+                $query = $this->suggestions->lockForMutation($conn, $documentId, $input->generation, [$input->id], $input->groupId);
                 $rows = array_column($this->suggestions->read($query), null, 'id');
                 $current = $rows[$input->id] ?? null;
                 $this->assertSaveAmendable($current, $input, $this->saveVersion($current, $expectedVersion, $ifMatch), $author);
@@ -636,7 +625,7 @@ final readonly class SuggestionOperations implements DriveExtension
                 throw SuggestionConflictException::because('The suggestion generation is stale.', 'generation_changed');
             }
             $subject = $this->subject();
-            $query = $this->suggestions->forDocument($locked->connection(), $state->documentId, $generation)->lockForUpdate();
+            $query = $this->suggestions->lockForMutation($locked->connection(), $state->documentId, $generation, array_keys($versions), $groupId);
             $all = array_column($this->suggestions->read($query), null, 'id');
             [$selected, $versions] = $this->decisionSelection($all, $versions, $groupId, $ifMatch);
             if ($this->isReplay($selected, $versions, $decision, $subject)) {
@@ -709,7 +698,7 @@ final readonly class SuggestionOperations implements DriveExtension
                 $documentId = $meta->documentId;
                 $this->syncPendingJournalLocked($conn, $nodeId, $documentId, $generation);
 
-                $query = $this->suggestions->forDocument($conn, $documentId, $generation)->lockForUpdate();
+                $query = $this->suggestions->lockForMutation($conn, $documentId, $generation, array_keys($versions), $groupId);
                 $all = array_column($this->suggestions->read($query), null, 'id');
                 [$selected, $versions] = $this->decisionSelection($all, $versions, $groupId, $ifMatch);
 
@@ -896,22 +885,15 @@ final readonly class SuggestionOperations implements DriveExtension
 
     private function syncPendingJournalLocked(Connection $conn, string $nodeId, string $documentId, int $generation): void
     {
-        $query = $this->suggestions->forDocument($conn, $documentId, $generation)->lockForUpdate();
-        $all = array_column($this->suggestions->read($query), null, 'id');
+        $query = $this->suggestions->forDocument($conn, $documentId, $generation)->where('state', 'open')->lockForUpdate();
 
         /** @var array<string, list<string>> $groupsByCommand */
         $groupsByCommand = [];
         /** @var array<string, array<string, mixed>> $metaByCommand */
         $metaByCommand = [];
 
-        // The rows are locked by the read above; their provenance comes in one more read, not one per row.
-        $provenances = $this->suggestions->readProvenances((clone $query)->where('state', 'open'));
-        foreach ($all as $row) {
-            if ($row->state !== 'open') {
-                continue;
-            }
-            $prov = $provenances[$row->id] ?? null;
-            $pending = is_array($prov['pending_journal'] ?? null) ? $prov['pending_journal'] : null;
+        foreach ($this->suggestions->readProvenances($query) as $id => $provenance) {
+            $pending = is_array($provenance['pending_journal'] ?? null) ? $provenance['pending_journal'] : null;
             $cmdId = is_array($pending) && is_string($pending['command_id'] ?? null) ? $pending['command_id'] : null;
             if ($cmdId === null) {
                 continue;
@@ -921,7 +903,7 @@ final readonly class SuggestionOperations implements DriveExtension
                 continue;
             }
             $groupKey = json_encode([$subject, $cmdId], JSON_THROW_ON_ERROR);
-            $groupsByCommand[$groupKey][] = $row->id;
+            $groupsByCommand[$groupKey][] = $id;
             $metaByCommand[$groupKey] ??= $pending;
         }
 
