@@ -174,7 +174,7 @@ export function createReviewClient(options: ReviewClientOptions = {}) {
 
   return {
     pins: {
-      page: (nodeId, query) => request<CursorPage<RevisionPin>>('GET', `/review/documents/${nodeId}/pins`, { query: { ...query, per_page: query?.per_page ?? 50 } }),
+      page: (nodeId, query = {}) => request<CursorPage<RevisionPin>>('GET', `/review/documents/${nodeId}/pins`, { query: { ...query, per_page: query.per_page ?? 50 } }),
       list: async (nodeId, includeExpired) =>
         (await request<{ data: RevisionPin[] }>('GET', `/review/documents/${nodeId}/pins`, {
           query: includeExpired ? { include_expired: true } : undefined,
@@ -285,7 +285,7 @@ export function createReviewClient(options: ReviewClientOptions = {}) {
         ).data,
     },
     suggestions: {
-      page: (nodeId, query) => request<CursorPage<DocumentSuggestion>>('GET', `/review/documents/${nodeId}/suggestions`, { query: { ...query, per_page: query?.per_page ?? 50 } }),
+      page: (nodeId, query = {}) => request<CursorPage<DocumentSuggestion>>('GET', `/review/documents/${nodeId}/suggestions`, { query: { ...query, per_page: query.per_page ?? 50 } }),
       capabilities: async (nodeId) =>
         (
           await request<{ data: SuggestionCapabilities }>(
