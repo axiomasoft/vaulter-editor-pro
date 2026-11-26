@@ -438,15 +438,18 @@ final readonly class ExchangeOperations implements DriveExtension
                 throw ExchangeException::alreadyApplied();
             }
 
-            return new ApplyExchangeReceiptData(
-                job: $job,
-                applyCommandId: $applyCommandId,
-                applyReceiptId: $job->applyReceiptId,
-                writeMode: $docMeta['write_mode'],
-                generation: $docMeta['collab_epoch'],
-                position: $docMeta['state_version'],
-                replayed: true,
-            );
+            $record = null;
+            if ($docMeta['write_mode'] === 'journal') {
+                try {
+                    $record = $this->resolveCommandJournal()?->status($this->buildCommandActor($nodeSnap->id, $tenantId), $applyCommandId);
+                } catch (RoomWriteConflict $conflict) {
+                    if ($conflict->reason !== 'key_expired') {
+                        throw $conflict;
+                    }
+                }
+            }
+
+            return $this->replayApplied($job, $applyCommandId, $docMeta, $record);
         }
 
         if ((bool) ($job->diagnosticsReport['blocked'] ?? false) === true) {
@@ -571,6 +574,25 @@ final readonly class ExchangeOperations implements DriveExtension
     }
 
     /**
+     * @param  array{collab_epoch: int, state_version: int, write_mode: string, ...}  $meta
+     * @param  array<string, mixed>|null  $record
+     */
+    private function replayApplied(ExchangeJobData $job, string $applyCommandId, array $meta, ?array $record): ApplyExchangeReceiptData
+    {
+        $settled = $job->applyReceiptId !== null && ($record['receipt_id'] ?? null) === $job->applyReceiptId;
+
+        return new ApplyExchangeReceiptData(
+            job: $job,
+            applyCommandId: $applyCommandId,
+            applyReceiptId: $job->applyReceiptId,
+            writeMode: $meta['write_mode'],
+            generation: $settled && is_int($record['generation'] ?? null) ? $record['generation'] : $meta['collab_epoch'],
+            position: $settled && is_int($record['to_seq'] ?? null) ? $record['to_seq'] : $meta['state_version'],
+            replayed: true,
+        );
+    }
+
+    /**
      * @param  array{id: int|string, node_id: int|string, tenant_id: int|string, type: string, collab_epoch: int, state_version: int, schema_version: int, write_mode: string}  $docMeta
      * @param  array<string, mixed>  $normalizedDoc
      * @param  array<string, mixed>  $preview
@@ -606,15 +628,7 @@ final readonly class ExchangeOperations implements DriveExtension
                 }
 
                 if ($lockedJob->state === ExchangeJobState::Applied) {
-                    return new ApplyExchangeReceiptData(
-                        job: $lockedJob,
-                        applyCommandId: $applyCommandId,
-                        applyReceiptId: $lockedJob->applyReceiptId,
-                        writeMode: 'journal',
-                        generation: $meta['collab_epoch'],
-                        position: $meta['state_version'],
-                        replayed: true,
-                    );
+                    return $this->replayApplied($lockedJob, $applyCommandId, $meta, $record);
                 }
 
                 if ($lockedJob->state !== ExchangeJobState::PreviewReady) {

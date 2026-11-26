@@ -976,7 +976,7 @@ it('applies imports through the journal and recovers receipts after the head adv
         ->and($settled['receipt_id'])->toBeString()
         ->and($reservations->count((string) $head->documentId, 0))->toBe($scenario === 'legacy' ? 0 : 5);
 
-    DB::table($tables->table('documents'))->where('node_id', $docNode->id)->update(['state_version' => 2]);
+    DB::table($tables->table('documents'))->where('node_id', $docNode->id)->update(['state_version' => 19]);
     if ($scenario === 'legacy') {
         $this->withHeaders(['Idempotency-Key' => 'journal-stale'])
             ->postJson($applyUrl, ['apply_command_id' => 'different-command', 'expected_position' => 2])
@@ -989,6 +989,15 @@ it('applies imports through the journal and recovers receipts after the head adv
         ->assertOk()
         ->assertJsonPath('data.state', 'applied')
         ->assertJsonPath('data.apply_receipt_id', $settled['receipt_id'])
+        ->assertJsonPath('data.position', $settled['to_seq'])
+        ->assertJsonPath('data.replayed', true);
+
+    $this->withHeaders(['Idempotency-Key' => 'journal-apply-after-recovery'])
+        ->postJson($applyUrl, ['apply_command_id' => $commandId])
+        ->assertOk()
+        ->assertJsonPath('data.apply_receipt_id', $settled['receipt_id'])
+        ->assertJsonPath('data.generation', $settled['generation'])
+        ->assertJsonPath('data.position', $settled['to_seq'])
         ->assertJsonPath('data.replayed', true);
 
     $this->getJson('api/vaulter/v1/documents/'.$docNode->id.'/exchange-jobs/'.$jobId)
