@@ -9,6 +9,7 @@ use Illuminate\Database\Schema\ColumnDefinition;
 use Illuminate\Support\Arr;
 use InvalidArgumentException;
 use Packman\Attributes\Internal;
+use RuntimeException;
 use Vaulter\Contracts\IdStrategy;
 use Vaulter\Schema\HostKeyColumns;
 use Vaulter\Schema\ModuleSchema;
@@ -16,7 +17,7 @@ use Vaulter\Schema\SchemaHelpers;
 use Vaulter\Schema\ValueObjects\KeyColumnExpectation;
 
 /**
- * Schema builder for `v_document_exchange_jobs` matching `plan/spec/database/sql/editor-pro-exchange.sql`.
+ * Schema for durable DOCX jobs, artifact references and document sections.
  */
 #[Internal]
 final class ExchangeSchema implements ModuleSchema
@@ -53,6 +54,15 @@ final class ExchangeSchema implements ModuleSchema
             throw new InvalidArgumentException(sprintf('Unknown exchange entity [%s].', $entity));
         }
 
+        $schema = $this->helpers->schemaConnection();
+        $name = $this->helpers->table($entity);
+        if ($entity === 'document_exchange_jobs' && $this->driver() === 'mysql' && $schema->hasTable($name)) {
+            // MySQL commits CREATE TABLE before it validates each index and foreign key.
+            $this->upgradeMysqlJobKeys();
+
+            return;
+        }
+
         $ids = $this->helpers->ids();
 
         $this->helpers->schemaConnection()->create(
@@ -76,7 +86,6 @@ final class ExchangeSchema implements ModuleSchema
 
     private function defineExchangeJobs(Blueprint $table, IdStrategy $ids): void
     {
-        $name = $table->getTable();
         $driver = $this->driver();
 
         $table->uuid('id')->primary();
@@ -91,6 +100,9 @@ final class ExchangeSchema implements ModuleSchema
                 'effective_subject',
                 'VARCHAR(255) NOT NULL CHECK(length(CAST(effective_subject AS BLOB)) BETWEEN 1 AND 255)',
             );
+        } elseif ($driver === 'mysql') {
+            $table->binary('project_scope', 255);
+            $table->binary('effective_subject', 255);
         } else {
             $scopeCol = $table->string('project_scope', 255);
             $subjectCol = $table->string('effective_subject', 255);
@@ -125,9 +137,10 @@ final class ExchangeSchema implements ModuleSchema
                 "VARCHAR(64) NOT NULL CHECK(profile_id <> '')",
             );
         } else {
-            $reqKeyCol = $table->string('request_key', 255);
-            if ($driver === 'pgsql') {
-                $reqKeyCol->collation('C');
+            if ($driver === 'mysql') {
+                $table->binary('request_key', 255);
+            } else {
+                $table->string('request_key', 255)->collation('C');
             }
             $table->binary('request_fingerprint');
             $table->string('kind', 16);
@@ -189,39 +202,71 @@ final class ExchangeSchema implements ModuleSchema
         $table->timestampTz('updated_at')->useCurrent();
         $table->timestampTz('finished_at')->nullable();
 
-        $table->unique(
-            ['tenant_id', 'project_scope', 'effective_subject', 'document_id', 'request_key'],
-            $name.'_uniq',
-        );
+        $this->defineJobKeys($table, $driver);
+    }
 
-        $table->index('source_blob_id', $name.'_source_blob_fk_idx');
-        $table->index('source_revision_id', $name.'_source_rev_fk_idx');
-        $table->index('output_blob_id', $name.'_output_blob_fk_idx');
-
-        if ($driver !== 'pgsql') {
-            $table->index(['document_id', 'created_at'], $name.'_doc');
-            $table->index(['state', 'lease_until', 'created_at'], $name.'_queue');
+    /** Resume interrupted MySQL DDL or upgrade existing case-insensitive identity columns without removing job data. */
+    public function upgradeMysqlJobKeys(): void
+    {
+        if ($this->driver() !== 'mysql') {
+            return;
         }
+        $schema = $this->helpers->schemaConnection();
+        $name = $this->helpers->table('document_exchange_jobs');
+        $columns = array_filter(['project_scope', 'effective_subject', 'request_key'],
+            static fn (string $column): bool => $schema->getColumnType($name, $column) !== 'varbinary');
+        if ($columns !== []) {
+            $db = $this->helpers->dbConnection();
+            if ($db->table($name)->whereRaw('OCTET_LENGTH(project_scope) > 255 OR OCTET_LENGTH(effective_subject) > 255 OR OCTET_LENGTH(request_key) > 255')->exists()) {
+                throw new RuntimeException('Exchange identity values over 255 bytes require correction before upgrading the MySQL job keys.');
+            }
+            $schema->table($name, static function (Blueprint $table) use ($columns): void {
+                foreach ($columns as $column) {
+                    $table->binary($column, 255)->change();
+                }
+            });
+        }
+        $indexes = array_column($schema->getIndexes($name), 'name');
+        $foreignKeys = array_column($schema->getForeignKeys($name), 'name');
+        $schema->table($name, fn (Blueprint $table) => $this->defineJobKeys($table, 'mysql', $indexes, $foreignKeys));
+    }
 
-        $table->foreign('document_id', $name.'_document_fk')
-            ->references('id')
-            ->on($this->helpers->table('documents'))
-            ->cascadeOnDelete();
-
-        $table->foreign('source_blob_id', $name.'_source_blob_fk')
-            ->references('id')
-            ->on($this->helpers->table('blobs'))
-            ->restrictOnDelete();
-
-        $table->foreign('source_revision_id', $name.'_source_rev_fk')
-            ->references('id')
-            ->on($this->helpers->table('document_revisions'))
-            ->restrictOnDelete();
-
-        $table->foreign('output_blob_id', $name.'_output_blob_fk')
-            ->references('id')
-            ->on($this->helpers->table('blobs'))
-            ->restrictOnDelete();
+    /**
+     * @param  list<string>  $existingIndexes
+     * @param  list<string|null>  $existingForeignKeys
+     */
+    private function defineJobKeys(Blueprint $table, string $driver, array $existingIndexes = [], array $existingForeignKeys = []): void
+    {
+        $name = $table->getTable();
+        if (! in_array($name.'_uniq', $existingIndexes, true)) {
+            $table->unique(['tenant_id', 'project_scope', 'effective_subject', 'document_id', 'request_key'], $name.'_uniq');
+        }
+        $indexes = [
+            'source_blob_fk_idx' => ['source_blob_id'],
+            'source_rev_fk_idx' => ['source_revision_id'],
+            'output_blob_fk_idx' => ['output_blob_id'],
+        ];
+        if ($driver !== 'pgsql') {
+            $indexes['doc'] = ['document_id', 'created_at'];
+            $indexes['queue'] = ['state', 'lease_until', 'created_at'];
+        }
+        foreach ($indexes as $suffix => $keys) {
+            $index = $name.'_'.$suffix;
+            if (! in_array($index, $existingIndexes, true)) {
+                $table->index($keys, $index);
+            }
+        }
+        foreach ([
+            'document_fk' => ['document_id', 'documents', 'cascade'],
+            'source_blob_fk' => ['source_blob_id', 'blobs', 'restrict'],
+            'source_rev_fk' => ['source_revision_id', 'document_revisions', 'restrict'],
+            'output_blob_fk' => ['output_blob_id', 'blobs', 'restrict'],
+        ] as $suffix => [$column, $target, $delete]) {
+            $constraint = $name.'_'.$suffix;
+            if (! in_array($constraint, $existingForeignKeys, true)) {
+                $table->foreign($column, $constraint)->references('id')->on($this->helpers->table($target))->onDelete($delete);
+            }
+        }
     }
 
     private function defineDocumentSections(Blueprint $table, IdStrategy $ids): void

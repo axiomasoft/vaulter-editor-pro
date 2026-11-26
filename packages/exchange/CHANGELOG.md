@@ -8,6 +8,8 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the package
 
 ### Fixed
 
+- On MySQL the job identity uses byte-exact scope, actor and request keys up to 255 bytes. Fresh UTF-8 installations now fit the InnoDB index limit. Migration 000806 updates existing installations and rerunning an interrupted 000801 preserves existing rows and completes missing indexes and foreign keys.
+
 - The last worker failure records a terminal result if the worker can claim the job. A worker fenced by another attempt cannot fail that attempt.
 - Recovery redelivers expired workers and aged queued jobs when automatic dispatch is enabled. The recovery API returns the IDs it scheduled, including stranded queued jobs.
 - Unsupported or invalid media now fails the exchange job immediately and retains the original problem code.

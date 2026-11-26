@@ -98,6 +98,8 @@ it('creates v_document_exchange_jobs with required columns and foreign key index
             'output_blob_id',
             'apply_command_id',
             'apply_receipt_id',
+            'reservation_command_id',
+            'reserved_suggestions',
             'state',
             'diagnostics_report',
             'error_code',
@@ -107,6 +109,12 @@ it('creates v_document_exchange_jobs with required columns and foreign key index
             'updated_at',
             'finished_at',
         ]))->toBeTrue();
+
+    expect(Schema::hasIndex($table, ['tenant_id', 'project_scope', 'effective_subject', 'document_id', 'request_key'], 'unique'))->toBeTrue();
+    $foreignKeys = array_column(Schema::getForeignKeys($table), 'columns');
+    foreach (['document_id', 'source_blob_id', 'source_revision_id', 'output_blob_id'] as $column) {
+        expect($foreignKeys)->toContain([$column]);
+    }
 
     $sectionsTable = app(DatabaseOptions::class)->table('document_sections');
     expect(Schema::hasTable($sectionsTable))->toBeTrue()

@@ -2,6 +2,7 @@
 
 declare(strict_types=1);
 
+use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
@@ -31,6 +32,7 @@ use Vaulter\EditorPro\Exchange\ExchangeManager;
 use Vaulter\EditorPro\Exchange\Repositories\ExchangeJobRepository;
 use Vaulter\EditorPro\Exchange\Runtime\CanonicalJson;
 use Vaulter\EditorPro\Exchange\Runtime\NodeDocxExchangeRuntime;
+use Vaulter\EditorPro\Exchange\Schema\ExchangeSchema;
 use Vaulter\EditorPro\Review\Contracts\PendingSuggestionReservations;
 use Vaulter\Media\Contracts\Cas\BlobPins;
 use Vaulter\Media\Contracts\Cas\BlobStore;
@@ -1254,3 +1256,32 @@ it('persists D2, D3, and D4 state atomically only when journal import settles', 
         ->and(DB::table($tables->table('document_comment_anchors'))->count())->toBe(3)
         ->and(DB::table($tables->table('document_sections'))->count())->toBe(1);
 });
+
+it('resumes the MySQL exchange table migration without losing existing jobs', function (): void {
+    $owner = AccessTestHelpers::user(1);
+    $storage = AccessTestHelpers::storage();
+    AccessTestHelpers::grant($storage->rootNode, RoleRegistry::OWNER, subjectId: 1);
+    $drive = app(Vaulter::class)->drive($storage)->actingAs($owner);
+    $node = app(DocumentsManager::class)->in($drive)->create('migration fixture', 'vaulter/rich-text', sampleRichDocument());
+    $job = $this->actingAs($owner)->withHeaders(['Idempotency-Key' => 'migration-case'])
+        ->postJson('api/vaulter/v1/documents/'.$node->id.'/exchange-jobs', [
+            'request_key' => 'migration-case', 'kind' => 'export', 'profile_id' => 'standard',
+        ])->assertAccepted()->json('data.id');
+    $conn = app(VaulterDatabase::class)->connection();
+    $name = app(DatabaseOptions::class)->table('document_exchange_jobs');
+    $schema = $conn->getSchemaBuilder();
+    $schema->table($name, static function (Blueprint $table) use ($name): void {
+        $table->dropForeign($name.'_source_rev_fk');
+        $table->dropUnique($name.'_uniq');
+        $table->string('project_scope', 255)->change();
+        $table->string('effective_subject', 255)->change();
+        $table->string('request_key', 255)->change();
+    });
+    $migration = app(ExchangeSchema::class);
+    $migration->create('document_exchange_jobs');
+    $migration->upgradeMysqlJobKeys();
+    expect($schema->hasIndex($name, $name.'_uniq', 'unique'))->toBeTrue()
+        ->and($schema->hasForeignKey($name, ['source_revision_id']))->toBeTrue()
+        ->and($conn->table($name)->where('request_key', 'migration-case')->value('id'))->toBe($job)
+        ->and($conn->table($name)->where('request_key', 'MIGRATION-CASE')->exists())->toBeFalse();
+})->group('engine:mysql');
