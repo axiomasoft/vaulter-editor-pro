@@ -1,8 +1,9 @@
 import { describe, expect, it, vi } from 'vitest'
 import { mount, flushPromises } from '@vue/test-utils'
 import VaulterTrackedChangesPanel from '../src/components/VaulterTrackedChangesPanel.vue'
+import { useTrackedChanges } from '../src/composables/useTrackedChanges'
 import type { ReviewClient } from '../src/api/reviewClient'
-import { DEFAULT_REVIEW_CAPABILITIES, type DocumentSuggestion, type SuggestionCapabilities } from '../src/types/review'
+import { DEFAULT_REVIEW_CAPABILITIES, type CursorPage, type DocumentSuggestion, type SuggestionCapabilities } from '../src/types/review'
 
 function makeSuggestion(overrides: Partial<DocumentSuggestion> = {}): DocumentSuggestion {
   return {
@@ -94,6 +95,22 @@ describe('VaulterTrackedChangesPanel', () => {
     await flushPromises()
     expect(wrapper.findAll('[data-suggestion-id]')).toHaveLength(3)
     expect(wrapper.find('[data-action="more-history"]').exists()).toBe(false)
+  })
+
+  it('does not fetch open pages for a superseded history request', async () => {
+    const client = makeMockClient([])
+    let finishFirst!: (result: CursorPage<DocumentSuggestion>) => void
+    const firstPage = new Promise<CursorPage<DocumentSuggestion>>(resolve => { finishFirst = resolve })
+    const page = vi.fn().mockReturnValueOnce(firstPage)
+      .mockResolvedValueOnce({ data: [], meta: { next_cursor: null, per_page: 50 } })
+    client.suggestions!.page = page
+    const changes = useTrackedChanges('doc', { client, pageHistory: true })
+    const outdated = changes.list('old')
+    await changes.list('current')
+    finishFirst({ data: [], meta: { next_cursor: 'unused', per_page: 50 } })
+    await outdated
+    expect(page).toHaveBeenCalledTimes(2)
+    expect(changes.historyCursor.value).toBeNull()
   })
 
   it('hides unsupported node_type_change UI by capability and enforces conflict rules in actions', async () => {

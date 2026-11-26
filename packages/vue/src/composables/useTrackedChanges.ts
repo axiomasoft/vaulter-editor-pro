@@ -229,7 +229,7 @@ export function useTrackedChanges(
         const first = await api.page(nodeId, { ...query, per_page: 50 })
         loaded = first.data
         next = first.meta.next_cursor
-        if (next !== null) {
+        if (next !== null && generation === listGeneration) {
           // Group decisions need every open member, including those beyond the first history page.
           let cursor: string | null = null
           do {
