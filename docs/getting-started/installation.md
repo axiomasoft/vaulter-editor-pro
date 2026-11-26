@@ -73,7 +73,7 @@ With `auto_dispatch` on (the default) registering a job dispatches `RunDocxExcha
 the job runs inside the request.
 
 Schedule the recovery command. It moves `running` jobs whose worker lease expired back to
-`queued`, and deletes `preview_ready`, `completed`, `applied` and `failed` jobs not updated for
+`queued`. With automatic dispatch it resubmits them to the configured queue and also retries a queued job that has had no update for `lease_seconds`. This recovers a lost queue message after a database commit. With manual dispatch the host picks up the queued job. The command deletes `preview_ready`, `completed`, `applied` and `failed` jobs not updated for
 `job_retention_seconds`, releasing their Media pins:
 
 ```php

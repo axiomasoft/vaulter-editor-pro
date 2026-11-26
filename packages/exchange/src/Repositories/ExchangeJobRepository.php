@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Vaulter\EditorPro\Exchange\Repositories;
 
 use Carbon\CarbonImmutable;
+use Closure;
 use Illuminate\Database\Connection;
 use Illuminate\Database\Query\Builder;
 use Illuminate\Database\UniqueConstraintViolationException;
@@ -450,47 +451,49 @@ final readonly class ExchangeJobRepository
     }
 
     /**
-     * Reclaim stale running leases back to queued and return reclaimed job IDs.
+     * Reclaim expired workers and, with automatic dispatch, retry an old queued intent whose publication was lost.
      *
+     * @param  (Closure(string, string, string, string): void)|null  $dispatch
      * @return list<string>
      */
-    public function reclaimExpiredLeases(int $limit = 100): array
+    public function reclaimExpiredLeases(int $limit, int $retryAfterSeconds, ?Closure $dispatch): array
     {
-        return $this->database->transaction(function () use ($limit): array {
-            $conn = $this->lookup->connection();
-            $now = $this->lookup->dbNow($conn);
-
-            $rows = $this->table($conn)
+        return $this->database->transaction(function () use ($limit, $retryAfterSeconds, $dispatch): array {
+            $connection = $this->lookup->connection();
+            $now = $this->lookup->dbNow($connection);
+            $query = $this->table($connection)->where(static fn (Builder $running): Builder => $running
                 ->where('state', ExchangeJobState::Running->value)
-                ->whereNotNull('lease_until')
-                ->orderBy('lease_until')
-                ->limit($limit)
-                ->lockForUpdate()
-                ->get(['id', 'lease_until']);
-
-            $reclaimed = [];
-            foreach ($rows as $row) {
-                $leaseUntil = is_string($row->lease_until ?? null) ? $row->lease_until : null;
-                if ($leaseUntil === null || $this->lookup->isFuture($leaseUntil, $conn)) {
-                    continue;
-                }
-                $jobId = Identity::stringify($row->id);
-                $updated = $this->table($conn)
-                    ->where('id', $jobId)
-                    ->where('state', ExchangeJobState::Running->value)
-                    ->where('lease_until', $leaseUntil)
-                    ->update([
-                        'state' => ExchangeJobState::Queued->value,
-                        'lease_token' => null,
-                        'lease_until' => null,
-                        'updated_at' => $now,
-                    ]);
-                if ($updated === 1) {
-                    $reclaimed[] = $jobId;
-                }
+                ->where('lease_until', '<=', $now));
+            if ($dispatch !== null) {
+                $cutoff = $this->lookup->dbPastTimestamp($retryAfterSeconds, $connection);
+                $query->orWhere(static fn (Builder $queued): Builder => $queued
+                    ->where('state', ExchangeJobState::Queued->value)
+                    ->where('updated_at', '<=', $cutoff));
             }
 
-            return $reclaimed;
+            $rows = $query->orderBy('updated_at')->orderBy('id')->limit($limit)->lockForUpdate()
+                ->get(['id', 'tenant_id', 'project_scope', 'effective_subject']);
+            $ids = [];
+            foreach ($rows as $row) {
+                $jobId = Identity::stringify($row->id);
+                $ids[] = $jobId;
+                if ($dispatch !== null) {
+                    $tenant = Identity::stringify($row->tenant_id);
+                    $scope = Identity::stringify($row->project_scope);
+                    $subject = Identity::stringify($row->effective_subject);
+                    $this->database->afterCommit(static fn () => $dispatch($jobId, $tenant, $scope, $subject));
+                }
+            }
+            if ($ids !== []) {
+                $this->table($connection)->whereIn('id', $ids)->update([
+                    'state' => ExchangeJobState::Queued->value,
+                    'lease_token' => null,
+                    'lease_until' => null,
+                    'updated_at' => $now,
+                ]);
+            }
+
+            return $ids;
         });
     }
 

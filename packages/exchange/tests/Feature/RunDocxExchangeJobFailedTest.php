@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 use Illuminate\Foundation\Testing\DatabaseMigrations;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Queue;
 use Vaulter\Configuration\DatabaseOptions;
 use Vaulter\Documents\DocumentsManager;
 use Vaulter\Drive\Access\Roles\RoleRegistry;
@@ -14,6 +15,7 @@ use Vaulter\EditorPro\Exchange\Data\ExchangeRuntimeExportResult;
 use Vaulter\EditorPro\Exchange\Data\ExchangeRuntimeImportResult;
 use Vaulter\EditorPro\Exchange\Enums\ExchangeJobState;
 use Vaulter\EditorPro\Exchange\Exceptions\ExchangeException;
+use Vaulter\EditorPro\Exchange\ExchangeManager;
 use Vaulter\EditorPro\Exchange\Jobs\RunDocxExchangeJob;
 use Vaulter\EditorPro\Exchange\Repositories\ExchangeJobRepository;
 use Vaulter\EditorPro\Exchange\Tests\TestCase;
@@ -105,4 +107,41 @@ it('leaves a job alone while a live worker still holds its lease', function (): 
     $worker->failed(new RuntimeException('timed out'));
 
     expect($repo->findById($worker->jobId)?->state)->toBe(ExchangeJobState::Running);
+});
+
+it('redelivers expired and unpublished work to the original queue with its original actor', function (): void {
+    Queue::fake();
+    config()->set('vaulter-editor-pro-exchange.queue_name', 'docx-test');
+    $worker = registerExportJob($this, 'recover-after-timeout');
+    $jobs = app(ExchangeJobRepository::class);
+    expect($jobs->claimLease($worker->jobId, 60))->toBeString();
+    $worker->failed(new RuntimeException('queue attempts exhausted'));
+    $manager = app(ExchangeManager::class);
+    expect($manager->reclaimExpiredLeases())->toBe([]);
+    Queue::assertPushed(RunDocxExchangeJob::class, 1);
+
+    $this->travel(2)->minutes();
+    expect($manager->reclaimExpiredLeases())->toBe([$worker->jobId])
+        ->and($jobs->findById($worker->jobId)?->state)->toBe(ExchangeJobState::Queued);
+    Queue::assertPushed(RunDocxExchangeJob::class, 2);
+    foreach (Queue::pushed(RunDocxExchangeJob::class) as $delivery) {
+        expect($delivery->driveId)->toBe($worker->driveId)
+            ->and($delivery->tenantId)->toBe($worker->tenantId)
+            ->and($delivery->projectScope)->toBe($worker->projectScope)
+            ->and($delivery->effectiveSubject)->toBe($worker->effectiveSubject)
+            ->and($delivery->queue)->toBe('docx-test');
+    }
+
+    // Losing the broker message after commit leaves a durable queued intent for the next maintenance run.
+    expect($manager->reclaimExpiredLeases())->toBe([]);
+    $this->travel(2)->minutes();
+    expect($manager->reclaimExpiredLeases())->toBe([$worker->jobId]);
+    Queue::assertPushed(RunDocxExchangeJob::class, 3);
+});
+
+it('keeps a later attempt queued when a fenced worker exhausts its own retries', function (): void {
+    config()->set('vaulter-editor-pro-exchange.auto_dispatch', false);
+    $worker = registerExportJob($this, 'another-worker-retry');
+    $worker->failed(ExchangeException::leaseLost());
+    expect(app(ExchangeJobRepository::class)->findById($worker->jobId)?->state)->toBe(ExchangeJobState::Queued);
 });

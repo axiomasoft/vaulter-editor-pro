@@ -7,6 +7,7 @@ namespace Vaulter\EditorPro\Exchange;
 use Packman\Attributes\Api;
 use Vaulter\Drive\Contracts\DriveHandle;
 use Vaulter\EditorPro\Exchange\Configuration\ExchangeOptions;
+use Vaulter\EditorPro\Exchange\Jobs\RunDocxExchangeJob;
 use Vaulter\EditorPro\Exchange\Operations\ExchangeOperations;
 use Vaulter\EditorPro\Exchange\Repositories\ExchangeJobRepository;
 
@@ -28,13 +29,19 @@ final readonly class ExchangeManager
     }
 
     /**
-     * Reclaim stale running job leases back to queued.
+     * Reclaim expired leases. With automatic dispatch, redeliver reclaimed and stale queued jobs.
      *
      * @return list<string> reclaimed job IDs
      */
     public function reclaimExpiredLeases(int $limit = 100): array
     {
-        return $this->jobs->reclaimExpiredLeases($limit);
+        return $this->jobs->reclaimExpiredLeases(
+            $limit,
+            $this->options->leaseSeconds,
+            $this->options->autoDispatch
+                ? fn (string $id, string $tenant, string $scope, string $subject) => RunDocxExchangeJob::enqueue($id, $tenant, $scope, $subject, $this->options)
+                : null,
+        );
     }
 
     /**

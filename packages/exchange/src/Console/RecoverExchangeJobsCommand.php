@@ -26,7 +26,7 @@ final class RecoverExchangeJobsCommand extends Command
         $purged = $exchange->purgeExpiredJobs(limit: $limit);
 
         $this->components->info(sprintf(
-            'Reclaimed %d expired lease(s), purged %d expired exchange job(s).',
+            'Recovered %d exchange job(s), purged %d expired exchange job(s).',
             count($reclaimed),
             $purged,
         ));

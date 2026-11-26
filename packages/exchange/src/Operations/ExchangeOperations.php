@@ -279,16 +279,9 @@ final readonly class ExchangeOperations implements DriveExtension
 
                 if ($res['created'] && $this->options->autoDispatch) {
                     $jobId = $res['job']->id;
-                    $driveId = $this->context->operation->scope->id;
-                    $tenantStr = Identity::stringify($tenantId);
-                    $this->database->afterCommit(function () use ($jobId, $driveId, $tenantStr, $projectScope, $effectiveSubject): void {
-                        $dispatch = new RunDocxExchangeJob($jobId, $driveId, $tenantStr, $projectScope, $effectiveSubject);
-                        if ($this->options->queueConnection !== null) {
-                            $dispatch->onConnection($this->options->queueConnection);
-                        }
-                        $dispatch->onQueue($this->options->queueName);
-                        dispatch($dispatch);
-                    });
+                    $this->database->afterCommit(fn () => RunDocxExchangeJob::enqueue(
+                        $jobId, Identity::stringify($tenantId), $projectScope, $effectiveSubject, $this->options,
+                    ));
                 }
 
                 return $res;

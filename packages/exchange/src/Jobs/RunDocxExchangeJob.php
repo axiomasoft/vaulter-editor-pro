@@ -8,9 +8,11 @@ use Illuminate\Container\Container;
 use Illuminate\Contracts\Queue\ShouldBeUnique;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Queue\Queueable;
+use Illuminate\Support\Str;
 use Packman\Attributes\Internal;
 use Throwable;
 use Vaulter\Drive\Vaulter;
+use Vaulter\EditorPro\Exchange\Configuration\ExchangeOptions;
 use Vaulter\EditorPro\Exchange\Contracts\ExchangeActorResolver;
 use Vaulter\EditorPro\Exchange\Enums\ExchangeJobState;
 use Vaulter\EditorPro\Exchange\Errors\ExchangeErrorCode;
@@ -41,6 +43,18 @@ final class RunDocxExchangeJob implements ShouldBeUnique, ShouldQueue
         public readonly string $projectScope,
         public readonly string $effectiveSubject,
     ) {}
+
+    public static function enqueue(
+        string $jobId,
+        string $tenantId,
+        string $projectScope,
+        string $effectiveSubject,
+        ExchangeOptions $options,
+    ): void {
+        // ExchangeLookup stores the registering scope as "<kind>:<id>".
+        $job = new self($jobId, Str::after($projectScope, ':'), $tenantId, $projectScope, $effectiveSubject);
+        dispatch($job->onConnection($options->queueConnection)->onQueue($options->queueName));
+    }
 
     public function uniqueId(): string
     {
@@ -90,12 +104,14 @@ final class RunDocxExchangeJob implements ShouldBeUnique, ShouldQueue
      * Called by the queue once it gives up on this job (attempts exhausted, timeout, or a sync-driver failure).
      *
      * ExchangeJobProcessor hands transient failures back to `queued` and rethrows so the queue can retry, and
-     * nothing dispatches a row again after the queue stops. Without this the row would stay `queued` forever and
-     * clients would poll it indefinitely, so the job is failed with the last error instead. A row that is already
-     * terminal, or whose lease a live worker still holds, is left alone.
+     * this callback records the terminal outcome when no other worker owns the lease. The recovery command
+     * redelivers an expired lease if the queue exhausts its attempts while the lease is still live.
      */
     public function failed(?Throwable $exception): void
     {
+        if ($exception instanceof ExchangeException && $exception->problemCode() === ExchangeErrorCode::LeaseLost->problemSlug()) {
+            return;
+        }
         $jobs = Container::getInstance()->make(ExchangeJobRepository::class);
         $token = $jobs->claimLease($this->jobId, self::TERMINAL_WRITE_LEASE_SECONDS);
         if ($token === null) {
