@@ -18,7 +18,7 @@ use Vaulter\Schema\SchemaHelpers;
 use Vaulter\Schema\ValueObjects\KeyColumnExpectation;
 
 /**
- * Schema builder for the review tables in `plan/spec/database/sql/editor-pro-review.sql`.
+ * Database definitions for document review state, comment anchors and revision pins.
  */
 #[Internal]
 final class ReviewSchema implements ModuleSchema
