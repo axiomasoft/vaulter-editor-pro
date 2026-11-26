@@ -47,7 +47,7 @@ The response contains `data` and `meta: {per_page, next_cursor}`. A null cursor 
 Paged suggestions use ascending suggestion ID. Supplying `open_only` also selects the paged response. Set it to `true` or `1` to filter open changes. Use `false` or `0` to include decided changes. Paged pins use ascending
 revision ID and honor `include_expired`. Existing list requests retain their response and ordering.
 A document generation accepts up to 1000 open suggestions. Saving another returns HTTP 422
-with code `unsupported_suggestion` and reason `open_suggestion_limit`. Existing drafts can still be amended.
+with code `unsupported_suggestion` and `meta.reason` set to `open_suggestion_limit`. Existing drafts can still be amended.
 
 
 ## Exchange
@@ -64,7 +64,7 @@ Register body: `kind` (`import` or `export`, required), `format` (`docx`), `prof
 `source_blob_id`. `request_key` identifies the job; when it is omitted the `Idempotency-Key`
 header is used, and a request without either is refused. Reusing a key with different
 parameters answers `exchange_idempotency_conflict`. Apply body: `apply_command_id`
-and optionally `expected_generation` / `expected_position`.
+and optionally `expected_generation` / `expected_position`. A DOCX import that would exceed 1000 open suggestions returns HTTP 422 with code `exchange_invalid_command` and `meta.reason` set to `open_suggestion_limit`. Pending journal imports reserve their slots until rejection or materialization.
 
 Job states: `queued` → `running` → `preview_ready` (import) or `completed` (export) →
 `applied` (import, after apply); any of them may end in `failed` with `error_code` and

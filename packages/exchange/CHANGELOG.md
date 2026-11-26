@@ -6,6 +6,10 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the package
 
 ## Unreleased
 
+### Added
+
+- `ExchangeErrorCode` exposes `httpStatus()`, `category()` and `retryable()`.
+
 ### Fixed
 
 - On MySQL the job identity uses byte-exact scope, actor and request keys up to 255 bytes. Fresh UTF-8 installations now fit the InnoDB index limit. Migration 000806 updates existing installations and rerunning an interrupted 000801 preserves existing rows and completes missing indexes and foreign keys.

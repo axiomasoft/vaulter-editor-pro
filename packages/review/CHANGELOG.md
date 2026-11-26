@@ -9,6 +9,7 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the package
 ### Added
 
 - Cursor paging for suggestion and pin HTTP lists and PHP operations. Supply `per_page` or `cursor` to receive `meta.next_cursor`. Supplying `open_only` also selects the paged suggestion response.
+- `ReviewErrorCode` exposes `problemSlug()`, `httpStatus()` and `category()`. `ReviewOptions` publishes the anchor limit floors as `MIN_SELECTOR_BYTES`, `MIN_SELECTOR_DEPTH` and `MIN_QUOTE_BYTES`.
 - Review migration 000805 indexes each document's suggestions and revision pins in cursor order.
 
 ### Changed
