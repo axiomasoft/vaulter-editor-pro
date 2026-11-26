@@ -1,7 +1,7 @@
 name: CI
 
 # DAG (GitHub draws this from `needs`):
-#   changes → quality → { php, node, docx-libreoffice, e2e } → CI gate
+#   changes → quality → { php, mysql, node, docx-libreoffice, e2e } → CI gate
 #
 # quality is the fast fail: stop-cranes, composer validate, Pint, PHPStan,
 # actionlint and zizmor. The heavier lanes only start after it succeeds.
@@ -291,6 +291,53 @@ jobs:
           DB_DATABASE: ":memory:"
         run: composer test:parallel
 
+  mysql:
+    name: Exchange and review / MySQL 9.7
+    needs: [changes, quality]
+    if: always() && needs.quality.result == 'success' && (needs.changes.outputs.full == 'true' || needs.changes.outputs.php == 'true')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    services:
+      mysql:
+        image: mysql:9.7@sha256:df90258da46f6e7ff8574ff84f17618aba0765cac749928299c69fd4e7cb8ad8
+        env:
+          MYSQL_DATABASE: vaulter_test
+          MYSQL_USER: vaulter
+          MYSQL_PASSWORD: vaulter
+          MYSQL_ROOT_PASSWORD: secret
+        ports:
+          - 3306:3306
+        options: >-
+          --tmpfs /var/lib/mysql
+          --health-cmd "mysqladmin ping -h 127.0.0.1 -psecret"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+    env:
+      DB_CONNECTION: mysql
+      DB_HOST: 127.0.0.1
+      DB_PORT: "3306"
+      DB_DATABASE: vaulter_test
+      DB_USERNAME: vaulter
+      DB_PASSWORD: vaulter
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: scripts/ci/checkout-ecosystem.sh vaulter vaulter-collaboration packman
+      - uses: $/.github/actions/setup-node
+        with:
+          node-version: "26.13.1"
+      - run: npm run build --workspace @vaulter/editor-pro-docx
+      - uses: $/.github/actions/setup-php
+        with:
+          php-version: '8.4'
+          extensions: pdo_mysql, pdo_sqlite, sqlite3
+      - name: Verify MySQL schema and document operations
+        run: >-
+          vendor/bin/pest packages/exchange/tests/Arch/ExchangeBoundaryAndPolicyTest.php
+          packages/exchange/tests/Feature/DocxExchangeLifecycleTest.php
+          packages/review/tests/Integration/DocumentSuggestionTest.php
+          packages/review/tests/Feature/RevisionPinTest.php
+
   node:
     name: Node 26.13.1 docx and vue
     needs: [changes, quality]
@@ -431,7 +478,7 @@ jobs:
   ci-gate:
     name: CI gate
     if: always()
-    needs: [changes, quality, php, node, docx-libreoffice, e2e]
+    needs: [changes, quality, php, mysql, node, docx-libreoffice, e2e]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:

@@ -56,6 +56,7 @@ PostgreSQL 18 cluster from `/usr/lib/postgresql/18/bin`.
 
 ```
 changes ──► quality ──► php (8.4/8.5 × PostgreSQL 18.7/19.0, SQLite once per PHP)
+                   ├──► mysql (MySQL 9.7 exchange and review integration)
                    ├──► node (docx and vue test, typecheck, build)
                    ├──► docx-libreoffice (corpus gate)
                    └──► e2e (Playwright against PostgreSQL 18.7)
@@ -67,7 +68,7 @@ changes ──► quality ──► php (8.4/8.5 × PostgreSQL 18.7/19.0, SQLite
    lanes whose files did not change.
 2. **Quality** is the fast fail: the Node engines assertion, stop-cranes, `composer validate`,
    Pint, PHPStan, actionlint and zizmor. Heavier lanes start only after it succeeds.
-3. **PHP, Node, LibreOffice and E2E** then run in parallel. The PHP 8.4 / PostgreSQL 18.7 cell
+3. **PHP, MySQL, Node, LibreOffice and E2E** then run in parallel. The PHP 8.4 / PostgreSQL 18.7 cell
    uploads a Clover coverage artifact.
 4. **CI gate** waits for every job (`if: always()`) and fails if any needed job failed or was
    cancelled. A skipped lane (path filter) is allowed. Branch protection should require only
@@ -75,7 +76,7 @@ changes ──► quality ──► php (8.4/8.5 × PostgreSQL 18.7/19.0, SQLite
 
 Triggers: pushes to `main`, `refactor/**`, `feat/**`, `fix/**`, `hotfix/**` and `chore/**`, pull
 requests, and manual `workflow_dispatch`. Concurrent runs on the same ref cancel the earlier one.
-Every action is pinned to a commit SHA and the PostgreSQL images to a digest. PHP and Node setup,
+Every action is pinned to a commit SHA and the database images to a digest. PHP and Node setup,
 Composer/npm caching, and workflow lint live in composite actions under `.github/actions/`.
 
 Sibling repositories are checked out by `scripts/ci/checkout-ecosystem.sh`: `vaulter` and
