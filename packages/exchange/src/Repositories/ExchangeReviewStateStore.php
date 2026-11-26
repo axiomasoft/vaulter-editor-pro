@@ -13,11 +13,13 @@ use stdClass;
 use Vaulter\Configuration\IdsOptions;
 use Vaulter\Drive\Contracts\DriveHandle;
 use Vaulter\Drive\Operations\DriveContext;
+use Vaulter\EditorPro\Exchange\Exceptions\ExchangeException;
 use Vaulter\EditorPro\Review\Data\AnchoredCommentData;
 use Vaulter\EditorPro\Review\Enums\AnchorState;
 use Vaulter\EditorPro\Review\Enums\CommentFilterStatus;
 use Vaulter\EditorPro\Review\Enums\SelectorKind;
 use Vaulter\EditorPro\Review\Operations\AnchoredCommentOperations;
+use Vaulter\EditorPro\Review\Operations\SuggestionOperations;
 use Vaulter\Exceptions\Access\MissingActorException;
 use Vaulter\Support\Identity;
 
@@ -286,6 +288,39 @@ final readonly class ExchangeReviewStateStore
         }
     }
 
+    /** @param array<string, mixed> $preview */
+    public function admitImportedSuggestions(Connection $connection, string $documentId, int $generation, array $preview): int
+    {
+        $revisions = self::listOfStringMaps($preview['revisions'] ?? null);
+        $incoming = count(array_filter($revisions, self::supportedRevision(...)));
+        if ($incoming === 0) {
+            return 0;
+        }
+        $table = $this->lookup->table('document_suggestions');
+        if (! $connection->getSchemaBuilder()->hasTable($table)) {
+            return 0;
+        }
+        if (! class_exists(SuggestionOperations::class)) {
+            throw ExchangeException::unsupportedDocument('review_package_required');
+        }
+        $reserved = $this->container->make(JournalImportReservations::class)->count($documentId, $generation);
+        $open = $connection->table($table)->where('document_id', $documentId)->where('generation', $generation)
+            ->where('state', 'open')->limit(SuggestionOperations::MAX_OPEN_PER_DOCUMENT + 1)->lockForUpdate()->pluck('id');
+        // Fetch IDs under lock: PostgreSQL disallows FOR UPDATE on a COUNT aggregate.
+        if (count($open->all()) + $reserved + $incoming > SuggestionOperations::MAX_OPEN_PER_DOCUMENT) {
+            throw ExchangeException::invalidCommand('The import exceeds the open suggestion limit.', 'open_suggestion_limit');
+        }
+
+        return $incoming;
+    }
+
+    /** @param array<string, mixed> $revision */
+    private static function supportedRevision(array $revision): bool
+    {
+        return in_array($revision['kind'] ?? null, ['insert', 'delete', 'replace', 'mark_change', 'block_join'], true)
+            && is_string($revision['target_block_id'] ?? null) && $revision['target_block_id'] !== '';
+    }
+
     /**
      * @param  list<array<string, mixed>>  $sections
      */
@@ -501,14 +536,11 @@ final readonly class ExchangeReviewStateStore
         $authorPolicy = is_string($options['imported_author_policy'] ?? null) ? $options['imported_author_policy'] : 'prefix';
 
         foreach ($revisions as $index => $rev) {
-            $kind = Identity::stringify($rev['kind'] ?? '');
-            if (! in_array($kind, ['insert', 'delete', 'replace', 'mark_change', 'block_join'], true)) {
+            if (! self::supportedRevision($rev)) {
                 continue;
             }
-            $targetBlockId = is_string($rev['target_block_id'] ?? null) ? $rev['target_block_id'] : '';
-            if ($targetBlockId === '') {
-                continue;
-            }
+            $kind = Identity::stringify($rev['kind']);
+            $targetBlockId = Identity::stringify($rev['target_block_id']);
 
             $rawAuthor = is_string($rev['author'] ?? null) && trim($rev['author']) !== ''
                 ? trim($rev['author'])

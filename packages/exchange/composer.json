@@ -29,7 +29,8 @@
         "symfony/process": "^7.0 || ^8.0"
     },
     "suggest": {
-        "axiomasoft/vaulter-collaboration": "Required for applying DOCX imports when documents use collaboration journal write mode."
+        "axiomasoft/vaulter-collaboration": "Required for applying DOCX imports when documents use collaboration journal write mode.",
+        "axiomasoft/vaulter-editor-pro-review": "Registers revision pins, anchored discussions and tracked suggestions for import and export."
     },
     "require-dev": {
         "axiomasoft/packman-testkit": "^0.1",

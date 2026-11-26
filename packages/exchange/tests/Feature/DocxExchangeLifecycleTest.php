@@ -22,13 +22,16 @@ use Vaulter\Drive\Testing\Access\AccessTestHelpers;
 use Vaulter\Drive\Vaulter;
 use Vaulter\EditorPro\Exchange\Configuration\ExchangeOptions;
 use Vaulter\EditorPro\Exchange\Contracts\BeforeArtifactLinkHook;
+use Vaulter\EditorPro\Exchange\Contracts\DocxExchangeRuntime;
 use Vaulter\EditorPro\Exchange\Data\ApplyExchangeImportInput;
+use Vaulter\EditorPro\Exchange\Data\ExchangeRuntimeImportResult;
 use Vaulter\EditorPro\Exchange\Enums\ExchangeJobState;
 use Vaulter\EditorPro\Exchange\Exceptions\ExchangeException;
 use Vaulter\EditorPro\Exchange\ExchangeManager;
 use Vaulter\EditorPro\Exchange\Repositories\ExchangeJobRepository;
 use Vaulter\EditorPro\Exchange\Runtime\CanonicalJson;
 use Vaulter\EditorPro\Exchange\Runtime\NodeDocxExchangeRuntime;
+use Vaulter\EditorPro\Review\Contracts\PendingSuggestionReservations;
 use Vaulter\Media\Contracts\Cas\BlobPins;
 use Vaulter\Media\Contracts\Cas\BlobStore;
 use Vaulter\Media\Data\Snapshots\BlobSnapshot;
@@ -832,12 +835,14 @@ it('applies imports through the journal and recovers receipts after the head adv
     $head = $docs->in($drive)->content($docNode);
 
     $this->actingAs($owner);
-    $docxBytes = makeDocxZip('<?xml version="1.0" encoding="UTF-8"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>Journal settled clause</w:t></w:r></w:p></w:body></w:document>');
+    $docxBytes = $scenario === 'legacy' ? makeDocxZip('<?xml version="1.0" encoding="UTF-8"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>Journal settled clause</w:t></w:r></w:p></w:body></w:document>') : file_get_contents(dirname(__DIR__, 4).'/tests/corpus/docx/d4-revisions.docx');
+    expect($docxBytes)->toBeString();
+    $reservations = app(PendingSuggestionReservations::class);
     $reg = $this->withHeaders(['Idempotency-Key' => 'journal-reg-1'])
         ->post('api/vaulter/v1/documents/'.$docNode->id.'/exchange-jobs', [
             'request_key' => 'journal-imp-1',
             'kind' => 'import',
-            'profile_id' => 'standard',
+            'profile_id' => $scenario === 'legacy' ? 'standard' : 'revisions',
             'file' => UploadedFile::fake()->createWithContent('journal.docx', $docxBytes),
         ], ['Accept' => 'application/json'])
         ->assertStatus(202);
@@ -913,7 +918,10 @@ it('applies imports through the journal and recovers receipts after the head adv
             ->assertStatus(202)
             ->assertJsonPath('data.pending_commit', true)
             ->assertJsonPath('data.replayed', false);
-        expect(app(ExchangeJobRepository::class)->findById($jobId)?->applyCommandId)->toBe($commandId);
+        expect(app(ExchangeJobRepository::class)->findById($jobId)?->applyCommandId)->toBe($commandId)
+            ->and($reservations->count((string) $head->documentId, 0))->toBe(5);
+        DB::table($tables->table('document_exchange_jobs'))->where('id', $jobId)->update(['updated_at' => now()->subDays(8)]);
+        expect(app(ExchangeJobRepository::class)->purgeExpired(7 * 86400))->toBe(0);
         app(UpdateLog::class)->appendFenced($docNode->id, $update('seed', 1), $roomOwner, 1, 0, static fn () => null);
     }
 
@@ -947,7 +955,8 @@ it('applies imports through the journal and recovers receipts after the head adv
     );
 
     if ($stale) {
-        expect($settled['state'])->toBe('rejected');
+        expect($settled['state'])->toBe('rejected')
+            ->and($reservations->count((string) $head->documentId, 0))->toBe(0);
         $this->withHeaders(['Idempotency-Key' => 'journal-apply-after-conflict'])
             ->postJson($applyUrl, ['apply_command_id' => $commandId])
             ->assertStatus(409)
@@ -958,7 +967,8 @@ it('applies imports through the journal and recovers receipts after the head adv
     }
 
     expect($settled['state'])->toBe('committed')
-        ->and($settled['receipt_id'])->toBeString();
+        ->and($settled['receipt_id'])->toBeString()
+        ->and($reservations->count((string) $head->documentId, 0))->toBe($scenario === 'legacy' ? 0 : 5);
 
     DB::table($tables->table('documents'))->where('node_id', $docNode->id)->update(['state_version' => 2]);
     if ($scenario === 'legacy') {
@@ -979,6 +989,8 @@ it('applies imports through the journal and recovers receipts after the head adv
         ->assertOk()
         ->assertJsonPath('data.state', 'applied')
         ->assertJsonPath('data.apply_receipt_id', $settled['receipt_id']);
+    expect($reservations->count((string) $head->documentId, 0))->toBe(0)
+        ->and(DB::table($tables->table('document_suggestions'))->where('document_id', $head->documentId)->count())->toBe($scenario === 'legacy' ? 0 : 5);
 })->with(['new', 'legacy', 'stale']);
 
 it('releases exchange source/output pins on document trash purge and retention cleanup without touching sibling docs', function (): void {
@@ -1150,6 +1162,34 @@ it('roundtrips D2 sections, D3 discussions, and D4 tracked changes through serve
     $d4OutBytes = $this->get($d4Url.'/'.$d4Exp->json('data.id').'/file')->assertOk()->streamedContent();
     $d4Reimp = app(NodeDocxExchangeRuntime::class)->importDocx($d4OutBytes, 'revisions');
     expect($d4Reimp->revisions)->toHaveCount(5);
+});
+
+it('rolls back the document and job when a snapshot import exceeds the open suggestion limit', function (): void {
+    $owner = AccessTestHelpers::user(1);
+    $storage = AccessTestHelpers::storage();
+    AccessTestHelpers::grant($storage->rootNode, RoleRegistry::OWNER, subjectId: 1);
+    $drive = app(Vaulter::class)->drive($storage)->actingAs($owner);
+    $docs = app(DocumentsManager::class)->in($drive);
+    $node = $docs->create('snapshot quota', 'vaulter/rich-text', sampleRichDocument('Original head'));
+    $before = $docs->content($node);
+    $revision = ['kind' => 'insert', 'block_index' => 0];
+    $result = new ExchangeRuntimeImportResult(false, '', sampleRichDocument('Import head'), [],
+        revisions: array_fill(0, 1001, $revision));
+    $runtime = Mockery::mock(DocxExchangeRuntime::class);
+    $runtime->shouldReceive('importDocx')->once()->andReturn($result);
+    app()->instance(DocxExchangeRuntime::class, $runtime);
+    $url = 'api/vaulter/v1/documents/'.$node->id.'/exchange-jobs';
+    $bytes = file_get_contents(dirname(__DIR__, 4).'/tests/corpus/docx/d4-revisions.docx');
+    $job = $this->actingAs($owner)->withHeaders(['Idempotency-Key' => 'quota-reg'])
+        ->postJson($url, ['kind' => 'import', 'profile_id' => 'revisions', 'docx_b64' => base64_encode($bytes)])
+        ->assertAccepted()->assertJsonPath('data.state', 'preview_ready')->json('data.id');
+    $this->withHeaders(['Idempotency-Key' => 'quota-apply'])
+        ->postJson($url.'/'.$job.'/apply', ['apply_command_id' => 'quota-cmd'])
+        ->assertUnprocessable()->assertJsonPath('code', 'exchange_invalid_command')->assertJsonPath('meta.reason', 'open_suggestion_limit');
+    expect($docs->content($node)->stateVersion)->toBe($before->stateVersion)
+        ->and($docs->content($node)->content->toArray())->toBe($before->content->toArray())
+        ->and(app(ExchangeJobRepository::class)->findById($job)?->state)->toBe(ExchangeJobState::PreviewReady)
+        ->and(DB::table(app(DatabaseOptions::class)->table('document_suggestions'))->count())->toBe(0);
 });
 
 it('persists D2, D3, and D4 state atomically only when journal import settles', function (): void {

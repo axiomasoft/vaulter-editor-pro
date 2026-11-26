@@ -403,7 +403,7 @@ final readonly class ExchangeJobRepository
         return $this->toData($row);
     }
 
-    public function recordPendingJournalApply(Connection $conn, ExchangeJobData $locked, string $applyCommandId): ExchangeJobData
+    public function recordPendingJournalApply(Connection $conn, ExchangeJobData $locked, string $applyCommandId, ?string $commandRowId, int $slots): ExchangeJobData
     {
         if ($locked->applyCommandId === $applyCommandId) {
             return $locked;
@@ -413,6 +413,8 @@ final readonly class ExchangeJobRepository
             ->where('id', $locked->id)
             ->update([
                 'apply_command_id' => $applyCommandId,
+                'reservation_command_id' => $commandRowId,
+                'reserved_suggestions' => $slots,
                 'updated_at' => $this->lookup->dbNow($conn),
             ]);
 
@@ -506,15 +508,26 @@ final readonly class ExchangeJobRepository
             $conn = $this->lookup->connection();
             $cutoff = $this->lookup->dbPastTimestamp($retentionSeconds, $conn);
 
-            $rows = $this->table($conn)
+            $candidates = $this->table($conn)
                 ->whereIn('state', [
                     ExchangeJobState::Completed->value,
                     ExchangeJobState::Applied->value,
                     ExchangeJobState::Failed->value,
                     ExchangeJobState::PreviewReady->value,
                 ])
-                ->where('updated_at', '<=', $cutoff)
-                ->orderBy('updated_at')
+                ->where('updated_at', '<=', $cutoff);
+            $commands = $this->lookup->table('collaboration_commands');
+            if ($conn->getSchemaBuilder()->hasTable($commands)) {
+                $candidates->where(function (Builder $eligible) use ($commands): void {
+                    $eligible->where('state', '!=', ExchangeJobState::PreviewReady->value)
+                        ->orWhereNotExists(function (Builder $pending) use ($commands): void {
+                            $pending->selectRaw('1')->from($commands.' as command')
+                                ->whereColumn('command.id', $this->lookup->table('document_exchange_jobs').'.reservation_command_id')
+                                ->whereIn('command.state', ['running', 'committed']);
+                        });
+                });
+            }
+            $rows = $candidates->orderBy('updated_at')
                 ->limit($limit)
                 ->lockForUpdate()
                 ->get(['id', 'source_blob_id', 'output_blob_id']);

@@ -6,11 +6,16 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the package
 
 ## Unreleased
 
-- Exchange and its base Vaulter dependencies install at the same version. Exhausting queue retries records a terminal failure when the worker can claim the job.
+### Fixed
 
-- Recovery now redelivers expired workers and aged queued jobs when automatic dispatch is enabled. The recovery API returns the IDs it scheduled, including stranded queued jobs.
+- The last worker failure records a terminal result if the worker can claim the job. A worker fenced by another attempt cannot fail that attempt.
+- Recovery redelivers expired workers and aged queued jobs when automatic dispatch is enabled. The recovery API returns the IDs it scheduled, including stranded queued jobs.
+- Unsupported or invalid media now fails the exchange job immediately and retains the original problem code.
+- DOCX apply checks the open-suggestion limit before publishing an import. A refused import returns `422 exchange_invalid_command` with reason `open_suggestion_limit`. Migration 000804 reserves journal import slots until the command is rejected or its suggestions are materialized. Retention preserves a pending import and its artifacts while its room command can still settle.
 
 ### Changed
+
+- Exchange and its base Vaulter dependencies install at the same version. Exchange services and the optional persistent converter are scoped per request or job.
 
 - `exchange_job_not_ready`, `exchange_runtime_failed` and `exchange_lease_lost` answer
   `retryable: with_backoff`; they are transient and used to say `never`.

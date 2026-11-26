@@ -17,9 +17,11 @@ use Vaulter\EditorPro\Exchange\Operations\ExchangeJobProcessor;
 use Vaulter\EditorPro\Exchange\Operations\ExchangeOperations;
 use Vaulter\EditorPro\Exchange\Repositories\ExchangeJobRepository;
 use Vaulter\EditorPro\Exchange\Repositories\ExchangeLookup;
+use Vaulter\EditorPro\Exchange\Repositories\JournalImportReservations;
 use Vaulter\EditorPro\Exchange\Runtime\ConfigAuthActorResolver;
 use Vaulter\EditorPro\Exchange\Runtime\NodeDocxExchangeRuntime;
 use Vaulter\EditorPro\Exchange\Security\DocxZipArchiveGuard;
+use Vaulter\EditorPro\Review\Contracts\PendingSuggestionReservations;
 use Vaulter\Modules\ModuleBindings;
 
 /** Container bindings and configuration validator for `vaulter.exchange`. */
@@ -51,6 +53,9 @@ final class ExchangeBindings implements ModuleBindings
         $app->scoped(ExchangeJobRepository::class);
         $app->scoped(DocxExchangeRuntime::class, NodeDocxExchangeRuntime::class);
         $app->scoped(ExchangeActorResolver::class, ConfigAuthActorResolver::class);
+        if (interface_exists(PendingSuggestionReservations::class)) {
+            $app->scoped(PendingSuggestionReservations::class, JournalImportReservations::class);
+        }
         $app->scoped(ExchangeJobProcessor::class);
         $app->scoped(ExchangeManager::class);
         $app->alias(ExchangeManager::class, 'vaulter.exchange');

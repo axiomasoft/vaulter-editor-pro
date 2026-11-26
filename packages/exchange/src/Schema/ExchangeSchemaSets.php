@@ -27,7 +27,7 @@ final class ExchangeSchemaSets implements SchemaSetProvider
                 name: 'exchange',
                 scope: SchemaScope::Central,
                 path: dirname(__DIR__, 2).'/database/migrations',
-                version: 1,
+                version: 2,
                 drivers: ['pgsql', 'sqlite', 'mysql', 'mariadb'],
             ),
         ];

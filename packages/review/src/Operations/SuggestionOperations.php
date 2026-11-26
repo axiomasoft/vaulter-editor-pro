@@ -31,6 +31,7 @@ use Vaulter\Drive\Exceptions\Nodes\InvalidCursorException;
 use Vaulter\Drive\Operations\DriveContext;
 use Vaulter\Drive\Vaulter;
 use Vaulter\EditorPro\Review\Anchors\SnapshotAnchorResolver;
+use Vaulter\EditorPro\Review\Contracts\PendingSuggestionReservations;
 use Vaulter\EditorPro\Review\Data\ReviewCapabilitiesData;
 use Vaulter\EditorPro\Review\Data\StructuralSuggestionInput;
 use Vaulter\EditorPro\Review\Data\TextSuggestion;
@@ -66,9 +67,11 @@ final readonly class SuggestionOperations implements DriveExtension
 {
     /**
      * Open suggestions one document generation may hold. Every save reads and locks all of them and the
-     * overlap checks compare them pairwise, so the bound keeps a save (and the editor's full list) cheap.
+     * overlap checks compare them pairwise. Historical suggestions are independently paginated.
      */
     public const int MAX_OPEN_PER_DOCUMENT = 1000;
+
+    private ?PendingSuggestionReservations $reservations;
 
     private ReviewCapabilities $capabilitiesResolver;
 
@@ -91,6 +94,7 @@ final readonly class SuggestionOperations implements DriveExtension
         private OperationRunner $runner,
         Container $container,
     ) {
+        $this->reservations = $container->bound(PendingSuggestionReservations::class) ? $container->make(PendingSuggestionReservations::class) : null;
         $this->capabilitiesResolver = new ReviewCapabilities;
         $this->structuralEditor = new SnapshotStructuralEdit($this->capabilitiesResolver);
         $this->overlapDetector = new SuggestionOverlapDetector;
@@ -1187,7 +1191,8 @@ final readonly class SuggestionOperations implements DriveExtension
     ): TextSuggestion {
         if ($current === null) {
             $open = count(array_filter($rows, static fn (TextSuggestion $row): bool => $row->state === 'open'));
-            if ($open >= self::MAX_OPEN_PER_DOCUMENT) {
+            $reserved = $this->reservations?->count($documentId, $generation) ?? 0;
+            if ($open + $reserved >= self::MAX_OPEN_PER_DOCUMENT) {
                 throw UnsupportedSuggestionException::because(
                     'the document already has '.self::MAX_OPEN_PER_DOCUMENT.' open suggestions; accept or reject some first.',
                     'open_suggestion_limit',

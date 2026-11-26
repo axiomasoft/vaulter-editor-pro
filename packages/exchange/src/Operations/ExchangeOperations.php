@@ -533,6 +533,7 @@ final readonly class ExchangeOperations implements DriveExtension
                 $receiptId,
             );
 
+            $this->reviewState->admitImportedSuggestions($locked->connection(), $lockedJob->documentId, $next->generation, $preview);
             $this->reviewState->persistImportedStateOnConnection(
                 conn: $locked->connection(),
                 context: $this->context,
@@ -627,6 +628,7 @@ final readonly class ExchangeOperations implements DriveExtension
                 }
 
                 $replayed = $record !== null;
+                $slots = 0;
                 $readPosition = $position;
                 $intent = [
                     'operation' => 'exchange.apply_import',
@@ -640,6 +642,7 @@ final readonly class ExchangeOperations implements DriveExtension
                         throw ExchangeException::stalePreview('write_mode_changed');
                     }
 
+                    $slots = $this->reviewState->admitImportedSuggestions($conn, $lockedJob->documentId, $generation, $preview);
                     $projected = $journal->projected($actor, $generation, $position);
                     if ($projected === null) {
                         throw ExchangeException::unsupportedDocument('collaboration_journal_unavailable');
@@ -706,7 +709,11 @@ final readonly class ExchangeOperations implements DriveExtension
                         previewPayload: $preview,
                     );
                 } else {
-                    $updatedJob = $this->jobs->recordPendingJournalApply($conn, $lockedJob, $applyCommandId);
+                    $commandRowId = $record['id'] ?? null;
+                    if ($slots > 0 && ! is_string($commandRowId)) {
+                        throw ExchangeException::runtimeFailed('journal_command_id_missing');
+                    }
+                    $updatedJob = $this->jobs->recordPendingJournalApply($conn, $lockedJob, $applyCommandId, is_string($commandRowId) ? $commandRowId : null, $slots);
                 }
 
                 return new ApplyExchangeReceiptData(
@@ -761,6 +768,7 @@ final readonly class ExchangeOperations implements DriveExtension
         return $this->database->transaction(function (Connection $conn) use (
             $job, $applyCommandId, $receiptId, $preview, $nodeId, $settledGen, $settledPos, $docMeta,
         ): ExchangeJobData {
+            $this->container->make(CollaborativeState::class)->lock($nodeId);
             $locked = $this->jobs->lockForApply($conn, $job->id, $job->documentId);
             if ($locked->state === ExchangeJobState::Applied) {
                 return $locked;

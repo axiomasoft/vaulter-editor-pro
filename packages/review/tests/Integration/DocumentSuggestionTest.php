@@ -14,6 +14,7 @@ use Vaulter\Drive\Exceptions\DriveArchivedException;
 use Vaulter\Drive\Exceptions\Nodes\NodeNotFoundException;
 use Vaulter\Drive\Testing\Access\AccessTestHelpers;
 use Vaulter\Drive\Vaulter;
+use Vaulter\EditorPro\Review\Contracts\PendingSuggestionReservations;
 use Vaulter\EditorPro\Review\Data\TextSuggestionInput;
 use Vaulter\EditorPro\Review\Exceptions\SuggestionConflictException;
 use Vaulter\EditorPro\Review\Exceptions\UnsupportedSuggestionException;
@@ -309,6 +310,24 @@ it('refuses a new suggestion once the document holds the most open ones, but sti
 
     DB::table($table)->where('id', $copies[0]['id'])->update(['state' => 'rejected', 'decided_at' => now()]);
     expect($this->first->save($this->node->id, reviewTextEdit(7, 11, 'blue', 'gold'))->state)->toBe('open');
+});
+
+it('keeps reserved slots available to pending imports when saving a new draft', function (): void {
+    $reservations = new class implements PendingSuggestionReservations
+    {
+        public int $slots = SuggestionOperations::MAX_OPEN_PER_DOCUMENT;
+
+        public function count(string $documentId, int $generation): int
+        {
+            return $this->slots;
+        }
+    };
+    app()->instance(PendingSuggestionReservations::class, $reservations);
+    $review = app(ReviewManager::class)->suggestions($this->owner);
+    $draft = reviewTextEdit(3, 6, 'red', 'rose');
+    expect(fn () => $review->save($this->node->id, $draft))->toThrow(UnsupportedSuggestionException::class);
+    $reservations->slots--;
+    expect($review->save($this->node->id, $draft)->state)->toBe('open');
 });
 
 it('pages the visible suggestion history and filters open changes before limiting the page', function (): void {
