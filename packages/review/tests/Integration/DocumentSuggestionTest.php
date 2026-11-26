@@ -143,27 +143,17 @@ it('uses one receipt for a complete group and rolls back text if recording the r
         ->toThrow(SuggestionConflictException::class);
 
     $db = app(VaulterDatabase::class)->connection();
-    $driver = $db->getDriverName();
-    if ($driver === 'pgsql') {
-        $db->unprepared("CREATE FUNCTION abort_review_write() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'receipt write failed'; END $$");
-        $db->unprepared('CREATE TRIGGER abort_review_write BEFORE UPDATE ON v_document_suggestions FOR EACH ROW EXECUTE FUNCTION abort_review_write()');
-    } elseif ($driver === 'sqlite') {
-        $db->unprepared("CREATE TRIGGER abort_review_write BEFORE UPDATE ON v_document_suggestions BEGIN SELECT RAISE(ABORT, 'receipt write failed'); END");
-    } else {
-        $db->unprepared("CREATE TRIGGER abort_review_write BEFORE UPDATE ON v_document_suggestions FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'receipt write failed'");
-    }
-    try {
-        expect(fn () => $this->first->acceptGroup($this->node->id, $group, 0, $versions))->toThrow(QueryException::class, 'receipt write failed');
-        expect(acceptedReviewText($this->docs, $this->node))->toBe('🦊 red blue')
-            ->and(array_column($this->first->list($this->node->id), 'state'))->toBe(['open', 'open']);
-    } finally {
-        if ($driver === 'pgsql') {
-            $db->unprepared('DROP TRIGGER abort_review_write ON v_document_suggestions');
-            $db->unprepared('DROP FUNCTION abort_review_write()');
-        } else {
-            $db->unprepared('DROP TRIGGER abort_review_write');
+    $failReceipt = true;
+    $db->beforeExecuting(static function (string $sql) use ($db, &$failReceipt): void {
+        if ($failReceipt && str_starts_with(strtolower($sql), 'update ') && str_contains($sql, 'document_suggestions')) {
+            $failReceipt = false;
+            // Cause an actual database error at the receipt write without DDL or trigger privileges.
+            $db->table('missing_review_receipt_fixture')->insert(['id' => 1]);
         }
-    }
+    });
+    expect(fn () => $this->first->acceptGroup($this->node->id, $group, 0, $versions))->toThrow(QueryException::class, 'missing_review_receipt_fixture');
+    expect(acceptedReviewText($this->docs, $this->node))->toBe('🦊 red blue')
+        ->and(array_column($this->first->list($this->node->id), 'state'))->toBe(['open', 'open']);
     $resolved = $this->first->acceptGroup($this->node->id, $group, 0, $versions);
     expect(array_unique(array_column($resolved, 'receiptId')))->toHaveCount(1)
         ->and($resolved[0]->receiptId)->not->toBeNull()
