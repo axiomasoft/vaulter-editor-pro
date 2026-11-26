@@ -922,6 +922,10 @@ it('applies imports through the journal and recovers receipts after the head adv
             ->assertJsonPath('data.replayed', false);
         expect(app(ExchangeJobRepository::class)->findById($jobId)?->applyCommandId)->toBe($commandId)
             ->and($reservations->count((string) $head->documentId, 0))->toBe(5);
+        $this->withHeaders(['Idempotency-Key' => 'journal-pending-replay'])
+            ->postJson($applyUrl, ['apply_command_id' => $commandId, 'expected_position' => 1])
+            ->assertAccepted()->assertJsonPath('data.replayed', true);
+        expect($reservations->count((string) $head->documentId, 0))->toBe(5);
         DB::table($tables->table('document_exchange_jobs'))->where('id', $jobId)->update(['updated_at' => now()->subDays(8)]);
         expect(app(ExchangeJobRepository::class)->purgeExpired(7 * 86400))->toBe(0);
         app(UpdateLog::class)->appendFenced($docNode->id, $update('seed', 1), $roomOwner, 1, 0, static fn () => null);
