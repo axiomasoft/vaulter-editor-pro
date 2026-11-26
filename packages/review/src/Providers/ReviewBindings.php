@@ -8,6 +8,7 @@ use Illuminate\Contracts\Config\Repository;
 use Illuminate\Contracts\Container\Container;
 use Illuminate\Contracts\Foundation\Application;
 use Packman\Attributes\Internal;
+use Packman\Config\Exceptions\InvalidConfiguration;
 use Packman\Config\Laravel\ConfigSectionRegistration;
 use Vaulter\EditorPro\Review\Anchors\SelectorValidator;
 use Vaulter\EditorPro\Review\Anchors\SnapshotAnchorResolver;
@@ -38,10 +39,11 @@ final class ReviewBindings implements ModuleBindings
                 ? $container->make(Repository::class)->get('vaulter-editor-pro-review', [])
                 : [];
 
-            /** @var array<string, mixed> $config */
-            $config = is_array($raw) ? $raw : [];
+            if (! is_array($raw)) {
+                throw InvalidConfiguration::forMessage('vaulter-editor-pro-review: must be an array.');
+            }
 
-            return ReviewOptions::fromArray($config);
+            return ReviewOptions::fromArray($raw);
         });
 
         $validate = static function () use ($app): void {

@@ -70,3 +70,11 @@ it('fails the container resolution for a misconfigured host', function (): void 
     expect(fn () => app(ReviewOptions::class))
         ->toThrow(InvalidConfiguration::class, 'vaulter-editor-pro-review.anchors.max_selector_depth');
 });
+
+it('distinguishes explicit nulls and invalid root values from omitted defaults', function (): void {
+    expect(fn () => ReviewOptions::fromArray(['pins' => null]))->toThrow(InvalidConfiguration::class, 'vaulter-editor-pro-review.pins:')
+        ->and(fn () => ReviewOptions::fromArray(['pins' => ['enforce_retention' => null]]))->toThrow(InvalidConfiguration::class, 'enforce_retention:')
+        ->and(fn () => ReviewOptions::fromArray(['anchors' => ['max_selector_depth' => null]]))->toThrow(InvalidConfiguration::class, 'max_selector_depth:');
+    config()->set('vaulter-editor-pro-review', false);
+    expect(fn () => app(ReviewOptions::class))->toThrow(InvalidConfiguration::class, 'vaulter-editor-pro-review: must be an array.');
+});

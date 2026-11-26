@@ -51,7 +51,7 @@ final readonly class ReviewOptions implements OptionsFactory
         $anchors = self::section($config, 'anchors', ['max_selector_bytes', 'max_selector_depth', 'max_quote_bytes'], $path, $validator);
 
         $defaults = new self;
-        $enforceRetention = $pins['enforce_retention'] ?? $defaults->enforceRetention;
+        $enforceRetention = array_key_exists('enforce_retention', $pins) ? $pins['enforce_retention'] : $defaults->enforceRetention;
         if (! is_bool($enforceRetention)) {
             $validator->add($path.'.pins.enforce_retention', 'must be a boolean.');
             $enforceRetention = $defaults->enforceRetention;
@@ -76,7 +76,7 @@ final readonly class ReviewOptions implements OptionsFactory
      */
     private static function section(array $config, string $name, array $keys, string $path, ConfigurationValidator $validator): array
     {
-        $section = $config[$name] ?? [];
+        $section = array_key_exists($name, $config) ? $config[$name] : [];
         if (! is_array($section)) {
             $validator->add($path.'.'.$name, 'must be an array.');
 
@@ -95,7 +95,7 @@ final readonly class ReviewOptions implements OptionsFactory
      */
     private static function atLeast(array $section, string $key, int $minimum, int $default, string $sectionPath, ConfigurationValidator $validator): int
     {
-        $value = $section[$key] ?? $default;
+        $value = array_key_exists($key, $section) ? $section[$key] : $default;
         if (! is_int($value) || $value < $minimum) {
             $validator->add($sectionPath.'.'.$key, sprintf('must be an integer of at least %d.', $minimum));
 

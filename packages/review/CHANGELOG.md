@@ -20,10 +20,9 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the package
   `422 unsupported_suggestion` with reason `open_suggestion_limit`; amending a draft and
   deciding suggestions still work. Pending journal imports reserve capacity through the optional
   `PendingSuggestionReservations` contract. Mutation queries exclude unrelated decided suggestions.
-- The `vaulter-editor-pro-review` config section is validated strictly: an unknown key, a
-  non-boolean `pins.enforce_retention` or an anchor limit below its minimum (selector 256 bytes,
-  depth 2, quote 64 bytes) is reported by `packman:config:validate` and `vaulter:doctor`
-  instead of falling back to the default.
+- The `vaulter-editor-pro-review` config section rejects scalar roots, explicit nulls, unknown keys, a
+  non-boolean `pins.enforce_retention` and anchor limits below their minima (selector 256 bytes,
+  depth 2, quote 64 bytes). Both `packman:config:validate` and `vaulter:doctor` report these errors.
 - Every review problem code has an English and a Russian title and detail.
 - Suggestion overlap detection indexes list and table containers once per document; large
   documents with many suggestions are checked in milliseconds instead of seconds.
