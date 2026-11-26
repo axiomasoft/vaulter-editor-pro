@@ -49,6 +49,8 @@ const {
   loading,
   error,
   openSuggestions,
+  historyCursor,
+  loadMoreHistory,
   staleGenerationSuggestions,
   conflictedSuggestions,
   proposalFilter,
@@ -71,6 +73,7 @@ const {
   rejectInRange,
   setProjection,
 } = useTrackedChanges(props.nodeId, {
+  pageHistory: true,
   ...props.clientOptions,
   editor: props.editor,
   capabilities: props.capabilities ?? props.clientOptions?.capabilities,
@@ -415,6 +418,10 @@ defineExpose({
         </div>
       </li>
     </ul>
+
+    <button v-if="historyCursor" type="button" data-action="more-history" :disabled="loading" @click="loadMoreHistory().catch(() => undefined)">
+      Load more history
+    </button>
 
     <section
       v-if="staleGenerationSuggestions.length > 0"

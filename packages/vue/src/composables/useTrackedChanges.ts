@@ -26,6 +26,7 @@ export interface UseTrackedChangesOptions {
   initialProjection?: TrackedProjection
   overlay?: OverlayEventsSource | null
   includeStaleGenerations?: boolean
+  pageHistory?: boolean
 }
 
 export interface UseTrackedChangesReturn {
@@ -34,6 +35,8 @@ export interface UseTrackedChangesReturn {
   projection: Ref<TrackedProjection>
   loading: Ref<boolean>
   error: Ref<unknown>
+  historyCursor: Ref<string | null>
+  loadMoreHistory: () => Promise<void>
   openSuggestions: ComputedRef<DocumentSuggestion[]>
   activeOpenSuggestions: ComputedRef<DocumentSuggestion[]>
   staleGenerationSuggestions: ComputedRef<DocumentSuggestion[]>
@@ -108,6 +111,9 @@ export function useTrackedChanges(
   const loading = ref(false)
   const error = ref<unknown>(null)
 
+  const historyCursor = ref<string | null>(null)
+  let listGeneration = 0
+  let loadingMore = false
   let listedProposalId: string | null | undefined
   let listedIncludeStale = options.includeStaleGenerations ?? false
   const proposalFilter = ref<string | null>(null)
@@ -198,25 +204,80 @@ export function useTrackedChanges(
     }
   }
 
+  function mergeSuggestions(current: DocumentSuggestion[], incoming: DocumentSuggestion[]) {
+    const byId = new Map(current.map(item => [item.id, item]))
+    for (const item of incoming) {
+      if ((byId.get(item.id)?.version ?? -1) <= item.version) byId.set(item.id, item)
+    }
+    return [...byId.values()]
+  }
+
   async function list(proposalId?: string | null, includeStaleGenerations?: boolean): Promise<DocumentSuggestion[]> {
+    const generation = ++listGeneration
+    loading.value = true
+    error.value = null
+    const staleFlag = includeStaleGenerations ?? listedIncludeStale
+    const query = {
+      ...(proposalId ? { proposal_id: proposalId } : {}),
+      ...(staleFlag ? { include_stale_generations: true } : {}),
+    }
+    try {
+      const api = requireSuggestionsApi()
+      let loaded: DocumentSuggestion[]
+      let next: string | null = null
+      if (options.pageHistory && api.page) {
+        const first = await api.page(nodeId, { ...query, per_page: 50 })
+        loaded = first.data
+        next = first.meta.next_cursor
+        if (next !== null) {
+          // Group decisions need every open member, including those beyond the first history page.
+          let cursor: string | null = null
+          do {
+            const active = await api.page(nodeId, { ...query, per_page: 200, open_only: true, cursor })
+            loaded = mergeSuggestions(loaded, active.data)
+            cursor = active.meta.next_cursor
+          } while (cursor !== null && generation === listGeneration)
+        }
+      } else {
+        loaded = await api.list(nodeId, query)
+      }
+      if (generation === listGeneration) {
+        suggestions.value = loaded
+        historyCursor.value = next
+        listedProposalId = proposalId
+        listedIncludeStale = staleFlag
+      }
+      return loaded
+    } catch (caught) {
+      if (generation === listGeneration) error.value = caught
+      throw caught
+    } finally {
+      if (generation === listGeneration) loading.value = false
+    }
+  }
+
+  async function loadMoreHistory(): Promise<void> {
+    const api = requireSuggestionsApi()
+    const cursor = historyCursor.value
+    if (!api.page || !cursor || loading.value || loadingMore) return
+    const generation = listGeneration
+    loadingMore = true
     loading.value = true
     error.value = null
     try {
-      const api = requireSuggestionsApi()
-      const staleFlag = includeStaleGenerations ?? listedIncludeStale
-      const loaded = await api.list(nodeId, {
-        ...(proposalId ? { proposal_id: proposalId } : {}),
-        ...(staleFlag ? { include_stale_generations: true } : {}),
+      const page = await api.page(nodeId, {
+        per_page: 50, cursor, proposal_id: listedProposalId, include_stale_generations: listedIncludeStale,
       })
-      suggestions.value = loaded
-      listedProposalId = proposalId
-      listedIncludeStale = staleFlag
-      return loaded
+      if (generation === listGeneration) {
+        suggestions.value = mergeSuggestions(suggestions.value, page.data)
+        historyCursor.value = page.meta.next_cursor
+      }
     } catch (caught) {
-      error.value = caught
+      if (generation === listGeneration) error.value = caught
       throw caught
     } finally {
-      loading.value = false
+      loadingMore = false
+      if (generation === listGeneration) loading.value = false
     }
   }
 
@@ -469,6 +530,8 @@ export function useTrackedChanges(
     projection,
     loading,
     error,
+    historyCursor,
+    loadMoreHistory,
     openSuggestions,
     activeOpenSuggestions,
     staleGenerationSuggestions,

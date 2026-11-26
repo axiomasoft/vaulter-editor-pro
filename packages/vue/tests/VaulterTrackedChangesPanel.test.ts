@@ -75,6 +75,27 @@ function makeMockClient(initial: DocumentSuggestion[], capabilities: SuggestionC
 }
 
 describe('VaulterTrackedChangesPanel', () => {
+  it('loads history on demand and keeps an open group across pages actionable', async () => {
+    const open = makeSuggestion({ id: 'open' })
+    const other = makeSuggestion({ id: 'other' })
+    const closed = makeSuggestion({ id: 'closed', state: 'accepted' })
+    const client = makeMockClient([])
+    const page = vi.fn().mockResolvedValueOnce({ data: [open], meta: { next_cursor: 'first' } })
+      .mockResolvedValueOnce({ data: [open, other], meta: { next_cursor: null } })
+      .mockResolvedValueOnce({ data: [other, closed], meta: { next_cursor: null } })
+    client.suggestions!.page = page
+    const wrapper = mount(VaulterTrackedChangesPanel, { props: { nodeId: 'doc_1', clientOptions: { client } } })
+    await flushPromises()
+    expect(client.suggestions!.list).not.toHaveBeenCalled()
+    expect(wrapper.findAll('[data-suggestion-id]')).toHaveLength(2)
+    await wrapper.find('[data-group-id="g_1"] .vaulter-tracked-changes__group-accept').trigger('click')
+    expect(client.suggestions!.acceptGroup).toHaveBeenCalledWith('doc_1', 'g_1', expect.objectContaining({ expected_versions: { open: 1, other: 1 } }), undefined)
+    await wrapper.find('[data-action="more-history"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.findAll('[data-suggestion-id]')).toHaveLength(3)
+    expect(wrapper.find('[data-action="more-history"]').exists()).toBe(false)
+  })
+
   it('hides unsupported node_type_change UI by capability and enforces conflict rules in actions', async () => {
     const s1 = makeSuggestion({ id: 's1', group_id: 'g1', author_subject: 'user:alice', kind: 'block_split' })
     const s2 = makeSuggestion({

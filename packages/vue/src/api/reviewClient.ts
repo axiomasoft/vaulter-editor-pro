@@ -56,7 +56,7 @@ export interface AddAnchoredCommentPayload {
 
 export interface ReviewClient {
   pins: {
-    page?(nodeId: string, query: { per_page: number; cursor?: string | null; include_expired?: boolean }): Promise<CursorPage<RevisionPin>>
+    page?(nodeId: string, query?: { per_page?: number; cursor?: string | null; include_expired?: boolean }): Promise<CursorPage<RevisionPin>>
     list(nodeId: string, includeExpired?: boolean): Promise<RevisionPin[]>
     pin(nodeId: string, revisionId: string, input?: { pin_reason?: PinReason; expires_at?: string | null }): Promise<RevisionPin>
     unpin(nodeId: string, revisionId: string, releaseRetention?: boolean): Promise<void>
@@ -85,7 +85,7 @@ export interface ReviewClient {
     apply(nodeId: string, jobId: string, input: ApplyExchangeImportPayload, idempotencyKey?: string): Promise<ApplyExchangeReceipt>
   }
   suggestions?: {
-    page?(nodeId: string, query: { per_page: number; cursor?: string | null; proposal_id?: string | null; include_stale_generations?: boolean; open_only?: boolean }): Promise<CursorPage<DocumentSuggestion>>
+    page?(nodeId: string, query?: { per_page?: number; cursor?: string | null; proposal_id?: string | null; include_stale_generations?: boolean; open_only?: boolean }): Promise<CursorPage<DocumentSuggestion>>
     capabilities(nodeId?: string): Promise<SuggestionCapabilities>
     list(nodeId: string, query?: { proposal_id?: string | null; include_stale_generations?: boolean }): Promise<DocumentSuggestion[]>
     save(nodeId: string, input: SaveSuggestionPayload, idempotencyKey?: string): Promise<DocumentSuggestion>
@@ -112,7 +112,7 @@ function buildQueryString(query?: Record<string, string | number | boolean | nul
   return s ? `?${s}` : ''
 }
 
-export function createReviewClient(options: ReviewClientOptions = {}): ReviewClient {
+export function createReviewClient(options: ReviewClientOptions = {}) {
   const baseUrl = (options.baseUrl ?? '/api/vaulter/v1').replace(/\/+$/, '')
   const fetchImpl = options.fetch ?? globalThis.fetch.bind(globalThis)
 
@@ -174,7 +174,7 @@ export function createReviewClient(options: ReviewClientOptions = {}): ReviewCli
 
   return {
     pins: {
-      page: (nodeId, query) => request<CursorPage<RevisionPin>>('GET', `/review/documents/${nodeId}/pins`, { query }),
+      page: (nodeId, query) => request<CursorPage<RevisionPin>>('GET', `/review/documents/${nodeId}/pins`, { query: { ...query, per_page: query?.per_page ?? 50 } }),
       list: async (nodeId, includeExpired) =>
         (await request<{ data: RevisionPin[] }>('GET', `/review/documents/${nodeId}/pins`, {
           query: includeExpired ? { include_expired: true } : undefined,
@@ -285,7 +285,7 @@ export function createReviewClient(options: ReviewClientOptions = {}): ReviewCli
         ).data,
     },
     suggestions: {
-      page: (nodeId, query) => request<CursorPage<DocumentSuggestion>>('GET', `/review/documents/${nodeId}/suggestions`, { query }),
+      page: (nodeId, query) => request<CursorPage<DocumentSuggestion>>('GET', `/review/documents/${nodeId}/suggestions`, { query: { ...query, per_page: query?.per_page ?? 50 } }),
       capabilities: async (nodeId) =>
         (
           await request<{ data: SuggestionCapabilities }>(
@@ -352,7 +352,7 @@ export function createReviewClient(options: ReviewClientOptions = {}): ReviewCli
           })
         ).data,
     },
-  }
+  } satisfies ReviewClient
 }
 
 export const vaulterReviewClientKey: InjectionKey<ReviewClient> = Symbol('vaulter.review.client')
