@@ -13,6 +13,7 @@ use Vaulter\Collaboration\RoomOwnership;
 use Vaulter\Configuration\DatabaseOptions;
 use Vaulter\Database\VaulterDatabase;
 use Vaulter\Documents\Content\TipTap\BlockIdentity;
+use Vaulter\Documents\Content\TipTap\TipTapContent;
 use Vaulter\Documents\DocumentsManager;
 use Vaulter\Documents\State\CollaborativeState;
 use Vaulter\Drive\Access\Roles\RoleRegistry;
@@ -47,6 +48,25 @@ function journalRichDoc(): array
         ],
     ];
 }
+
+it('accepts the Hub review mark in the rich-text checkpoint projection', function (): void {
+    $content = journalRichDoc();
+    $content['content'][1]['content'][0]['marks'] = [[
+        'type' => 'reviewSuggestion',
+        'attrs' => [
+            'suggestionId' => 'suggestion',
+            'kind' => 'mark_change',
+            'parentId' => null,
+            'groupId' => 'group',
+            'author' => '1',
+            'markName' => 'bold',
+            'markAttrs' => ['expected' => true],
+            'operation' => 'added',
+        ],
+    ]];
+
+    expect(TipTapContent::fromArray($content)->toArray())->toBe($content);
+});
 
 function enableStrictJournalRoom($docNode, string $roomOwner): void
 {

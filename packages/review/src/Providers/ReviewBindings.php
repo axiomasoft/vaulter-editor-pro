@@ -34,6 +34,19 @@ final class ReviewBindings implements ModuleBindings
 {
     public function register(Application $app): void
     {
+        $config = $app->make(Repository::class);
+        $marks = $config->get('vaulter-documents.tiptap.extra_marks', []);
+        $attributes = $config->get('vaulter-documents.tiptap.extra_attributes', []);
+        if (is_array($marks) && array_is_list($marks)) {
+            $config->set('vaulter-documents.tiptap.extra_marks', [...$marks, 'reviewSuggestion']);
+        }
+        if (is_array($attributes) && is_array($allowed = $attributes['reviewSuggestion'] ?? []) && array_is_list($allowed)) {
+            $attributes['reviewSuggestion'] = [
+                ...$allowed, 'suggestionId', 'kind', 'parentId', 'groupId', 'author', 'markName', 'markAttrs', 'operation',
+            ];
+            $config->set('vaulter-documents.tiptap.extra_attributes', $attributes);
+        }
+
         $app->bind(ReviewOptions::class, static function (Container $container): ReviewOptions {
             $raw = $container->bound(Repository::class)
                 ? $container->make(Repository::class)->get('vaulter-editor-pro-review', [])

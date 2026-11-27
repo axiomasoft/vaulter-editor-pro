@@ -36,7 +36,7 @@ and on demand. Siblings (`vaulter`, `vaulter-collaboration`, Packman at the pinn
 checked out by `scripts/ci/checkout-ecosystem.sh` with `secrets.VAULTER_READ_TOKEN`. Jobs:
 
 - **Stop-cranes**: `composer validate` and `scripts/ci/engineering-rails.py` (license
-  denylist: copyleft, `UNLICENSED`, `@tiptap-pro`; banned calls and patterns), with its negative
+  denylist: copyleft, `UNLICENSED`, commercial TipTap and Univer package scopes; banned calls and patterns), with its negative
   self-test.
 - **PHP 8.4/8.5 × PostgreSQL 18.7/19.0**: build the DOCX CLI, migrate,
   `scripts/ci/sql/unindexed-fks.sql`, then `composer test:parallel` on PostgreSQL (one database
