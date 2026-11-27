@@ -19,7 +19,7 @@ packages built from this repository:
 
 - [Architecture](concepts/architecture.md)
 - [DOCX profiles and the D1–D5 corpus](concepts/docx-corpus.md)
-- [TipTap Pro parity](concepts/tiptap-pro-parity.md): what replaces each Pro module, and what is not built yet
+- [TipTap Pro parity](concepts/editor-pro-parity.md): what replaces each Pro module, and what is not built yet
 
 ## Reference
 

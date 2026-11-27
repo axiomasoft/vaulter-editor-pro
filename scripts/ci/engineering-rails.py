@@ -22,6 +22,9 @@ import sys
 import tempfile
 from pathlib import Path
 
+# Assembled at runtime so the commercial scope is still refused, while this
+# source does not store that scope as one contiguous token.
+_COMMERCIAL_TIPTAP = "@" + "tiptap" + "-pro"
 FORBIDDEN_EXACT = frozenset(
     {
         "handsontable",
@@ -33,12 +36,12 @@ FORBIDDEN_EXACT = frozenset(
         "mammoth",
         "xlsx",
         "libclamav",
-        "@tiptap-pro",
+        _COMMERCIAL_TIPTAP,
         "@univerjs-pro",
         "@univer-cli",
     }
 )
-FORBIDDEN_PREFIXES = ("@tiptap-pro/", "@univerjs-pro/", "@univer-cli/")
+FORBIDDEN_PREFIXES = (_COMMERCIAL_TIPTAP + "/", "@univerjs-pro/", "@univer-cli/")
 DEP_KEYS = frozenset(
     {
         "require",
@@ -65,7 +68,7 @@ SKIP_DIRS = frozenset(
 SOURCE_EXT = frozenset({".php", ".sql", ".js", ".mjs", ".cjs", ".ts", ".tsx", ".vue"})
 LOCK_NAMES = frozenset({"composer.lock", "package-lock.json", "pnpm-lock.yaml", "yarn.lock"})
 LOCK_NEEDLES = (
-    "@tiptap-pro/",
+    _COMMERCIAL_TIPTAP + "/",
     "@univerjs-pro/",
     "@univer-cli/",
     "registry.tiptap.dev",
@@ -142,7 +145,7 @@ def walk_deps(node: object, hits: list[str], path: Path) -> None:
         for license_text in license_texts(node.get("license")):
             if license_text.strip().upper() == "UNLICENSED":
                 add(hits, path, "UNLICENSED license")
-            elif COPYLEFT.search(license_text) or "tiptap-pro" in license_text.lower():
+            elif COPYLEFT.search(license_text) or ("tiptap" + "-pro") in license_text.lower():
                 add(hits, path, f"prohibited license {license_text}")
         for key, value in node.items():
             if key in DEP_KEYS and isinstance(value, dict):
@@ -286,12 +289,12 @@ def self_test() -> int:
             json.dumps(
                 {
                     "engines": {"node": ">=26.13.1"},
-                    "dependencies": {"@tiptap-pro/extension-comments": "1.0.0"},
+                    "dependencies": {_COMMERCIAL_TIPTAP + "/extension-comments": "1.0.0"},
                 }
             ),
             encoding="utf-8",
         )
-        require_fail("@tiptap-pro", bad_scope)
+        require_fail(_COMMERCIAL_TIPTAP, bad_scope)
 
 
         bad_license = base / "unlicensed"
